@@ -101,7 +101,7 @@ def test_pipeline_no_video(tmp_path, monkeypatch):
     cfg = config.load()
     cfg["output"]["dir"] = str(tmp_path)
     reps = pipeline.run(cfg, day=date(2026, 10, 21), no_video=True, log=lambda *a: None)
-    assert reps[0]["rounds"][0]["winner"] == "A" and reps[0]["rounds"][0]["buy1"] == "semi-eco"
+    assert reps[0]["rounds"][0]["winner"] == "A" and reps[0]["rounds"][0]["buy1"] == "セミエコ"
     assert (tmp_path / "2026-10-21" / "index.html").exists()
     assert (tmp_path / "2026-10-21" / "9_1_Bind" / "report.json").exists()
 

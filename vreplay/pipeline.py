@@ -30,6 +30,17 @@ def _work_root(cfg: dict) -> Path:
     return base
 
 
+BUY_JA = {"pistol": "ピストル", "eco": "エコ", "half": "ハーフ", "full": "フル",
+          "semi-eco": "セミエコ", "semi-buy": "セミバイ"}
+
+
+def _buy(level: str | None, loadout: float | None) -> str | None:
+    if not level:
+        return None
+    ja = BUY_JA.get(level, level)
+    return f"{ja}（装備 {loadout:.1f}k）" if loadout is not None else ja
+
+
 def base_report(m: vlr.Match, md: vlr.MapData, cfg: dict) -> dict:
     econ = {e.n: e for e in md.econ}
     rounds = []
@@ -38,7 +49,7 @@ def base_report(m: vlr.Match, md: vlr.MapData, cfg: dict) -> dict:
         rounds.append({
             "n": r.n, "winner": m.team1 if r.winner == 1 else m.team2 if r.winner == 2 else None,
             "how": r.how, "how_ja": how_ja(r.how), "side": r.side,
-            "buy1": e.buy1 if e else None, "buy2": e.buy2 if e else None,
+            "buy1": _buy(e.buy1, e.loadout1) if e else None, "buy2": _buy(e.buy2, e.loadout2) if e else None,
             "bank1": e.bank1 if e else None, "bank2": e.bank2 if e else None,
             "kills": [], "ults": [], "ult_ready": [], "assets": {}, "notes": [],
         })
@@ -156,14 +167,18 @@ def run(cfg: dict, day: date | None = None, match_urls: list[str] | None = None,
     if match_urls:
         items = [{"url": u} for u in match_urls]
     else:
-        allm = vlr.list_results(day)
-        items = vlr.filter_results(allm, cfg["filters"])
-        log(f"{day}（JST）の試合 {len(allm)} 件 → 対象 {len(items)} 件")
+        cand = vlr.list_results(day)
+        items = vlr.filter_results(cand, cfg["filters"])
+        log(f"{day}（JST）前後の試合 {len(cand)} 件 → 大会・チーム条件で {len(items)} 件（日付は試合ページで確定）")
+        if not items and cand:
+            log("  条件に合う試合がありません。config の filters.event_include を確認してください。"
+                f" 例：{sorted({c['event'] for c in cand})[:6]}")
 
     token = os.environ.get("NOTION_TOKEN")
     nt = Notion(token) if token and cfg["notion"]["enabled"] else None
     if not nt:
-        log("NOTION_TOKEN が無いので Notion には書かず、HTML レポートだけ作ります")
+        log("NOTION_TOKEN が空なので Notion には書かず、HTML レポートだけ作ります"
+            "（Colab の 🔑 に NOTION_TOKEN を登録し「ノートブックからのアクセス」をオンにしてください）")
 
     _ocr = {}
 
@@ -174,14 +189,20 @@ def run(cfg: dict, day: date | None = None, match_urls: list[str] | None = None,
         return _ocr["r"]
 
     reports = []
+    done_matches = 0
     for it in items:
         try:
             m = vlr.parse_match(it["url"])
         except Exception as e:
             log(f"✗ {it['url']}: {e}")
             continue
-        if it.get("dt_jst"):
-            m.dt_jst = it["dt_jst"]
+        if not match_urls:
+            if not m.dt_jst or m.dt_jst.date() != day:
+                continue                      # 前後の日の試合
+            if done_matches >= (cfg["filters"].get("max_matches") or 10 ** 9):
+                log(f"- {m.title}: max_matches に達したのでスキップ")
+                continue
+        done_matches += 1
         has_vod = any(x.vod_id for x in m.maps)
         if not has_vod and not cfg["filters"].get("include_without_vod", True):
             log(f"- {m.title}: VOD なしのためスキップ")

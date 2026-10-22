@@ -48,9 +48,11 @@ def calibrate(cfg: dict, url: str, order: int, at: float):
     from .video import download_segment, grab
 
     m = vlr.parse_match(url)
-    md = next(x for x in m.maps if x.order == order)
-    if not md.vod_id or md.vod_t is None:
-        raise SystemExit("このマップには開始秒つきの VOD がありません")
+    md = next((x for x in m.maps if x.order == order), None)
+    if md is None or not md.vod_id or md.vod_t is None:
+        lines = [f"  Map {x.order} {x.name}: {x.vod_url or 'VOD なし'}" for x in m.maps]
+        raise SystemExit(f"Map {order} には開始秒つきの YouTube VOD がありません。VLR から読めた VOD:\n"
+                         + "\n".join(lines or ["  （マップが見つかりません）"]))
     out = Path(cfg["output"]["dir"]) / "calibrate"
     out.mkdir(parents=True, exist_ok=True)
     s = int(md.vod_t + at)

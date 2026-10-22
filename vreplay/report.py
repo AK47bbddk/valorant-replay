@@ -85,8 +85,8 @@ def _map_section(rep: dict, base: Path) -> str:
         out.append(
             f'<details><summary>R{r["n"]}　{_e(r.get("winner"))}　<span class="chip">{_e(r.get("how_ja"))}</span> '
             f'<span class="chip">{_e(r.get("side"))}</span></summary><div class="body">'
-            f'<p>{yt}{_e(t1)}: {_e(r.get("buy1"))}（{_e(r.get("bank1"))}k）／ {_e(t2)}: {_e(r.get("buy2"))}'
-            f'（{_e(r.get("bank2"))}k）</p>{ready}'
+            f'<p>{yt}{_e(t1)}: {_e(r.get("buy1"))}・残り {_e(r.get("bank1"))}k ／ {_e(t2)}: {_e(r.get("buy2"))}'
+            f'・残り {_e(r.get("bank2"))}k</p>{ready}'
             f'<div class="grid">{_img(a.get("minimap_start"), base, "ラウンド開始時のミニマップ")}'
             f'{_img(a.get("minimap_gif"), base, gif_cap)}</div>'
             f'{_img(a.get("buy_panels"), base, "購入フェーズ終了時のパネル（武器・アーマー・ULT）")}'

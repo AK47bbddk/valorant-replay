@@ -16,14 +16,9 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
 VLR_TZ = ZoneInfo("America/New_York")  # cookie なしの vlr.gg は米国東部時間で表示する
 JST = ZoneInfo("Asia/Tokyo")
-TZ_ABBR = {
-    "EDT": "America/New_York", "EST": "America/New_York",
-    "PDT": "America/Los_Angeles", "PST": "America/Los_Angeles",
-    "CEST": "Europe/Berlin", "CET": "Europe/Berlin", "BST": "Europe/London",
-    "JST": "Asia/Tokyo", "KST": "Asia/Seoul", "UTC": "UTC", "GMT": "UTC",
-}
 WIN_TYPES = {"elim": "全滅", "defuse": "解除", "boom": "爆破", "time": "時間切れ"}
-BUY_LEVEL = {"": "eco", "$": "semi-eco", "$$": "semi-buy", "$$$": "full"}
+BUY_LEVEL = {"": "eco", "$": "semi-eco", "$$": "semi-buy", "$$$": "full"}       # 旧レイアウト
+BUY_CLASS = {"p": "pistol", "0": "eco", "1": "eco", "2": "half", "3": "full"}       # ecc-sq mod-bX
 
 _session = requests.Session()
 _session.headers.update({"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"})
@@ -58,8 +53,10 @@ class Econ:
     n: int
     buy1: str = ""
     buy2: str = ""
-    bank1: float | None = None     # 千クレジット
+    bank1: float | None = None     # 購入後の残り所持金（千クレジット）
     bank2: float | None = None
+    loadout1: float | None = None  # 装備の総額（千クレジット）
+    loadout2: float | None = None
 
 
 @dataclass
@@ -170,10 +167,13 @@ def classify_region(event: str) -> str | None:
 
 # ---------------------------------------------------------------- 結果一覧
 def list_results(target: date, pages: int = 4) -> list[dict]:
-    """JST の target 日に行われた試合（VLR の results から）。"""
+    """JST の target 日の試合の「候補」。
+
+    results ページの日付・時刻は閲覧者の地域のタイムゾーンで表示される（Colab と日本で違う）ため、
+    ここでは前後 1 日の見出しに入る試合を候補として返し、正確な日時は試合ページの data-utc-ts で確定する。
+    """
     out = []
-    lo = datetime.combine(target, datetime.min.time(), JST)
-    hi = lo + timedelta(days=1)
+    lo, hi = target - timedelta(days=1), target + timedelta(days=1)
     for page in range(1, pages + 1):
         soup = fetch(f"/matches/results/?page={page}")
         oldest = None
@@ -183,27 +183,21 @@ def list_results(target: date, pages: int = 4) -> list[dict]:
                 day = datetime.strptime(dtext, "%a, %B %d, %Y").date()
             except ValueError:
                 continue
-            card = label.find_next_sibling("div", class_="wf-card")
-            if not card:
+            oldest = day if oldest is None or day < oldest else oldest
+            if not (lo <= day <= hi):
                 continue
-            for a in card.select("a.match-item, a.wf-module-item"):
-                tm = _t(a.select_one(".match-item-time"))
-                try:
-                    clock = datetime.strptime(tm, "%I:%M %p").time()
-                except ValueError:
-                    clock = datetime.min.time()
-                dt = datetime.combine(day, clock, VLR_TZ).astimezone(JST)
-                oldest = dt if oldest is None or dt < oldest else oldest
-                if not (lo <= dt < hi):
-                    continue
+            card = label.find_next_sibling("div", class_="wf-card")
+            for a in (card.select("a.match-item") if card else []):
                 teams = [_t(x) for x in a.select(".match-item-vs-team-name .text-of")]
                 ev = a.select_one(".match-item-event")
                 series = _t(ev.select_one(".match-item-event-series")) if ev else ""
                 event = _t(ev).replace(series, "").strip() if ev else ""
+                vod = " ".join(_t(v) for v in a.select(".match-item-vod"))
                 out.append({
                     "url": BASE + a.get("href", ""),
                     "team1": teams[0] if teams else "", "team2": teams[1] if len(teams) > 1 else "",
-                    "event": event, "stage": series, "dt_jst": dt,
+                    "event": event, "stage": series, "label_date": day,
+                    "has_vod": "youtube" in vod.lower(),
                 })
         if oldest is not None and oldest < lo:
             break
@@ -224,7 +218,7 @@ def filter_results(items: list[dict], f: dict) -> list[dict]:
         if teams and not ({it["team1"].lower(), it["team2"].lower()} & teams):
             continue
         out.append(it)
-    return out[: f.get("max_matches") or None]
+    return out
 
 
 # ---------------------------------------------------------------- 試合ページ
@@ -251,7 +245,18 @@ def _parse_rounds(game) -> list[Round]:
 
 def _parse_players(game) -> list[Player]:
     players = []
-    for ti, table in enumerate(game.select("table.wf-table-inset.mod-overview")[:2]):
+    tags = [_t(x) for x in game.select(".vlr-rounds-tag")]
+    rows = game.select("div.ovw-row")  # 2026 年以降のレイアウト
+    for k, row in enumerate(r for r in rows if r.select_one(".ovw-player-name")):
+        name = _t(row.select_one(".ovw-player-name"))
+        tag = _t(row.select_one(".ovw-player-tag"))
+        img = row.select_one(".mod-agents img")
+        agent = (img.get("title") or img.get("alt") or "") if img else ""
+        team = (1 if tag == tags[0] else 2) if len(tags) == 2 and tag in tags else (1 if k < 5 else 2)
+        players.append(Player(name=name, agent=agent, team=team))
+    if players:
+        return players
+    for ti, table in enumerate(game.select("table.wf-table-inset.mod-overview")[:2]):  # 旧レイアウト
         for tr in table.select("tbody tr"):
             name = _t(tr.select_one("td.mod-player .text-of")) or _t(tr.select_one("td.mod-player a div"))
             img = tr.select_one("td.mod-agents img")
@@ -261,17 +266,35 @@ def _parse_players(game) -> list[Player]:
     return players
 
 
+def _fnum(text: str) -> float | None:
+    m = re.search(r"[\d.]+", text or "")
+    try:
+        return float(m.group()) if m else None
+    except ValueError:
+        return None
+
+
 def _parse_econ(game) -> list[Econ]:
-    tables = game.select("table.wf-table-inset.mod-econ")
+    out = []
+    cols = [c for c in game.select("div.vlr-rounds-row-col") if c.select_one(".ecc-c")]  # 2026 年以降
+    for i, col in enumerate(cols):
+        e = Econ(n=i + 1)
+        for t in (1, 2):
+            sq = col.select_one(f".ecc-c.mod-t{t} .ecc-sq")
+            cls = " ".join(sq.get("class", [])) if sq else ""
+            lvl = re.search(r"mod-b(\w)", cls)
+            setattr(e, f"buy{t}", BUY_CLASS.get(lvl.group(1), "") if lvl else "")
+            cc = col.select_one(f".ecc-c.mod-t{t}")
+            setattr(e, f"loadout{t}", _fnum(cc.get("title", "")) if cc else None)
+            setattr(e, f"bank{t}", _fnum(_t(col.select_one(f".ecr-bank.mod-t{t} .ecr-fig"))))
+        out.append(e)
+    if out:
+        return out
+    tables = game.select("table.wf-table-inset.mod-econ")  # 旧レイアウト
     if not tables:
         return []
     t = tables[-1]
-    banks = []
-    for b in t.select("div.bank"):
-        try:
-            banks.append(float(_t(b).replace(",", "")))
-        except ValueError:
-            banks.append(None)
+    banks = [_fnum(_t(b)) for b in t.select("div.bank")]
     sqs = [BUY_LEVEL.get(_t(s).replace(" ", ""), "") for s in t.select("div.rnd-sq")]
     n = min(len(banks), len(sqs)) // 2
     return [Econ(n=i + 1, buy1=sqs[2 * i], buy2=sqs[2 * i + 1], bank1=banks[2 * i], bank2=banks[2 * i + 1])
@@ -279,35 +302,35 @@ def _parse_econ(game) -> list[Econ]:
 
 
 def _parse_vods(soup) -> list[tuple[str, str]]:
-    """[(ラベル, URL)]"""
+    """[(ラベル, URL)]。YouTube のみ。ラベルは "1 Summit" のように「マップ順 マップ名」。"""
+    links = []
+    for v in soup.select(".sm-vod"):  # 2026 年以降のレイアウト
+        a = v.select_one("a.sm-ext[href]")
+        href = a["href"] if a else ""
+        if "youtu" not in href:
+            body = v.select_one("[data-embed-site='youtube'][data-site-id]")
+            if not body:
+                continue
+            href = f"https://youtu.be/{body['data-site-id']}" + (
+                f"?t={body['data-embed-start']}" if body.get("data-embed-start") else "")
+        label = f"{_t(v.select_one('.sm-vod-num'))} {_t(v.select_one('.sm-vod-name'))}".strip()
+        links.append((label, href))
+    if links:
+        return links
     box = soup.select(".match-vods a[href]") or soup.select(".match-streams-bets-container a[href]")
     links = [(_t(a), a["href"]) for a in box if "youtu" in a.get("href", "")]
-    if not links:
-        links = [(_t(a), a["href"]) for a in soup.select("a[href*='youtu']")]
-    return links
+    return [(l, h) for l, h in links if youtube_parts(h)[0]]
 
 
 def _match_date(soup) -> datetime | None:
-    els = soup.select(".match-header-date .moment-tz-convert")
-    if len(els) >= 2:
-        dtext = re.sub(r"(\d+)(st|nd|rd|th)", r"\1", _t(els[0]))
-        ttext = _t(els[1])
-        m = re.match(r"(\d{1,2}:\d{2}\s*[AP]M)\s*([A-Z]{2,4})?", ttext)
-        year = (els[0].get("data-utc-ts") or "")[:4] or str(datetime.now().year)
-        if m:
-            try:
-                tz = ZoneInfo(TZ_ABBR.get(m.group(2) or "", "America/New_York"))
-                d = datetime.strptime(f"{dtext} {year} {m.group(1)}", "%A, %B %d %Y %I:%M %p")
-                return d.replace(tzinfo=tz).astimezone(JST)
-            except ValueError:
-                pass
-    ts = els[0].get("data-utc-ts") if els else None
-    if ts:
-        try:
-            return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=VLR_TZ).astimezone(JST)
-        except ValueError:
-            pass
-    return None
+    """data-utc-ts は名前に反して米国東部時間（表示 "3:00 PM JST" と 02:00 で確認）。"""
+    el = soup.select_one(".match-header-date .moment-tz-convert[data-utc-ts]")
+    if not el:
+        return None
+    try:
+        return datetime.strptime(el["data-utc-ts"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=VLR_TZ).astimezone(JST)
+    except ValueError:
+        return None
 
 
 def parse_match(url: str, soup: BeautifulSoup | None = None, econ_soup: BeautifulSoup | None = None) -> Match:
@@ -333,6 +356,11 @@ def parse_match(url: str, soup: BeautifulSoup | None = None, econ_soup: Beautifu
     if econ_soup is not None:
         econ_games = {g.get("data-game-id"): g for g in econ_soup.select("div.vm-stats-game")}
 
+    nav = {}
+    for it in soup.select(".vm-stats-gamesnav-item[data-game-id]"):
+        k = re.match(r"\s*(\d+)", _t(it))
+        if k:
+            nav[it["data-game-id"]] = int(k.group(1))
     for i, g in enumerate(games):
         header = g.select_one(".vm-stats-game-header")
         mp = header.select_one(".map") if header else None
@@ -340,7 +368,7 @@ def parse_match(url: str, soup: BeautifulSoup | None = None, econ_soup: Beautifu
         name = (name_el.find(string=True, recursive=False) or _t(name_el)) if name_el else ""
         name = re.sub(r"\bPICK\b", "", str(name)).strip()
         scores = [_t(s) for s in header.select(".team .score")] if header else []
-        md = MapData(order=i + 1, name=name, game_id=g["data-game-id"],
+        md = MapData(order=nav.get(g["data-game-id"], i + 1), name=name, game_id=g["data-game-id"],
                      score1=int(scores[0]) if scores and scores[0].isdigit() else 0,
                      score2=int(scores[1]) if len(scores) > 1 and scores[1].isdigit() else 0)
         md.rounds = _parse_rounds(g)
@@ -351,6 +379,7 @@ def parse_match(url: str, soup: BeautifulSoup | None = None, econ_soup: Beautifu
             md.score1 = sum(r.winner == 1 for r in md.rounds)
             md.score2 = sum(r.winner == 2 for r in md.rounds)
         m.maps.append(md)
+    m.maps.sort(key=lambda x: x.order)
 
     # VOD：ラベル先頭の数字（"1Abyss" / "Map 1"）かマップ名で対応づける
     vods = _parse_vods(soup)
@@ -365,10 +394,11 @@ def parse_match(url: str, soup: BeautifulSoup | None = None, econ_soup: Beautifu
         if target is not None and not target.vod_url:
             target.vod_url = href
             target.vod_id, target.vod_t = youtube_parts(href)
-    # 「Full match」だけの場合は全マップ同じ動画（開始秒なし）
+    # マップ別の VOD が無く「Full match」だけのとき：開始秒はマップ 1 にだけ当てはまる
     if vods and not any(x.vod_url for x in m.maps):
         href = vods[0][1]
         for x in m.maps:
             x.vod_url = href
-            x.vod_id, x.vod_t = youtube_parts(href)
+            x.vod_id, t = youtube_parts(href)
+            x.vod_t = t if x.order == 1 else None
     return m

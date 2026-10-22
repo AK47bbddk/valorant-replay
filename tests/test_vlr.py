@@ -1,4 +1,5 @@
 from datetime import date
+from pathlib import Path
 
 from bs4 import BeautifulSoup
 
@@ -91,12 +92,13 @@ def test_parse_match():
 
 def test_list_results(monkeypatch):
     monkeypatch.setattr(vlr, "fetch", lambda url: BeautifulSoup(RESULTS_HTML, "lxml"))
-    # 10/21 13:00 EDT = 10/22 02:00 JST、10/21 21:00 EDT = 10/22 10:00 JST
-    got = vlr.list_results(date(2026, 10, 22), pages=1)
-    assert [g["team1"] for g in got] == ["Team A", "Team C"]
+    # 表示タイムゾーンは閲覧地域で変わるので、前後 1 日の見出しをすべて候補にする
+    got = vlr.list_results(date(2026, 10, 21), pages=1)
+    assert [g["team1"] for g in got] == ["Team A", "Team C", ""]
     assert got[0]["event"] == "VCT 2026: Pacific Stage 2" and got[0]["stage"] == "Playoffs"
+    assert [g["team1"] for g in vlr.list_results(date(2026, 10, 22), pages=1)] == ["Team A", "Team C"]
     flt = vlr.filter_results(got, {"event_include": ["VCT"], "teams": [], "max_matches": 5})
-    assert [g["team1"] for g in flt] == ["Team A"]
+    assert [g["team1"] for g in flt] == ["Team A", ""]
 
 
 def test_helpers():
@@ -106,3 +108,26 @@ def test_helpers():
     assert vlr.classify_tier("VCT 2026: Pacific Stage 2") == "Tier1"
     assert vlr.classify_region("VCT 2026: Pacific Stage 2") == "Pacific"
     assert vlr.classify_region("Challengers 2026: LATAM North ACE") == "LATAM North"
+
+
+FIX = Path(__file__).parent / "fixtures"
+
+
+def test_parse_match_2026_layout():
+    """2026 年の vlr.gg 実ページから切り出した HTML。"""
+    soup = BeautifulSoup((FIX / "vlr_2026_match.html").read_text(encoding="utf-8"), "lxml")
+    econ = BeautifulSoup((FIX / "vlr_2026_econ.html").read_text(encoding="utf-8"), "lxml")
+    m = vlr.parse_match("https://www.vlr.gg/754737/loud-vs-team-vitality-valorant-champions-2026-gf", soup, econ)
+    assert (m.team1, m.team2) == ("LOUD", "Team Vitality")
+    assert m.event == "Valorant Champions 2026" and m.stage == "Playoffs: Grand Final"
+    assert m.dt_jst.isoformat().startswith("2026-10-18T15:00")   # ページ表示 "3:00 PM JST" と一致
+    md = m.maps[0]
+    assert (md.name, md.score1, md.score2) == ("Summit", 13, 11)
+    assert [(r.n, r.winner, r.side, r.how) for r in md.rounds] == [
+        (1, 2, "防衛", "defuse"), (2, 2, "防衛", "elim"), (3, 1, "攻撃", "elim")]
+    assert [(p.name, p.agent, p.team) for p in md.players] == [
+        ("erde", "Sage", 1), ("Darker", "Omen", 1), ("Sayonara", "Fade", 2), ("Derke", "Chamber", 2)]
+    assert [(e.buy1, e.buy2, e.loadout1, e.loadout2, e.bank1, e.bank2) for e in md.econ] == [
+        ("pistol", "pistol", 3.9, 4.0, 0.1, 0.1), ("eco", "half", 3.0, 17.2, 9.8, 2.1),
+        ("full", "full", 22.5, 20.0, 0.6, 13.7)]
+    assert (md.vod_id, md.vod_t) == ("QnBTE-UVpX4", 115)

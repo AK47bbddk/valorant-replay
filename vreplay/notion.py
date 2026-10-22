@@ -198,8 +198,8 @@ def build_blocks(rep: dict, uploads: dict[str, str | None]) -> list[dict]:
         line = []
         if r.get("yt_url"):
             line += [_rt("▶ このラウンドを見る", link=r["yt_url"]), _rt("　")]
-        line.append(_rt(f"{t1}: {r.get('buy1') or '-'}（{r.get('bank1') or '-'}k）／ "
-                        f"{t2}: {r.get('buy2') or '-'}（{r.get('bank2') or '-'}k）"))
+        line.append(_rt(f"{t1}: {r.get('buy1') or '-'}・残り {r.get('bank1') or '-'}k ／ "
+                        f"{t2}: {r.get('buy2') or '-'}・残り {r.get('bank2') or '-'}k"))
         kids.append(_para(*line))
         kids.append(_img(uploads.get(a.get("minimap_start")), "ラウンド開始時のミニマップ"))
         kids.append(_img(uploads.get(a.get("minimap_gif")), f"ラウンド中のミニマップ（{rep.get('gif_speed', 4)}倍速）"))
