@@ -266,3 +266,45 @@ def panel_debug(frame, cfg: dict):
             vis.append(r)
         cols.append(vstack(vis))
     return hstack(cols, gap=12), scores
+
+
+def find_killfeed(ocr: OCR, frames: list, roster: Roster, search=(0.55, 0.04, 1.0, 0.48)):
+    """右上を OCR して「選手名 →（武器アイコン）→ 選手名」の行を探し、キルフィードの ROI を推定する。
+
+    返り値: (roi または None, [(フレーム番号, 行の比率座標)])
+    VLR の選手名に寄せられる名前が左右両方にある行だけを数えるので、他の文字（スポンサー名など）は拾わない。
+    """
+    from statistics import median
+
+    from .config import crop
+    hits = []
+    for fi, f in enumerate(frames):
+        H, W = f.shape[:2]
+        sx0, sy0 = search[0] * W, search[1] * H
+        c = crop(f, list(search))
+        cw = c.shape[1]
+        dets = [d for d in ocr.detect(c) if d[2] > 0.3 and len(norm_name(d[1])) >= 2]
+        for line in _group_lines(dets):
+            if len(line) < 2:
+                continue
+            line.sort(key=lambda d: d[0][0])
+            left, right = line[0], line[-1]
+            if right[0][0] - left[0][2] < 0.04 * cw:
+                continue
+            if not roster.snap(left[1])[1] or not roster.snap(right[1])[1]:
+                continue
+            x0, x1 = min(d[0][0] for d in line), max(d[0][2] for d in line)
+            y0, y1 = min(d[0][1] for d in line), max(d[0][3] for d in line)
+            hits.append((fi, [(x0 + sx0) / W, (y0 + sy0) / H, (x1 + sx0) / W, (y1 + sy0) / H]))
+    if len(hits) < 2:
+        return None, hits
+    right = median(b[2] for _, b in hits)
+    keep = [(i, b) for i, b in hits if abs(b[2] - right) < 0.06]   # キルフィードは右揃え
+    if len(keep) < 2:
+        return None, hits
+    lh = median(b[3] - b[1] for _, b in keep)
+    x0 = min(min(b[0] for _, b in keep) - 0.03, right - 0.2)
+    y0 = min(b[1] for _, b in keep) - lh * 0.8
+    y1 = max(max(b[3] for _, b in keep) + lh, y0 + lh * 2.2 * 6)   # 6 件ぶん程度まで伸ばす
+    roi = [max(0.0, x0), max(0.0, y0), min(1.0, right + 0.01), min(0.5, y1)]
+    return [round(v, 3) for v in roi], keep

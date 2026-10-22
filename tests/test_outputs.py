@@ -118,3 +118,29 @@ def test_pipeline_upsert_only(tmp_path, monkeypatch):
     cfg["output"]["dir"] = str(tmp_path)
     reps = pipeline.run(cfg, day=date(2026, 10, 21), match_urls=[m.url], upsert_only=True, log=lambda *a: None)
     assert calls == ["8"] and reps == []
+
+
+class KillfeedOCR:
+    """右上の探索範囲（幅 864px）で、右揃えのキル行を 2 フレームに 1 本ずつ返す。"""
+
+    def __init__(self):
+        self.n = 0
+
+    def detect(self, img, allow=None, mag=1.5):
+        self.n += 1
+        if self.n % 2:
+            return [([300, 10, 360, 30], "Mr. Sponsor", 0.9)]           # キル行ではない文字
+        y = 60 + 40 * (self.n % 3)
+        return [([520, y, 600, y + 22], "Derke", 0.9), ([760, y, 850, y + 22], "tkzin", 0.9)]
+
+
+def test_find_killfeed():
+    frames = [np.zeros((1080, 1920, 3), np.uint8) for _ in range(8)]
+    roster = X.Roster([("Derke", "VIT"), ("tkzin", "LOUD")])
+    roi, hits = X.find_killfeed(KillfeedOCR(), frames, roster)
+    assert len(hits) == 4
+    x0, y0, x1, y1 = roi
+    # 探索範囲は x 0.55〜1.0（1056〜1920px）、y 0.04〜（43px〜）。行の右端は 1056+850=1906px
+    assert abs(x1 - (1906 / 1920 + 0.01)) < 0.01 and x0 < (1056 + 520) / 1920
+    assert y0 < (43 + 60) / 1080 < y1 <= 0.5
+    assert X.find_killfeed(KillfeedOCR(), frames[:1], roster)[0] is None

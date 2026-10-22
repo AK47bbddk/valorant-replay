@@ -33,7 +33,8 @@ def main():
     c = sub.add_parser("calibrate")
     c.add_argument("--match", required=True)
     c.add_argument("--map", type=int, default=1)
-    c.add_argument("--at", type=float, default=600, help="マップ開始から何秒後のフレームを見るか")
+    c.add_argument("--at", type=float, default=600, help="マップ開始から何秒後から見るか")
+    c.add_argument("--span", type=int, default=150, help="何秒ぶん取得してキルフィードを探すか")
     c.add_argument("--config")
     a = ap.parse_args()
     cfg = config.load(a.config)
@@ -47,15 +48,16 @@ def main():
         from .pipeline import fetch
         fetch(cfg, day=day, match_urls=a.match)
     else:
-        calibrate(cfg, a.match, a.map, a.at)
+        calibrate(cfg, a.match, a.map, a.at, a.span)
 
 
-def calibrate(cfg: dict, url: str, order: int, at: float):
+def calibrate(cfg: dict, url: str, order: int, at: float, span: int = 150):
     import cv2
 
+    from .extract import Roster, find_killfeed, panel_debug
     from .hud import OCR, autocalibrate, draw_rois, read_hud
     from .pipeline import video_cache_dir
-    from .video import download_segment, grab, resolve_cookies
+    from .video import download_segment, iter_frames, resolve_cookies
 
     m = vlr.parse_match(url)
     md = next((x for x in m.maps if x.order == order), None)
@@ -66,23 +68,37 @@ def calibrate(cfg: dict, url: str, order: int, at: float):
     out = Path(cfg["output"]["dir"]) / "calibrate"
     out.mkdir(parents=True, exist_ok=True)
     s = int(md.vod_t + at)
-    vid = download_segment(md.vod_id, s, s + 40, out, cfg["video"]["max_height"], resolve_cookies(cfg),
+    print(f"{m.title} Map {order} {md.name}：マップ開始から {int(at)}〜{int(at) + span} 秒を取得")
+    vid = download_segment(md.vod_id, s, s + span, out, cfg["video"]["max_height"], resolve_cookies(cfg),
                            cache_dirs=[video_cache_dir(cfg)])
-    frames = [f for f in (grab(vid, t) for t in range(2, 38, 3)) if f is not None]
+    frames = [f for _, f in iter_frames(vid, fps=30 / span)]
     ocr = OCR()
-    roi, msg = autocalibrate(ocr, frames, dict(cfg["hud"]["roi"]))
+    roi, msg = autocalibrate(ocr, frames[::2], dict(cfg["hud"]["roi"]))
     print(msg)
-    f = frames[len(frames) // 2]
+
+    roster = Roster([(p.name, m.team1 if p.team == 1 else m.team2) for p in md.players])
+    kf, hits = find_killfeed(ocr, frames, roster)
+    if kf:
+        roi["killfeed"] = kf
+        counts = {}
+        for i, _ in hits:
+            counts[i] = counts.get(i, 0) + 1
+        best = max(counts, key=counts.get)
+        print(f"キルフィード検出：{len(hits)} 行（いちばん多いフレームで {counts[best]} 行）")
+    else:
+        best = len(frames) // 2
+        print("キルフィードが見つかりませんでした。--at を変えるか --span を長くして試してください"
+              f"（{len(hits)} 行のみ検出）")
+    f = frames[best]
     cv2.imwrite(str(out / "rois.jpg"), draw_rois(f, roi))
     cv2.imwrite(str(out / "frame.jpg"), f)
-    print("HUD 読み取り（timer, 左スコア, 右スコア）:", read_hud(ocr, f, roi))
-    from .extract import panel_debug
     pimg, scores = panel_debug(f, cfg)
     cv2.imwrite(str(out / "panels.jpg"), pimg)
+    print("HUD 読み取り（timer, 左スコア, 右スコア）:", read_hud(ocr, f, roi))
     print("ULT スコア（しきい値 %.2f 超えで「溜まっている」、緑枠）:" % cfg["hud"]["ult_ready_threshold"], scores)
     print("確認画像:", out / "rois.jpg", "/", out / "panels.jpg")
-    print("自動検出した ROI（必要なら config.yaml の hud.roi に貼り付け）:")
-    for k in ("timer", "score_left", "score_right"):
+    print("検出した ROI（本番はマップごとに自動検出します。固定したいときは config.yaml の hud.roi に貼り付け）:")
+    for k in ("timer", "score_left", "score_right", "killfeed"):
         print(f"    {k}: [{', '.join(f'{v:.3f}' for v in roi[k])}]")
 
 

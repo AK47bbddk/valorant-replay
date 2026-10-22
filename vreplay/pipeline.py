@@ -90,10 +90,18 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
         W, H, dur = probe(vid)
         roi = dict(hcfg["roi"])
         msg = "設定値の ROI を使用"
+        roster = X.Roster([(p.name, m.team1 if p.team == 1 else m.team2) for p in md.players])
         if hcfg.get("auto_calibrate"):
-            pts = np.linspace(min(90, dur * 0.1), max(dur - 90, dur * 0.9), 12)
+            pts = np.linspace(min(90, dur * 0.1), max(dur - 90, dur * 0.9), 36)
             frames = [f for f in (grab(vid, float(t)) for t in pts) if f is not None]
-            roi, msg = autocalibrate(ocr, frames, roi)
+            roi, msg = autocalibrate(ocr, frames[::3], roi)
+            if md.players:
+                kf, hits = X.find_killfeed(ocr, frames, roster)
+                if kf:
+                    roi["killfeed"] = kf
+                    msg += f"／キルフィード自動検出（{len(hits)} 行）"
+                else:
+                    msg += "／キルフィードは設定値を使用"
         log(f"  {msg}")
 
         fps = vcfg["fps"]
@@ -109,7 +117,6 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
         det, stats = segment(samples, hcfg["round_timer_sec"], hcfg["buy_phase_max_sec"])
         team1_left, agree = orientation(det, {r.n: r.winner for r in md.rounds})
         team_left, team_right = (m.team1, m.team2) if team1_left else (m.team2, m.team1)
-        roster = X.Roster([(p.name, m.team1 if p.team == 1 else m.team2) for p in md.players])
         by_n = {r["n"]: r for r in rep["rounds"]}
         out_dir.mkdir(parents=True, exist_ok=True)
 
