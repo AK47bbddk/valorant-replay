@@ -76,7 +76,11 @@ def calibrate(cfg: dict, url: str, order: int, at: float):
     cv2.imwrite(str(out / "rois.jpg"), draw_rois(f, roi))
     cv2.imwrite(str(out / "frame.jpg"), f)
     print("HUD 読み取り（timer, 左スコア, 右スコア）:", read_hud(ocr, f, roi))
-    print("確認画像:", out / "rois.jpg")
+    from .extract import panel_debug
+    pimg, scores = panel_debug(f, cfg)
+    cv2.imwrite(str(out / "panels.jpg"), pimg)
+    print("ULT スコア（しきい値 %.2f 超えで「溜まっている」、緑枠）:" % cfg["hud"]["ult_ready_threshold"], scores)
+    print("確認画像:", out / "rois.jpg", "/", out / "panels.jpg")
     print("自動検出した ROI（必要なら config.yaml の hud.roi に貼り付け）:")
     for k in ("timer", "score_left", "score_right"):
         print(f"    {k}: [{', '.join(f'{v:.3f}' for v in roi[k])}]")

@@ -142,11 +142,11 @@ def draw_rois(frame, roi: dict):
 
 
 def ult_ready_score(img) -> float:
-    """ULT アイコン領域の「明るく色の濃い画素」の割合。溜まっていると光る。"""
+    """ULT アイコン領域の白画素の割合。VCT 放送では ULT が溜まるとアイコンが白く塗られた丸になる。"""
     if img.size == 0:
         return 0.0
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    return float(np.mean((hsv[..., 2] > 170) & (hsv[..., 1] > 70)))
+    return float(np.mean((hsv[..., 2] > 190) & (hsv[..., 1] < 60)))
 
 
 def brightness(img) -> float:

@@ -242,3 +242,27 @@ def buy_image(store: FrameStore, r: DetRound, out_dir: Path) -> Path | None:
     p = out_dir / f"r{r.n:02d}_buy.jpg"
     cv2.imwrite(str(p), img, [cv2.IMWRITE_JPEG_QUALITY, 90])
     return p
+
+
+def panel_debug(frame, cfg: dict):
+    """プレイヤーパネルの行分割と ULT 判定枠を描いた画像と、各行の ULT スコア。calibrate 用。"""
+    from .config import crop
+    from .hud import ult_ready_score
+    hud = cfg["hud"]
+    n, box = hud["players_per_panel"], hud["ult_in_row"]
+    cols, scores = [], {}
+    for side, key in (("L", "panel_left"), ("R", "panel_right")):
+        vis = []
+        for k, row in enumerate(_rows(crop(frame, hud["roi"][key]), n)):
+            u = _ult_box(row, box, side == "R")
+            scores[f"{side}{k + 1}"] = round(ult_ready_score(u), 3)
+            r = row.copy()
+            x0, y0, x1, y1 = box
+            if side == "R":
+                x0, x1 = 1 - x1, 1 - x0
+            h, w = r.shape[:2]
+            ok = scores[f"{side}{k + 1}"] > hud["ult_ready_threshold"]
+            cv2.rectangle(r, (int(x0 * w), int(y0 * h)), (int(x1 * w), int(y1 * h)), (0, 255, 0) if ok else (0, 0, 255), 2)
+            vis.append(r)
+        cols.append(vstack(vis))
+    return hstack(cols, gap=12), scores
