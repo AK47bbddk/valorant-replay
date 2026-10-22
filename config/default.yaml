@@ -1,0 +1,53 @@
+# 既定設定。上書きしたい項目だけを Drive の config.yaml に書けばマージされる。
+
+timezone: Asia/Tokyo
+
+filters:
+  # 大会名に含まれる語（大文字小文字は無視）。空なら全大会。
+  event_include: ["VCT", "Masters", "Champions"]
+  event_exclude: []
+  # 空でなければ、このどれかのチームが出ている試合だけ
+  teams: []
+  # 1回の実行で処理する最大試合数（動画解析の重さ対策）
+  max_matches: 8
+  # VOD が無い試合も VLR データだけで Notion に書くか
+  include_without_vod: true
+
+video:
+  max_height: 1080
+  fps: 2                 # 解析に使うフレームレート
+  per_round_sec: 140     # 次マップの開始秒が分からないときの見積もり
+  tail_buffer_sec: 900
+  cookies: ""            # YouTube に弾かれるとき用の cookies.txt（Drive のパス）
+  keep_video: false
+
+hud:
+  auto_calibrate: true   # タイマー／スコアの位置を OCR で自動検出
+  # 画面に対する比率座標 [x0, y0, x1, y1]。放送レイアウトが違えば calibrate で調整する
+  roi:
+    top_band:    [0.30, 0.00, 0.70, 0.11]
+    timer:       [0.470, 0.015, 0.530, 0.070]
+    score_left:  [0.415, 0.015, 0.462, 0.075]
+    score_right: [0.538, 0.015, 0.585, 0.075]
+    minimap:     [0.000, 0.000, 0.225, 0.400]
+    killfeed:    [0.735, 0.075, 0.998, 0.370]
+    panel_left:  [0.000, 0.470, 0.175, 0.975]
+    panel_right: [0.825, 0.470, 1.000, 0.975]
+  players_per_panel: 5
+  # プレイヤー行の中での ULT アイコンの位置（行に対する比率）。右パネルは左右反転して使う
+  ult_in_row: [0.72, 0.10, 0.97, 0.90]
+  ult_ready_threshold: 0.18
+  buy_phase_max_sec: 45
+  round_timer_sec: 100
+
+output:
+  dir: /content/drive/MyDrive/valorant-replay
+  gif_width: 320
+  gif_speed: 4
+  gif_max_frames: 260
+  html_report: true
+
+notion:
+  enabled: true
+  match_data_source: 34cd54a7-c90b-80fd-9f31-000b2682704c
+  map_data_source: 34cd54a7-c90b-8180-a2df-000b5f0d3378
