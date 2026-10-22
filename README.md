@@ -78,7 +78,16 @@ os.environ['VREPLAY_CONFIG'] = '/content/drive/MyDrive/valorant-replay/config.ya
 | `run --match <VLRのURL>` | 1 試合だけ |
 | `run --no-video` | VLR のデータだけ（GPU 不要・数十秒） |
 | `run --force` | 作成済みのマップページも作り直す |
+| `run --upsert-only` | Notion の試合・マップ行だけ更新（本文・動画解析なし） |
 | `calibrate --match <URL> --map 1 --at 600` | HUD の ROI を描いた確認画像を出す |
+
+## 試合リストの自動更新（GitHub Actions）
+
+`.github/workflows/daily-notion.yml` が毎朝 5:23（JST）に前日の試合を VLR から取り、Notion の「大会ログくん」「マップ詳細」の**行だけ**を更新します（GPU 不要、本文は書かない）。
+朝 Colab を実行すると、その行のマップページ本文に動画解析が埋まります。
+
+有効にするには、GitHub のリポジトリ → Settings → Secrets and variables → Actions に `NOTION_TOKEN` を登録してください。
+Actions タブの「daily-notion」→「Run workflow」で日付を指定した手動実行もできます。
 
 ## HUD の位置がずれるとき（最初に 1 回確認推奨）
 

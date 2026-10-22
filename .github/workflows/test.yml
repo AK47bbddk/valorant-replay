@@ -1,0 +1,13 @@
+name: test
+on: [push, pull_request]
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get install -y -qq ffmpeg
+      - run: pip install -q requests beautifulsoup4 lxml pyyaml numpy opencv-python-headless pillow pytest
+      - run: pytest -q

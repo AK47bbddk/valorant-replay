@@ -147,7 +147,8 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
 
 
 def run(cfg: dict, day: date | None = None, match_urls: list[str] | None = None, no_video: bool = False,
-        force: bool = False, log=print) -> list[dict]:
+        force: bool = False, upsert_only: bool = False, log=print) -> list[dict]:
+    """upsert_only=True：Notion の試合行・マップ行だけ更新し、本文や動画解析はしない（GitHub Actions 用）。"""
     day = day or (datetime.now(JST).date() - timedelta(days=1))
     out_root = Path(cfg["output"]["dir"]) / day.isoformat()
     out_root.mkdir(parents=True, exist_ok=True)
@@ -192,6 +193,8 @@ def run(cfg: dict, day: date | None = None, match_urls: list[str] | None = None,
                 _, pages = upsert_match(nt, cfg, m)
             except Exception as e:
                 log(f"  Notion upsert 失敗: {e}")
+        if upsert_only:
+            continue
         for md in m.maps:
             map_dir = out_root / f"{m.id}_{md.order}_{_slug(md.name)}"
             page = pages.get(md.order)

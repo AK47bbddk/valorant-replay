@@ -104,3 +104,17 @@ def test_pipeline_no_video(tmp_path, monkeypatch):
     assert reps[0]["rounds"][0]["winner"] == "A" and reps[0]["rounds"][0]["buy1"] == "semi-eco"
     assert (tmp_path / "2026-10-21" / "index.html").exists()
     assert (tmp_path / "2026-10-21" / "9_1_Bind" / "report.json").exists()
+
+
+def test_pipeline_upsert_only(tmp_path, monkeypatch):
+    m = vlr.Match(id="8", url="https://www.vlr.gg/8/x", team1="A", team2="B", event="VCT 2026: Pacific")
+    m.maps = [vlr.MapData(order=1, name="Bind", game_id="1", score1=13, score2=5)]
+    monkeypatch.setattr(vlr, "parse_match", lambda url: m)
+    monkeypatch.setenv("NOTION_TOKEN", "dummy")
+    calls = []
+    monkeypatch.setattr(pipeline, "upsert_match", lambda nt, cfg, mm: calls.append(mm.id) or ("pid", {1: {"id": "p1"}}))
+    monkeypatch.setattr(pipeline, "write_map_page", lambda *a, **k: (_ for _ in ()).throw(AssertionError("本文を書いた")))
+    cfg = config.load()
+    cfg["output"]["dir"] = str(tmp_path)
+    reps = pipeline.run(cfg, day=date(2026, 10, 21), match_urls=[m.url], upsert_only=True, log=lambda *a: None)
+    assert calls == ["8"] and reps == []

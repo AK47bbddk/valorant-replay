@@ -27,6 +27,8 @@ def load(path: str | None = None) -> dict:
         if p and Path(p).exists():
             cfg = _merge(cfg, yaml.safe_load(Path(p).read_text(encoding="utf-8")) or {})
             break
+    if os.environ.get("VREPLAY_OUTPUT_DIR"):
+        cfg["output"]["dir"] = os.environ["VREPLAY_OUTPUT_DIR"]
     return cfg
 
 

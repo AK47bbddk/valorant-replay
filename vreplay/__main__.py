@@ -3,6 +3,7 @@
   python -m vreplay run --date 2026-10-21
   python -m vreplay run --match https://www.vlr.gg/734307/...   # 1 試合だけ
   python -m vreplay run --no-video            # VLR のデータだけ（GPU 不要・速い）
+  python -m vreplay run --upsert-only         # Notion の試合・マップ行だけ（GitHub Actions 用）
   python -m vreplay calibrate --match URL --map 1 --at 600   # ROI 確認画像を出す
 """
 from __future__ import annotations
@@ -22,6 +23,7 @@ def main():
     r.add_argument("--match", nargs="*", help="VLR の試合 URL（指定時は日付より優先）")
     r.add_argument("--no-video", action="store_true")
     r.add_argument("--force", action="store_true", help="作成済みのページも作り直す")
+    r.add_argument("--upsert-only", action="store_true", help="Notion の試合・マップ行だけ更新（本文・動画解析なし）")
     r.add_argument("--config")
     c = sub.add_parser("calibrate")
     c.add_argument("--match", required=True)
@@ -34,7 +36,7 @@ def main():
     if a.cmd == "run":
         day = None if a.date == "yesterday" else date.fromisoformat(a.date)
         from .pipeline import run
-        run(cfg, day=day, match_urls=a.match, no_video=a.no_video, force=a.force)
+        run(cfg, day=day, match_urls=a.match, no_video=a.no_video, force=a.force, upsert_only=a.upsert_only)
     else:
         calibrate(cfg, a.match, a.map, a.at)
 

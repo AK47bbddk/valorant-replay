@@ -1,0 +1,26 @@
+# 毎朝 5:23（JST）に前日の試合を VLR から取り、Notion の「大会ログくん」「マップ詳細」の行だけ更新する。
+# 動画解析（GPU）は Colab 側。リポジトリの Settings → Secrets → Actions に NOTION_TOKEN を登録すること。
+name: daily-notion
+on:
+  schedule:
+    - cron: "23 20 * * *"   # UTC 20:23 = JST 5:23
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "対象日（JST, YYYY-MM-DD）。空なら昨日"
+        required: false
+jobs:
+  upsert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -q requests beautifulsoup4 lxml pyyaml numpy
+      - name: VLR → Notion
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          VREPLAY_OUTPUT_DIR: ${{ runner.temp }}/out
+        run: python -m vreplay run --upsert-only --date "${{ github.event.inputs.date || 'yesterday' }}"
