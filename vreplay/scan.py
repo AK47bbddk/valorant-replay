@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -112,7 +113,9 @@ def scan(path: Path, duration: float, fps: float, roi: dict, geo: dict | None, c
     if n == 1:
         parts = [scan_chunk(jobs[0])]
     else:
-        with ProcessPoolExecutor(max_workers=n) as ex:
+        # 親プロセスはダウンロード等のスレッドを持つので fork ではなく forkserver で子を作る
+        ctx = mp.get_context("forkserver" if "forkserver" in mp.get_all_start_methods() else "spawn")
+        with ProcessPoolExecutor(max_workers=n, mp_context=ctx) as ex:
             parts = list(ex.map(scan_chunk, jobs))
     merged: dict = {}
     seen = set()
