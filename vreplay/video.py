@@ -58,7 +58,7 @@ def find_cached(video_id: str, start: int, end: int, dirs) -> Path | None:
 
 
 def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_height: int = 1080,
-                     cookies: str = "", cache_dirs=()) -> Path:
+                     cookies: str = "", cache_dirs=(), local: bool = False) -> Path:
     hit = find_cached(video_id, start, end, [out_dir, *cache_dirs])
     if hit:
         return hit
@@ -79,6 +79,17 @@ def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_hei
     cmd[3:3] = ["--remote-components", "ejs:github"]   # yt-dlp-ejs が無くても解読スクリプトを取得できるように
     r = subprocess.run(cmd, capture_output=True, text=True, env=env)
     files = find_cached(video_id, start, end, [out_dir])
+    if r.returncode != 0:
+        for p in out_dir.glob(stem + ".*"):     # 途中まで書かれた壊れたファイルをキャッシュと誤認しないよう消す
+            p.unlink(missing_ok=True)
+        files = None
+    if r.returncode != 0 and "ffmpeg exited" in r.stderr and not local:
+        # ネットワークドライブ（Colab の Drive など）への直接書き込みで ffmpeg が失敗したらローカル経由でやり直す
+        tmp = Path(tempfile.mkdtemp(prefix="vreplay_"))
+        got = download_segment(video_id, start, end, tmp, max_height, cookies, local=True)
+        dst = out_dir / got.name
+        shutil.move(str(got), dst)
+        return dst
     if r.returncode != 0 or not files:
         if "Sign in to confirm" in r.stderr:
             extra = ("（cookies は読み込めています。それでも弾かれる場合は、cookies が無効になっているか、"

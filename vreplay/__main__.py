@@ -56,7 +56,7 @@ def calibrate(cfg: dict, url: str, order: int, at: float, span: int = 150):
 
     from .extract import Roster, find_killfeed, panel_debug
     from .hud import OCR, autocalibrate, draw_rois, read_hud
-    from .pipeline import video_cache_dir
+    from .pipeline import _work_root, video_cache_dir
     from .video import download_segment, iter_frames, resolve_cookies
 
     m = vlr.parse_match(url)
@@ -67,9 +67,12 @@ def calibrate(cfg: dict, url: str, order: int, at: float, span: int = 150):
                          + "\n".join(lines or ["  （マップが見つかりません）"]))
     out = Path(cfg["output"]["dir"]) / "calibrate"
     out.mkdir(parents=True, exist_ok=True)
+    for old in ("rois.jpg", "panels.jpg", "frame.jpg"):   # 失敗時に前回の画像が残らないように
+        (out / old).unlink(missing_ok=True)
     s = int(md.vod_t + at)
     print(f"{m.title} Map {order} {md.name}：マップ開始から {int(at)}〜{int(at) + span} 秒を取得")
-    vid = download_segment(md.vod_id, s, s + span, out, cfg["video"]["max_height"], resolve_cookies(cfg),
+    # 動画は Colab のローカルに落とす（Drive 上に直接書くと ffmpeg が失敗することがある）
+    vid = download_segment(md.vod_id, s, s + span, _work_root(cfg), cfg["video"]["max_height"], resolve_cookies(cfg),
                            cache_dirs=[video_cache_dir(cfg)])
     frames = [f for _, f in iter_frames(vid, fps=30 / span)]
     ocr = OCR()
