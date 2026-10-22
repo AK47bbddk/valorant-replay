@@ -58,8 +58,9 @@ Notion「マップ詳細」ページ本文 ＋ Drive に HTML レポート
 ```python
 # セル1：最新コードを取得
 !git -C /content/valorant-replay pull -q 2>/dev/null || git clone -q https://github.com/AK47bbddk/valorant-replay /content/valorant-replay
-%cd /content/valorant-replay
 !pip -q install -e '/content/valorant-replay[video]'
+!test -x ~/.deno/bin/deno || (curl -fsSL https://deno.land/install.sh | sh -s -- -y > /dev/null 2>&1)
+%cd /content/valorant-replay
 
 # セル2：実行
 from google.colab import drive, userdata
@@ -126,7 +127,7 @@ Colab の `vreplay run` は動画をダウンロードせずにそこから読�
 
 ```powershell
 # 初回だけ
-winget install Git.Git Python.Python.3.12 Gyan.FFmpeg OpenJS.NodeJS.LTS
+winget install Git.Git Python.Python.3.12 Gyan.FFmpeg DenoLand.Deno
 cd C:\Users\aokki\programing
 git clone https://github.com/AK47bbddk/valorant-replay
 py -m pip install -e ".\valorant-replay[fetch]"

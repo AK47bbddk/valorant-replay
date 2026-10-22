@@ -2,7 +2,7 @@
 # Colab はクラウドの IP なので YouTube にボット判定されやすい。家庭回線で落として Drive 経由で渡す。
 #
 # 初回だけ（PowerShell）:
-#   winget install Git.Git Python.Python.3.12 Gyan.FFmpeg OpenJS.NodeJS.LTS
+#   winget install Git.Git Python.Python.3.12 Gyan.FFmpeg DenoLand.Deno
 #   cd C:\Users\aokki\programing
 #   git clone https://github.com/AK47bbddk/valorant-replay
 #   py -m pip install -e ".\valorant-replay[fetch]"

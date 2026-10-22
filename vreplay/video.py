@@ -37,6 +37,15 @@ def resolve_cookies(cfg: dict) -> str:
     return str(default) if default.exists() else ""
 
 
+def _ytdlp_env() -> dict:
+    """~/.deno/bin（deno の既定インストール先）を PATH に足した環境変数。"""
+    env = dict(os.environ)
+    deno_bin = Path.home() / ".deno" / "bin"
+    if deno_bin.exists():
+        env["PATH"] = f"{deno_bin}{os.pathsep}{env.get('PATH', '')}"
+    return env
+
+
 def find_cached(video_id: str, start: int, end: int, dirs) -> Path | None:
     stem = f"{video_id}_{start}_{end}"
     for d in dirs or []:
@@ -63,17 +72,23 @@ def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_hei
            f"https://www.youtube.com/watch?v={video_id}"]
     if cookies and Path(cookies).exists():
         cmd[3:3] = ["--cookies", cookies]
-    # yt-dlp は YouTube の解析に JS ランタイムを使う（既定は deno）。deno が無く node があれば node を使う
-    if not shutil.which("deno") and shutil.which("node"):
+    # yt-dlp は YouTube の n チャレンジを解くのに JS ランタイム（deno 推奨）と解読スクリプト（yt-dlp-ejs）を使う
+    env = _ytdlp_env()
+    if not shutil.which("deno", path=env["PATH"]) and shutil.which("node"):
         cmd[3:3] = ["--js-runtimes", "node"]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    cmd[3:3] = ["--remote-components", "ejs:github"]   # yt-dlp-ejs が無くても解読スクリプトを取得できるように
+    r = subprocess.run(cmd, capture_output=True, text=True, env=env)
     files = find_cached(video_id, start, end, [out_dir])
     if r.returncode != 0 or not files:
         if "Sign in to confirm" in r.stderr:
             extra = ("（cookies は読み込めています。それでも弾かれる場合は、cookies が無効になっているか、"
                      "Colab の IP 自体がブロックされています。② の自宅 PC で取得する方法が確実です）") if cookies else ""
             raise RuntimeError(COOKIE_HELP + extra + f"\n  yt-dlp: {r.stderr.strip()[-300:]}")
-        raise RuntimeError(f"yt-dlp failed: {r.stderr.strip()[-400:]}")
+        hint = ""
+        if "challenge solving failed" in r.stderr or "Only images are available" in r.stderr:
+            hint = ("（YouTube の暗号解読に失敗：JS ランタイムがありません。Colab ではセル1で deno が入ります。"
+                    "自宅 PC では `winget install DenoLand.Deno` を実行してください）")
+        raise RuntimeError(f"yt-dlp failed{hint}: {r.stderr.strip()[-400:]}")
     return files
 
 
