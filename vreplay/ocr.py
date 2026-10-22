@@ -31,7 +31,8 @@ class OCR:
         if gpu:
             kw.update(det_use_cuda=True, det_model_path="", rec_use_cuda=True, rec_model_path="")
         self.engine = RapidOCR(**kw)
-        self.recognizer = self.engine.text_recognizer
+        # 1.2 系は text_recognizer、1.3 系以降（Python 3.12 の Colab に入る版）は text_rec
+        self.recognizer = getattr(self.engine, "text_rec", None) or self.engine.text_recognizer
         self.gpu = gpu
         self.lock = threading.Lock()
         self.calls = 0
@@ -46,8 +47,8 @@ class OCR:
         with self.lock:
             res, _ = self.recognizer([imgs[k] for k in ok])
             self.calls += len(ok)
-        for k, (txt, sc) in zip(ok, res):
-            out[k] = (str(txt).strip(), float(sc))
+        for k, r in zip(ok, res):
+            out[k] = (str(r[0]).strip(), float(r[1]))
         return out
 
     def detect(self, img, min_score: float = 0.5) -> list[tuple[list, str, float]]:
@@ -58,7 +59,7 @@ class OCR:
             res, _ = self.engine(img)
             self.calls += 1
         out = []
-        for box, txt, sc in res or []:
+        for box, txt, sc, *_ in res or []:
             xs = [p[0] for p in box]
             ys = [p[1] for p in box]
             if float(sc) >= min_score:

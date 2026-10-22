@@ -33,9 +33,13 @@ PRESETS = {
 HUD_BAND = [0.30, 0.0, 0.70, 0.075]      # ライブ判定に使う上部バンド（スコアバー）
 
 
+# 数字だけの欄で、OCR が数字を形の似た文字に読み違えるもの（RapidOCR 1.3 以降は 0 を「口」と読むことがある）
+_DIGIT_FIX = str.maketrans({"O": "0", "o": "0", "D": "0", "Q": "0", "口": "0", "〇": "0", "I": "1", "l": "1", "|": "1"})
+
+
 def parse_timer(text: str, round_sec: int = 100) -> float | None:
     """'1:23' / '0:07' / '9.4' / コロン落ち '123' → 秒。"""
-    t = (text or "").replace(" ", "").replace(";", ":").replace("：", ":").replace("O", "0").replace("o", "0")
+    t = (text or "").replace(" ", "").replace(";", ":").replace("：", ":").translate(_DIGIT_FIX)
     m = re.fullmatch(r"(\d):(\d{2})", t)
     if m:
         s = int(m.group(1)) * 60 + int(m.group(2))
@@ -51,7 +55,7 @@ def parse_timer(text: str, round_sec: int = 100) -> float | None:
 
 
 def parse_score(text: str) -> int | None:
-    t = re.sub(r"[^0-9OoIl]", "", text or "").replace("O", "0").replace("o", "0").replace("I", "1").replace("l", "1")
+    t = re.sub(r"[^0-9]", "", (text or "").strip().translate(_DIGIT_FIX))
     return int(t) if re.fullmatch(r"\d{1,2}", t) and int(t) <= 40 else None
 
 
@@ -73,14 +77,21 @@ def hud_crops(frame, roi: dict) -> list:
 
 
 def choose_preset(reader, frames: list, round_sec: int = 100) -> tuple[str, dict, int]:
-    """各プリセットでタイマーが読めたフレーム数を数え、最も多いものを返す。"""
-    best = ("riot", PRESETS["riot"], -1)
+    """各プリセットで「タイマー」「両スコア」「ラウンド表記」が読めたフレーム数を足し、最も多いものを返す。
+    タイマーの位置はレイアウト間で近いので、スコアとラウンド表記で見分ける。返り値の数はタイマーが読めた枚数。"""
+    best = ("riot", PRESETS["riot"], -1, -1)
     for name, roi in PRESETS.items():
-        res = reader.read([crop(f, roi["timer"]) for f in frames])
-        n = sum(parse_timer(t, round_sec) is not None for t, _ in res)
-        if n > best[2]:
-            best = (name, roi, n)
-    return best
+        tm = reader.read([crop(f, roi["timer"]) for f in frames])
+        sl = reader.read([crop(f, roi["score_left"]) for f in frames])
+        sr = reader.read([crop(f, roi["score_right"]) for f in frames])
+        rd = reader.read([crop(f, roi["round"]) for f in frames])
+        nt = sum(parse_timer(t, round_sec) is not None for t, _ in tm)
+        ns = sum(parse_score(a) is not None and parse_score(b) is not None for (a, _), (b, _) in zip(sl, sr))
+        nr = sum(parse_round(t) is not None for t, _ in rd)
+        total = nt + ns + nr
+        if total > best[3]:
+            best = (name, roi, nt, total)
+    return best[:3]
 
 
 # ---------------------------------------------------------------- プレイヤーカード
