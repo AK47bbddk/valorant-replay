@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw
 
-from .hud import OCR, brightness, fmt_clock, ult_ready_score
+from .hud import OCR, fmt_clock, ult_ready_score
 from .rounds import DetRound, Sample
 
 
@@ -207,26 +207,37 @@ def slot_names(ocr: OCR, store: FrameStore, i: int | None, cfg: dict, roster: Ro
     return names
 
 
+def is_alive(row, mirror: bool) -> bool:
+    """カードに体力バー（チーム色の横線）があれば生存。死亡すると灰色のカードに K/D/A が出てバーが消える。"""
+    if row is None or row.size == 0:
+        return False
+    h, w = row.shape[:2]
+    x0, x1 = (0.05, 0.80) if mirror else (0.20, 0.95)
+    band = cv2.cvtColor(row[int(0.30 * h): int(0.45 * h), int(x0 * w): int(x1 * w)], cv2.COLOR_BGR2HSV)
+    return float(np.mean((band[..., 1] > 120) & (band[..., 2] > 120))) > 0.03
+
+
 def ults_in_round(store: FrameStore, samples: list[Sample], r: DetRound, cfg: dict,
                   names: dict) -> tuple[list[dict], list[str]]:
     hud = cfg["hud"]
     n, box, th = hud["players_per_panel"], hud["ult_in_row"], hud["ult_ready_threshold"]
-    state, alive_ref, events, ready_at_start = {}, {}, [], []
+    state, events, ready_at_start = {}, [], []
     for j, i in enumerate(([r.buy_idx] if r.buy_idx is not None else []) + r.live):
         for side in ("L", "R"):
             panel = store.get(i, "panel_left" if side == "L" else "panel_right")
             for k, row in enumerate(_rows(panel, n)):
                 key = (side, k)
-                ready = ult_ready_score(_ult_box(row, box, side == "R")) > th
-                b = brightness(row)
-                alive_ref.setdefault(key, b)
                 hist = state.setdefault(key, [])
+                if not is_alive(row, side == "R"):
+                    hist.append(None)             # 死亡中は判定しない（アイコンが灰色になるため）
+                    continue
+                ready = ult_ready_score(_ult_box(row, box, side == "R")) > th
                 hist.append(ready)
                 if j == 0 and ready:
                     ready_at_start.append(names.get(key, (f"{side}{k + 1}",))[0])
-                # 2 連続で「溜まっている」→ 2 連続で「消えた」、かつ行が暗転（死亡）していない
-                if len(hist) >= 4 and hist[-4] and hist[-3] and not hist[-2] and not hist[-1] \
-                        and b > 0.6 * alive_ref[key]:
+                # 生存したまま 2 連続「溜まっている」→ 2 連続「消えた」
+                if len(hist) >= 4 and hist[-4] is True and hist[-3] is True \
+                        and hist[-2] is False and hist[-1] is False:
                     nm, team = names.get(key, (f"{side}{k + 1}", None))
                     events.append({"t": round(samples[i].t, 1), "timer": _timer_label(samples[i]),
                                    "player": nm, "team": team})
@@ -255,13 +266,14 @@ def panel_debug(frame, cfg: dict):
         vis = []
         for k, row in enumerate(_rows(crop(frame, hud["roi"][key]), n)):
             u = _ult_box(row, box, side == "R")
-            scores[f"{side}{k + 1}"] = round(ult_ready_score(u), 3)
+            scores[f"{side}{k + 1}"] = round(ult_ready_score(u), 3) if is_alive(row, side == "R") else "死亡"
             r = row.copy()
             x0, y0, x1, y1 = box
             if side == "R":
                 x0, x1 = 1 - x1, 1 - x0
             h, w = r.shape[:2]
-            ok = scores[f"{side}{k + 1}"] > hud["ult_ready_threshold"]
+            sc = scores[f"{side}{k + 1}"]
+            ok = isinstance(sc, float) and sc > hud["ult_ready_threshold"]
             cv2.rectangle(r, (int(x0 * w), int(y0 * h)), (int(x1 * w), int(y1 * h)), (0, 255, 0) if ok else (0, 0, 255), 2)
             vis.append(r)
         cols.append(vstack(vis))
@@ -306,5 +318,5 @@ def find_killfeed(ocr: OCR, frames: list, roster: Roster, search=(0.55, 0.04, 1.
     x0 = min(min(b[0] for _, b in keep) - 0.03, right - 0.2)
     y0 = min(b[1] for _, b in keep) - lh * 0.8
     y1 = max(max(b[3] for _, b in keep) + lh, y0 + lh * 2.2 * 6)   # 6 件ぶん程度まで伸ばす
-    roi = [max(0.0, x0), max(0.0, y0), min(1.0, right + 0.01), min(0.5, y1)]
+    roi = [max(0.0, x0), max(0.0, y0), min(1.0, right + 0.035), min(0.5, y1)]   # 右端は倒された側の顔アイコンまで
     return [round(v, 3) for v in roi], keep

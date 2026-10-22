@@ -146,7 +146,7 @@ def ult_ready_score(img) -> float:
     if img.size == 0:
         return 0.0
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    return float(np.mean((hsv[..., 2] > 190) & (hsv[..., 1] < 60)))
+    return float(np.mean((hsv[..., 2] > 215) & (hsv[..., 1] < 60)))
 
 
 def brightness(img) -> float:
