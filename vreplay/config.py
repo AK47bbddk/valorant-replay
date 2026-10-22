@@ -29,7 +29,16 @@ def load(path: str | None = None) -> dict:
             break
     if os.environ.get("VREPLAY_OUTPUT_DIR"):
         cfg["output"]["dir"] = os.environ["VREPLAY_OUTPUT_DIR"]
+    check_drive(cfg["output"]["dir"])
     return cfg
+
+
+def check_drive(out_dir: str):
+    """Colab で Drive が未マウントのまま /content/drive に書くと、Colab 内の普通のフォルダになって消えてしまう。"""
+    if str(out_dir).startswith("/content/drive") and Path("/content").exists() \
+            and not os.path.ismount("/content/drive"):
+        raise SystemExit("Google ドライブがマウントされていません。ノートブックのセル2（drive.mount）を先に実行してください。"
+                         "『Mountpoint must not already contain files』と出る場合は、セル2の最新版（GitHub の colab.ipynb）を使ってください。")
 
 
 def roi_px(roi: list[float], w: int, h: int) -> tuple[int, int, int, int]:
