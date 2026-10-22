@@ -147,6 +147,7 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
             if not r.live:
                 rr["notes"].append("ライブ映像を検出できませんでした（HUD が読めない可能性）")
         rep["rounds"].sort(key=lambda x: x["n"])
+        rep["video_ok"] = True
         rep["analysis_note"] = (f"{msg}／タイマー読取 {stats['timer_ok']:.0%}・スコア読取 {stats['score_ok']:.0%}"
                                 f"／検出ラウンド {len(det)}/{md.total_rounds or '?'}／画面左 = {team_left}"
                                 f"（VLR との一致率 {agree:.0%}）")
@@ -256,10 +257,12 @@ def run(cfg: dict, day: date | None = None, match_urls: list[str] | None = None,
             map_dir = out_root / f"{m.id}_{md.order}_{_slug(md.name)}"
             page = pages.get(md.order)
             done_json = map_dir / "report.json"
-            if not force and ((page and nt.children(page["id"])) or (not nt and done_json.exists())):
+            prev = json.loads(done_json.read_text(encoding="utf-8")) if done_json.exists() else None
+            prev_ok = bool(prev and (prev.get("video_ok") or no_video or not md.vod_id or md.vod_t is None))
+            if not force and ((page and nt.children(page["id"])) or (not nt and prev_ok)):
                 log(f"  {md.order}. {md.name}: 作成済みのためスキップ（--force で作り直し）")
-                if done_json.exists():
-                    reports.append(json.loads(done_json.read_text(encoding="utf-8")))
+                if prev:
+                    reports.append(prev)
                 continue
             log(f"  {md.order}. {md.name} {md.score1}-{md.score2}")
             rep = base_report(m, md, cfg)

@@ -70,8 +70,9 @@ def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_hei
     files = find_cached(video_id, start, end, [out_dir])
     if r.returncode != 0 or not files:
         if "Sign in to confirm" in r.stderr:
-            raise RuntimeError(COOKIE_HELP + ("（cookies は指定済み：期限切れの可能性があります。書き出し直してください）"
-                                              if cookies else ""))
+            extra = ("（cookies は読み込めています。それでも弾かれる場合は、cookies が無効になっているか、"
+                     "Colab の IP 自体がブロックされています。② の自宅 PC で取得する方法が確実です）") if cookies else ""
+            raise RuntimeError(COOKIE_HELP + extra + f"\n  yt-dlp: {r.stderr.strip()[-300:]}")
         raise RuntimeError(f"yt-dlp failed: {r.stderr.strip()[-400:]}")
     return files
 
