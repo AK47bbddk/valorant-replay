@@ -1,0 +1,2 @@
+[console_scripts]
+vreplay = vreplay.__main__:main

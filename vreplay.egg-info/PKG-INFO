@@ -1,0 +1,15 @@
+Metadata-Version: 2.4
+Name: vreplay
+Version: 0.1.0
+Summary: VALORANT 前日試合ふり返りページ自動生成
+Requires-Python: >=3.10
+Requires-Dist: requests
+Requires-Dist: pyyaml
+Requires-Dist: numpy
+Requires-Dist: pillow
+Requires-Dist: beautifulsoup4>=4.12
+Requires-Dist: lxml>=5.0
+Provides-Extra: video
+Requires-Dist: easyocr>=1.7; extra == "video"
+Requires-Dist: yt-dlp>=2025.1; extra == "video"
+Requires-Dist: imageio>=2.34; extra == "video"

@@ -59,7 +59,7 @@ Notion「マップ詳細」ページ本文 ＋ Drive に HTML レポート
 # セル1：最新コードを取得
 !git -C /content/valorant-replay pull -q 2>/dev/null || git clone -q https://github.com/AK47bbddk/valorant-replay /content/valorant-replay
 %cd /content/valorant-replay
-!pip -q install -r requirements.txt
+!pip -q install -e '/content/valorant-replay[video]'
 
 # セル2：実行
 from google.colab import drive, userdata
@@ -67,7 +67,7 @@ import os
 drive.mount('/content/drive')
 os.environ['NOTION_TOKEN'] = userdata.get('NOTION_TOKEN')
 os.environ['VREPLAY_CONFIG'] = '/content/drive/MyDrive/valorant-replay/config.yaml'
-!python -m vreplay run
+!vreplay run
 ```
 
 オプション：
@@ -95,7 +95,7 @@ Actions タブの「daily-notion」→「Run workflow」で日付を指定した
 ミニマップ・キルフィード・プレイヤーパネルは `config/default.yaml` の比率座標で切り抜いています。
 
 ```
-!python -m vreplay calibrate --match https://www.vlr.gg/xxxxx --map 1 --at 600
+!vreplay calibrate --match https://www.vlr.gg/xxxxx --map 1 --at 600
 ```
 
 Drive の `valorant-replay/calibrate/rois.jpg` に枠が描かれた画像が出るので、ずれていれば

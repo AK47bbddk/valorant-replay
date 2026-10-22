@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vreplay"
+version = "0.1.0"
+description = "VALORANT 前日試合ふり返りページ自動生成"
+requires-python = ">=3.10"
+dependencies = [
+  "requests", "pyyaml", "numpy", "pillow", "beautifulsoup4>=4.12", "lxml>=5.0",
+]
+
+[project.optional-dependencies]
+# 動画解析用（Colab には torch / opencv が最初から入っている）
+video = ["easyocr>=1.7", "yt-dlp>=2025.1", "imageio>=2.34"]
+
+[project.scripts]
+vreplay = "vreplay.__main__:main"
+
+[tool.setuptools]
+packages = ["vreplay"]
