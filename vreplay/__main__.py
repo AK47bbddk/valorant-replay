@@ -5,6 +5,7 @@
   python -m vreplay run --no-video            # VLR のデータだけ（GPU 不要・速い）
   python -m vreplay run --upsert-only         # Notion の試合・マップ行だけ（GitHub Actions 用）
   python -m vreplay calibrate --match URL --map 1 --at 600   # ROI 確認画像を出す
+  python -m vreplay fetch                     # 自宅 PC 用：動画の該当区間だけ Drive に保存（Colab のボット判定回避）
 """
 from __future__ import annotations
 
@@ -25,6 +26,10 @@ def main():
     r.add_argument("--force", action="store_true", help="作成済みのページも作り直す")
     r.add_argument("--upsert-only", action="store_true", help="Notion の試合・マップ行だけ更新（本文・動画解析なし）")
     r.add_argument("--config")
+    f = sub.add_parser("fetch", help="動画の該当区間だけを video.cache_dir に保存（自宅 PC で実行）")
+    f.add_argument("--date", default="yesterday")
+    f.add_argument("--match", nargs="*")
+    f.add_argument("--config")
     c = sub.add_parser("calibrate")
     c.add_argument("--match", required=True)
     c.add_argument("--map", type=int, default=1)
@@ -37,6 +42,10 @@ def main():
         day = None if a.date == "yesterday" else date.fromisoformat(a.date)
         from .pipeline import run
         run(cfg, day=day, match_urls=a.match, no_video=a.no_video, force=a.force, upsert_only=a.upsert_only)
+    elif a.cmd == "fetch":
+        day = None if a.date == "yesterday" else date.fromisoformat(a.date)
+        from .pipeline import fetch
+        fetch(cfg, day=day, match_urls=a.match)
     else:
         calibrate(cfg, a.match, a.map, a.at)
 
@@ -45,7 +54,8 @@ def calibrate(cfg: dict, url: str, order: int, at: float):
     import cv2
 
     from .hud import OCR, autocalibrate, draw_rois, read_hud
-    from .video import download_segment, grab
+    from .pipeline import video_cache_dir
+    from .video import download_segment, grab, resolve_cookies
 
     m = vlr.parse_match(url)
     md = next((x for x in m.maps if x.order == order), None)
@@ -56,7 +66,8 @@ def calibrate(cfg: dict, url: str, order: int, at: float):
     out = Path(cfg["output"]["dir"]) / "calibrate"
     out.mkdir(parents=True, exist_ok=True)
     s = int(md.vod_t + at)
-    vid = download_segment(md.vod_id, s, s + 40, out, cfg["video"]["max_height"], cfg["video"].get("cookies", ""))
+    vid = download_segment(md.vod_id, s, s + 40, out, cfg["video"]["max_height"], resolve_cookies(cfg),
+                           cache_dirs=[video_cache_dir(cfg)])
     frames = [f for f in (grab(vid, t) for t in range(2, 38, 3)) if f is not None]
     ocr = OCR()
     roi, msg = autocalibrate(ocr, frames, dict(cfg["hud"]["roi"]))

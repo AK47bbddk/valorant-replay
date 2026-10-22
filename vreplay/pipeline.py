@@ -76,13 +76,14 @@ def _segment_bounds(m: vlr.Match, md: vlr.MapData, cfg: dict) -> tuple[int, int]
 def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: Path, get_ocr, log=print):
     from . import extract as X
     from .hud import autocalibrate, read_hud
-    from .video import download_segment, grab, iter_frames, probe
+    from .video import download_segment, grab, iter_frames, probe, resolve_cookies
 
     vcfg, hcfg, ocfg = cfg["video"], cfg["hud"], cfg["output"]
     start, end = _segment_bounds(m, md, cfg)
     work = _work_root(cfg)
-    log(f"  ダウンロード {md.vod_id} {start}s〜{end}s")
-    vid = download_segment(md.vod_id, start, end, work, vcfg["max_height"], vcfg.get("cookies", ""))
+    log(f"  動画 {md.vod_id} {start}s〜{end}s")
+    vid = download_segment(md.vod_id, start, end, work, vcfg["max_height"], resolve_cookies(cfg),
+                           cache_dirs=[video_cache_dir(cfg)])
     store = X.FrameStore(work / f"frames_{m.id}_{md.order}")
     try:
         ocr = get_ocr()
@@ -154,16 +155,12 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
     finally:
         if not vcfg.get("keep_video"):
             shutil.rmtree(store.root, ignore_errors=True)
-            Path(vid).unlink(missing_ok=True)
+            if Path(vid).parent == work:      # キャッシュ（Drive）の動画は消さない
+                Path(vid).unlink(missing_ok=True)
 
 
-def run(cfg: dict, day: date | None = None, match_urls: list[str] | None = None, no_video: bool = False,
-        force: bool = False, upsert_only: bool = False, log=print) -> list[dict]:
-    """upsert_only=True：Notion の試合行・マップ行だけ更新し、本文や動画解析はしない（GitHub Actions 用）。"""
-    day = day or (datetime.now(JST).date() - timedelta(days=1))
-    out_root = Path(cfg["output"]["dir"]) / day.isoformat()
-    out_root.mkdir(parents=True, exist_ok=True)
-
+def select_matches(cfg: dict, day: date, match_urls: list[str] | None, log=print):
+    """対象試合（vlr.Match）を順に返す。日付は試合ページの日時（JST）で確定する。"""
     if match_urls:
         items = [{"url": u} for u in match_urls]
     else:
@@ -173,6 +170,61 @@ def run(cfg: dict, day: date | None = None, match_urls: list[str] | None = None,
         if not items and cand:
             log("  条件に合う試合がありません。config の filters.event_include を確認してください。"
                 f" 例：{sorted({c['event'] for c in cand})[:6]}")
+    limit = cfg["filters"].get("max_matches") or 10 ** 9
+    n = 0
+    for it in items:
+        try:
+            m = vlr.parse_match(it["url"])
+        except Exception as e:
+            log(f"✗ {it['url']}: {e}")
+            continue
+        if not match_urls:
+            if not m.dt_jst or m.dt_jst.date() != day:
+                continue                      # 前後の日の試合
+            if n >= limit:
+                log(f"- {m.title}: max_matches に達したのでスキップ")
+                continue
+        if not any(x.vod_id for x in m.maps) and not cfg["filters"].get("include_without_vod", True):
+            log(f"- {m.title}: VOD なしのためスキップ")
+            continue
+        n += 1
+        yield m
+
+
+def video_cache_dir(cfg: dict) -> Path:
+    return Path(cfg["video"].get("cache_dir") or Path(cfg["output"]["dir"]) / "videos")
+
+
+def fetch(cfg: dict, day: date | None = None, match_urls: list[str] | None = None, log=print) -> list[Path]:
+    """動画の該当区間だけを cache_dir に保存する（自宅 PC で実行 → Drive 経由で Colab が使う）。"""
+    from .video import download_segment, resolve_cookies
+    day = day or (datetime.now(JST).date() - timedelta(days=1))
+    cache = video_cache_dir(cfg)
+    cookies = resolve_cookies(cfg)
+    got = []
+    for m in select_matches(cfg, day, match_urls, log):
+        log(f"● {m.title}")
+        for md in m.maps:
+            if not md.vod_id or md.vod_t is None:
+                log(f"  {md.order}. {md.name}: 開始秒つきの VOD なし")
+                continue
+            start, end = _segment_bounds(m, md, cfg)
+            try:
+                p = download_segment(md.vod_id, start, end, cache, cfg["video"]["max_height"], cookies)
+                log(f"  {md.order}. {md.name}: {p.name}（{p.stat().st_size / 1e6:.0f} MB）")
+                got.append(p)
+            except RuntimeError as e:
+                log(f"  {md.order}. {md.name}: 失敗 {e}")
+    log(f"保存先: {cache}")
+    return got
+
+
+def run(cfg: dict, day: date | None = None, match_urls: list[str] | None = None, no_video: bool = False,
+        force: bool = False, upsert_only: bool = False, log=print) -> list[dict]:
+    """upsert_only=True：Notion の試合行・マップ行だけ更新し、本文や動画解析はしない（GitHub Actions 用）。"""
+    day = day or (datetime.now(JST).date() - timedelta(days=1))
+    out_root = Path(cfg["output"]["dir"]) / day.isoformat()
+    out_root.mkdir(parents=True, exist_ok=True)
 
     token = os.environ.get("NOTION_TOKEN")
     nt = Notion(token) if token and cfg["notion"]["enabled"] else None
@@ -189,24 +241,8 @@ def run(cfg: dict, day: date | None = None, match_urls: list[str] | None = None,
         return _ocr["r"]
 
     reports = []
-    done_matches = 0
-    for it in items:
-        try:
-            m = vlr.parse_match(it["url"])
-        except Exception as e:
-            log(f"✗ {it['url']}: {e}")
-            continue
-        if not match_urls:
-            if not m.dt_jst or m.dt_jst.date() != day:
-                continue                      # 前後の日の試合
-            if done_matches >= (cfg["filters"].get("max_matches") or 10 ** 9):
-                log(f"- {m.title}: max_matches に達したのでスキップ")
-                continue
-        done_matches += 1
-        has_vod = any(x.vod_id for x in m.maps)
-        if not has_vod and not cfg["filters"].get("include_without_vod", True):
-            log(f"- {m.title}: VOD なしのためスキップ")
-            continue
+    blocked = False
+    for m in select_matches(cfg, day, match_urls, log):
         log(f"● {m.title}  [{m.event} / {m.stage}]  {m.map_count}")
         pages = {}
         if nt:
@@ -231,11 +267,17 @@ def run(cfg: dict, day: date | None = None, match_urls: list[str] | None = None,
                 rep["analysis_note"] = "動画解析なし（VLR のデータのみ）"
             elif not md.vod_id or md.vod_t is None:
                 rep["analysis_note"] = "マップ開始秒つきの VOD が無いため動画解析をスキップ"
+            elif blocked:
+                rep["analysis_note"] = "YouTube のボット判定で動画を取得できなかったため VLR のデータのみ（README「YouTube に弾かれるとき」）"
             else:
                 try:
                     analyze_video(cfg, m, md, rep, map_dir, get_ocr, log)
                 except Exception as e:
-                    traceback.print_exc()
+                    if "ボット判定" in str(e):
+                        blocked = True        # 同じ実行で何度も試さない
+                        log(f"    {e}")
+                    else:
+                        traceback.print_exc()
                     rep["analysis_note"] = f"動画解析に失敗：{e}"
             map_dir.mkdir(parents=True, exist_ok=True)
             done_json.write_text(json.dumps(rep, ensure_ascii=False, indent=1), encoding="utf-8")

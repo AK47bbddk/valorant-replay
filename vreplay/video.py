@@ -2,36 +2,78 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import sys
+import tempfile
 from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
 
 
+COOKIE_HELP = (
+    "YouTube にボット判定されました（Colab などクラウドの IP で起きます）。対処はどちらか："
+    "① 自分の YouTube の cookies.txt を Drive の valorant-replay/cookies.txt に置く"
+    "（または Colab の 🔑 に YT_COOKIES として中身を登録）"
+    "② 自宅 PC で `vreplay fetch` を実行して動画を Drive に置いてから Colab で run する。"
+    "手順は README の「YouTube に弾かれるとき」")
+
+
+def resolve_cookies(cfg: dict) -> str:
+    """cookies.txt の場所：config の video.cookies → 環境変数 YT_COOKIES（中身）→ 出力フォルダの cookies.txt。"""
+    p = cfg["video"].get("cookies") or ""
+    if p and Path(p).exists():
+        return p
+    text = os.environ.get("YT_COOKIES", "").strip()
+    if text:
+        f = Path(tempfile.gettempdir()) / "vreplay_cookies.txt"
+        if not text.startswith("#"):
+            text = "# Netscape HTTP Cookie File\n" + text
+        f.write_text(text.replace("\r\n", "\n") + "\n", encoding="utf-8")
+        return str(f)
+    default = Path(cfg["output"]["dir"]) / "cookies.txt"
+    return str(default) if default.exists() else ""
+
+
+def find_cached(video_id: str, start: int, end: int, dirs) -> Path | None:
+    stem = f"{video_id}_{start}_{end}"
+    for d in dirs or []:
+        d = Path(d)
+        if d.exists():
+            hit = [p for p in d.glob(stem + ".*") if p.suffix in (".mp4", ".webm", ".mkv") and p.stat().st_size > 0]
+            if hit:
+                return hit[0]
+    return None
+
+
 def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_height: int = 1080,
-                     cookies: str = "") -> Path:
+                     cookies: str = "", cache_dirs=()) -> Path:
+    hit = find_cached(video_id, start, end, [out_dir, *cache_dirs])
+    if hit:
+        return hit
+    out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = f"{video_id}_{start}_{end}"
-    done = list(out_dir.glob(stem + ".*"))
-    if done:
-        return done[0]
-    cmd = ["yt-dlp", "--quiet", "--no-warnings", "--no-part",
+    cmd = [sys.executable, "-m", "yt_dlp", "--quiet", "--no-warnings", "--no-part", "--sleep-requests", "1",
            "-f", f"bv*[height<={max_height}][vcodec^=avc1]/bv*[height<={max_height}]/b[height<={max_height}]",
            "--download-sections", f"*{start}-{end}",
            "-o", str(out_dir / (stem + ".%(ext)s")),
            f"https://www.youtube.com/watch?v={video_id}"]
     if cookies and Path(cookies).exists():
-        cmd[1:1] = ["--cookies", cookies]
+        cmd[3:3] = ["--cookies", cookies]
+    # yt-dlp は YouTube の解析に JS ランタイムを使う（既定は deno）。deno が無く node があれば node を使う
+    if not shutil.which("deno") and shutil.which("node"):
+        cmd[3:3] = ["--js-runtimes", "node"]
     r = subprocess.run(cmd, capture_output=True, text=True)
-    files = list(out_dir.glob(stem + ".*"))
+    files = find_cached(video_id, start, end, [out_dir])
     if r.returncode != 0 or not files:
-        hint = ""
-        if "Sign in to confirm" in r.stderr or "bot" in r.stderr.lower():
-            hint = "（YouTube にボット判定されました。config の video.cookies に cookies.txt を指定してください）"
-        raise RuntimeError(f"yt-dlp failed{hint}: {r.stderr.strip()[-400:]}")
-    return files[0]
+        if "Sign in to confirm" in r.stderr:
+            raise RuntimeError(COOKIE_HELP + ("（cookies は指定済み：期限切れの可能性があります。書き出し直してください）"
+                                              if cookies else ""))
+        raise RuntimeError(f"yt-dlp failed: {r.stderr.strip()[-400:]}")
+    return files
 
 
 def probe(path: Path) -> tuple[int, int, float]:

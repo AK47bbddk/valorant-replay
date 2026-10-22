@@ -1,6 +1,6 @@
 # Colab には torch / opencv / numpy / requests / pillow / pyyaml が最初から入っている
 easyocr>=1.7
-yt-dlp>=2025.1
+yt-dlp[default]>=2025.11
 beautifulsoup4>=4.12
 lxml>=5.0
 imageio>=2.34

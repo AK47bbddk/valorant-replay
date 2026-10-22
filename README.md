@@ -80,6 +80,7 @@ os.environ['VREPLAY_CONFIG'] = '/content/drive/MyDrive/valorant-replay/config.ya
 | `run --force` | 作成済みのマップページも作り直す |
 | `run --upsert-only` | Notion の試合・マップ行だけ更新（本文・動画解析なし） |
 | `calibrate --match <URL> --map 1 --at 600` | HUD の ROI を描いた確認画像を出す |
+| `fetch` | 動画の該当区間だけを Drive に保存（自宅 PC 用、下の「方法 B」） |
 
 ## 試合リストの自動更新（GitHub Actions）
 
@@ -101,17 +102,42 @@ Actions タブの「daily-notion」→「Run workflow」で日付を指定した
 Drive の `valorant-replay/calibrate/rois.jpg` に枠が描かれた画像が出るので、ずれていれば
 `config.yaml` の `hud.roi` を直してください（値は画面幅・高さに対する 0〜1 の比率）。
 
-## YouTube に弾かれるとき
+## YouTube に弾かれるとき（「Sign in to confirm you're not a bot」）
 
-Colab の IP から「Sign in to confirm you're not a bot」と言われることがあります。
-ブラウザ拡張などで `cookies.txt`（Netscape 形式）を書き出して Drive に置き、`config.yaml` に
+Colab は Google のデータセンターの IP なので、YouTube にボット判定されやすいです。
+yt-dlp の YouTube OAuth ログインは YouTube 側の変更で使えなくなっているため（yt-dlp 公式 wiki）、次のどちらかで回避します。
 
-```yaml
-video:
-  cookies: /content/drive/MyDrive/valorant-replay/cookies.txt
+### 方法 A：自分の YouTube の cookies を渡す（手軽・Colab だけで完結）
+
+1. ブラウザで**シークレットウィンドウ**を開き、YouTube にログインする（BAN のリスクを避けるならサブアカウント推奨）。
+2. 同じタブで `https://www.youtube.com/robots.txt` を開く（シークレットのタブはこれ 1 つだけにする）。
+3. 拡張機能「Get cookies.txt LOCALLY」などで youtube.com の cookies を **Netscape 形式**で書き出す。
+4. シークレットウィンドウを閉じる（開いたままだと cookies が更新されて無効になる）。
+5. 書き出したファイルを Drive の `MyDrive/valorant-replay/cookies.txt` に置く。
+   （または中身を Colab の 🔑 に `YT_COOKIES` として登録）
+
+cookies は数週間〜数か月で切れます。またボット判定が出たら書き出し直してください。
+
+### 方法 B：動画だけ自宅 PC で落とす（いちばん確実）
+
+家庭回線ならボット判定はほぼ出ません。自宅の Windows PC で `vreplay fetch` を動かすと、
+前日の対象マップの区間だけを Google ドライブ（パソコン版）の `valorant-replay/videos` に保存し、
+Colab の `vreplay run` は動画をダウンロードせずにそこから読みます。
+
+```powershell
+# 初回だけ
+winget install Git.Git Python.Python.3.12 Gyan.FFmpeg OpenJS.NodeJS.LTS
+cd C:\Users\aokki\programing
+git clone https://github.com/AK47bbddk/valorant-replay
+py -m pip install -e ".\valorant-replay[fetch]"
+
+# 実行（scripts/fetch_windows.ps1 の $Drive をマイドライブのパスに合わせる）
+powershell -ExecutionPolicy Bypass -File .\valorant-replay\scripts\fetch_windows.ps1
 ```
 
-と書いてください。cookies はリポジトリには絶対に入れないでください。
+タスクスケジューラで毎朝（GitHub Actions の 5:23 より後、例えば 5:45）に登録すれば、
+起きた時点で動画が Drive に揃っていて、Colab の実行は解析だけになります。
+1 マップあたり 1080p で 0.5〜1.5 GB 程度です。容量が気になるときは `video.max_height: 720` に下げてください。
 
 ## 精度について
 

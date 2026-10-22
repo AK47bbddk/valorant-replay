@@ -18,7 +18,8 @@ video:
   fps: 2                 # 解析に使うフレームレート
   per_round_sec: 140     # 次マップの開始秒が分からないときの見積もり
   tail_buffer_sec: 900
-  cookies: ""            # YouTube に弾かれるとき用の cookies.txt（Drive のパス）
+  cookies: ""            # cookies.txt のパス。空なら 環境変数 YT_COOKIES → <output.dir>/cookies.txt の順に探す
+  cache_dir: ""          # 事前に落とした動画の置き場所。空なら <output.dir>/videos（自宅 PC の vreplay fetch の保存先）
   keep_video: false
 
 hud:
