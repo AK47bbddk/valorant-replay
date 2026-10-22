@@ -1,6 +1,7 @@
 # Colab には torch / opencv / numpy / requests / pillow / pyyaml が最初から入っている
 rapidocr_onnxruntime>=1.2,<1.5
 yt-dlp[default]>=2025.11
+psutil>=5.9
 beautifulsoup4>=4.12
 lxml>=5.0
 imageio>=2.34

@@ -33,7 +33,7 @@ def test_fetch_saves_to_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(vlr, "parse_match", lambda url: m)
     calls = []
 
-    def fake_dl(vid, s, e, out, h, cookies, log=None):
+    def fake_dl(vid, s, e, out, h, cookies, log=None, **kwargs):
         calls.append((vid, s, e, out))
         p = out / f"{vid}_{s}_{e}.mp4"
         out.mkdir(parents=True, exist_ok=True)

@@ -21,7 +21,9 @@ video:
   cookies: ""            # cookies.txt のパス。空なら 環境変数 YT_COOKIES → <output.dir>/cookies.txt の順に探す
   cache_dir: ""          # 事前に落とした動画の置き場所。空なら <output.dir>/videos（自宅 PC の vreplay fetch の保存先）
   keep_video: false
-  workers: 0             # 並列プロセス数。0 なら CPU 数
+  workers: 0             # 解析の並列プロセス数。0 なら CPU 数
+  download_workers: 3    # 同時にダウンロードするマップ数（解析中に次のマップを先に取得する）
+  download_fragments: 4  # 1 本の動画を yt-dlp が分割して並列取得する数（回線が速いなら 8 などに）
 
 hud:
   # タイマー・スコア・ラウンド表記の位置は放送ごとのプリセット（vreplay/layout.py）から自動で選ぶ。

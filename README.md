@@ -168,8 +168,25 @@ powershell -ExecutionPolicy Bypass -File .\valorant-replay\scripts\fetch_windows
 - マップ区間を CPU 数ぶんの時間チャンクに分けて別プロセスで同時に解析します（Colab の CPU を全部使う）。
 - HUD の数字は同じ見た目が何度も出るので、見た目が一致したら前の結果を使い回し、実際の OCR は 1 割程度に減らしています。
 - GPU は動画のデコード（NVDEC）に使います（ffmpeg が対応していれば自動。ログに「デコード GPU」と出ます）。
-- 解析中に次のマップの動画を裏でダウンロードします。
-- ログに「キャリブレーション／スキャン／ラウンドごとの素材」の所要時間が出ます。
+- 解析中に次のマップの動画を裏でダウンロードします（`video.download_workers`、既定 3 本）。
+- 1 本の動画は yt-dlp が分割して並列取得します（`video.download_fragments`、既定 4。回線が速いなら 8 などに）。
+
+### 処理時間とリソースの表示
+
+各処理のあとに、**所要時間とそのときの Colab の CPU・GPU・RAM** をログに出します。
+
+```
+動画を取得：Summit（780 MB, 1 分 12 秒, 10.8 MB/s）｜CPU 平均 8%（最大 34%）｜GPU なし｜RAM 最大 3.1/12.7GB
+スキャン 532 枚 2 分 05 秒（8 並列・デコード GPU・OCR 420 回）｜CPU 平均 91%（最大 100%）｜GPU 平均 18%（最大 47%）・VRAM 最大 1.2GB｜RAM 最大 5.8/12.7GB
+```
+
+最後に全体の集計と、余っているリソースに応じたヒント（ダウンロードが長い／CPU が余っている など）を出します。
+
+- 日付フォルダの `perf.json` に生データ（1 秒ごとのサンプルと処理ごとの集計）を保存
+- HTML レポートの先頭と各マップの「処理時間とリソース」に同じ内容を表示
+- Notion のマップページにも 1 行で「処理時間：動画の取得 32 秒／キャリブレーション 8 秒／…（CPU 最大 96%・GPU 最大 21%・RAM 最大 5.8GB）」を表示
+
+GPU 使用率は `nvidia-smi`、CPU・RAM は `psutil` から読むので、GPU の無い環境でも動きます（その場合は「GPU なし」と表示）。
 
 ## 開発
 
@@ -193,4 +210,5 @@ pytest -q        # ネットワーク・GPU なしで通る（実放送の HUD �
 | `vreplay/extract.py` | ミニマップ GIF、購入パネル、キルログ、ULT |
 | `vreplay/summary.py` | ラウンド一覧表のセルの組み立て |
 | `vreplay/pipeline.py` | 全体の流れ |
+| `vreplay/perf.py` | 処理時間と CPU・GPU・RAM の計測（ログ／HTML／JSON） |
 | `vreplay/report.py` | HTML レポート |

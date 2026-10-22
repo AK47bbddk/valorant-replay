@@ -69,9 +69,11 @@ def _err_lines(stderr: str, n: int = 6) -> str:
 
 
 def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_height: int = 1080,
-                     cookies: str = "", cache_dirs=(), log=None) -> Path:
+                     cookies: str = "", cache_dirs=(), log=None, fragments: int = 4) -> Path:
     hit = find_cached(video_id, start, end, [out_dir, *cache_dirs])
     if hit:
+        if log:
+            log(f"    キャッシュ済みの動画を使います（{hit.name}）")
         return hit
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -83,6 +85,7 @@ def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_hei
     for client in CLIENTS:
         cmd = [sys.executable, "-m", "yt_dlp", "--no-warnings", "--no-part", "--no-progress",
                "--sleep-requests", "1", "--remote-components", "ejs:github",
+               "--concurrent-fragments", str(max(1, int(fragments))),
                "-f", f"bv*[height<={max_height}][vcodec^=avc1]/bv*[height<={max_height}]/b[height<={max_height}]",
                "--download-sections", f"*{start}-{end}",
                "-o", str(tmp / (stem + ".%(ext)s")),

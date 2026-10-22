@@ -52,8 +52,33 @@ def _img(path: str | None, base: Path, cap: str) -> str:
     return f'<figure><img src="{_e(rel)}" alt="{_e(cap)}" loading="lazy"><figcaption>{_e(cap)}</figcaption></figure>'
 
 
+def _perf_section(perf_data: dict) -> str:
+    from . import perf
+    rows = []
+    for s in perf_data.get("stages") or []:
+        rows.append(f'<tr><th scope="row">{_e(s.get("label"))}</th><td>{_e(perf.fmt_seconds(s.get("seconds")))}</td>'
+                    f'<td>{s.get("share", 0):.0%}</td><td>{_e(perf.fmt_resources(s))}</td></tr>')
+    if not rows:
+        return ""
+    system = perf_data.get("system") or {}
+    machine = f'CPU {system.get("cpu_count", "?")} コア'
+    if system.get("ram_total_gb"):
+        machine += f'／RAM {system["ram_total_gb"]}GB'
+    if system.get("gpu_name"):
+        machine += f'／GPU {_e(system["gpu_name"])}'
+    advice = "".join(f'<p class="note">{_e(a)}</p>' for a in perf_data.get("advice") or [])
+    overlap = ('<p class="sub">※ 動画の取得は複数マップを同時に進めるため、時間は合計です'
+               '（実時間より長くなることがあります）。</p>') \
+        if any(s.get("stage") == "download" and s.get("count", 1) > 1 for s in perf_data.get("stages") or []) else ""
+    return (f'<section><h2>処理時間とリソース</h2>'
+            f'<p class="sub">合計 {_e(perf.fmt_seconds(perf_data.get("total_sec")))}　{machine}</p>'
+            f'<div class="tbl"><table><thead><tr><th>処理</th><th>時間</th><th>実時間比</th><th>そのときのリソース</th>'
+            f'</tr></thead><tbody>{"".join(rows)}</tbody></table></div>{overlap}{advice}</section>')
+
+
 def _map_section(rep: dict, base: Path) -> str:
     from . import summary as S
+    from . import perf
     t1, t2 = rep["tag1"], rep["tag2"]
     aid = f"m{rep['match_id']}-{rep['order']}"
     links = [f'<a href="{_e(rep["vlr_url"])}">VLR</a>']
@@ -64,6 +89,15 @@ def _map_section(rep: dict, base: Path) -> str:
            f'<p class="sub">{_e(rep.get("event"))} / {_e(rep.get("stage"))}　{" ・ ".join(links)}</p>']
     if rep.get("analysis_note"):
         out.append(f'<p class="note">{_e(rep["analysis_note"])}</p>')
+    if rep.get("perf_note"):
+        out.append(f'<p class="sub">{_e(rep["perf_note"])}</p>')
+    if rep.get("timings"):
+        trows = "".join(
+            f'<tr><th scope="row">{_e(t.get("label"))}</th><td>{_e(perf.fmt_seconds(t.get("seconds")))}</td>'
+            f'<td>{_e(perf.fmt_resources(t.get("resources")) or "-")}</td></tr>' for t in rep["timings"])
+        out.append(f'<details><summary>処理時間とリソース（このマップ）</summary><div class="body">'
+                   f'<div class="tbl"><table><thead><tr><th>処理</th><th>時間</th><th>そのときのリソース</th></tr>'
+                   f'</thead><tbody>{trows}</tbody></table></div></div></details>')
 
     def br(x):
         return _e(x).replace("\n", "<br>")
@@ -110,18 +144,19 @@ def _map_section(rep: dict, base: Path) -> str:
     return "\n".join(out)
 
 
-def write(out_root: Path, reports: list[dict], day: date) -> Path:
+def write(out_root: Path, reports: list[dict], day: date, perf_data: dict | None = None) -> Path:
     reports = sorted(reports, key=lambda r: (r["match_id"], r["order"]))
     toc = "".join(f'<li><a href="#m{r["match_id"]}-{r["order"]}">{_e(r["team1"])} vs {_e(r["team2"])} – '
                   f'{_e(r["map"])}</a></li>' for r in reports)
     body = "\n".join(_map_section(r, out_root) for r in reports)
+    perf_html = _perf_section(perf_data) if perf_data else ""
     doc = (f'<!doctype html><html lang="ja"><head><meta charset="utf-8">'
            f'<meta name="viewport" content="width=device-width,initial-scale=1">'
            f'<title>試合ふり返り {day}</title><link rel="preconnect" href="https://fonts.googleapis.com">'
            f'<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&display=swap" rel="stylesheet">'
            f'<style>{CSS}</style></head><body><main><h1>試合ふり返り</h1>'
            f'<p class="sub">{day}（JST）に行われた試合　全 {len(reports)} マップ</p>'
-           f'<nav aria-label="マップ一覧"><ul class="toc">{toc}</ul></nav>{body}</main></body></html>')
+           f'<nav aria-label="マップ一覧"><ul class="toc">{toc}</ul></nav>{perf_html}{body}</main></body></html>')
     p = out_root / "index.html"
     p.write_text(doc, encoding="utf-8")
     return p

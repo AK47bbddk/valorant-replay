@@ -188,6 +188,8 @@ def build_blocks(rep: dict, uploads: dict[str, str | None]) -> list[dict]:
     blocks = [{"type": "callout", "callout": {"rich_text": head, "icon": {"type": "emoji", "emoji": "🎬"}}}]
     if rep.get("analysis_note"):
         blocks.append(_para(_rt(rep["analysis_note"], color="gray")))
+    if rep.get("perf_note"):
+        blocks.append(_para(_rt(rep["perf_note"], color="gray")))
 
     rows = [["R", "スコア", "勝者", "勝ち方", f"{t1} 購入・武器", f"{t2} 購入・武器", "先制キル", "キル", "ULT 使用", "時間"]]
     for r in rep["rounds"]:
