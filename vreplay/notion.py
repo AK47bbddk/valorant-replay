@@ -169,27 +169,33 @@ def _img(fid: str | None, caption: str = "") -> dict | None:
                                        "caption": [_rt(caption)] if caption else []}}
 
 
-def _table(rows: list[list[str]]) -> dict:
+def _table(rows: list[list]) -> dict:
+    """セルは文字列か rich_text のリスト。"""
+    def cell(c):
+        return c if isinstance(c, list) else [_rt(c)]
     return {"type": "table", "table": {
-        "table_width": len(rows[0]), "has_column_header": True, "has_row_header": False,
-        "children": [{"type": "table_row", "table_row": {"cells": [[_rt(c)] for c in r]}} for r in rows]}}
+        "table_width": len(rows[0]), "has_column_header": True, "has_row_header": True,
+        "children": [{"type": "table_row", "table_row": {"cells": [cell(c) for c in r]}} for r in rows]}}
 
 
 def build_blocks(rep: dict, uploads: dict[str, str | None]) -> list[dict]:
     """rep: pipeline の map レポート（dict）。uploads: ローカルパス → file_upload ID"""
-    t1, t2 = rep["team1"], rep["team2"]
+    from . import summary as S
+    t1, t2 = rep["tag1"], rep["tag2"]
     head = [_rt("▶ VOD", link=rep.get("vod_url")) if rep.get("vod_url") else _rt("VOD なし"),
             _rt("　|　"), _rt("VLR", link=rep["vlr_url"]),
-            _rt(f"　|　{rep['score1']} - {rep['score2']}　|　生成 {rep['generated_at']}")]
+            _rt(f"　|　{rep['team1']} {rep['score1']} - {rep['score2']} {rep['team2']}　|　生成 {rep['generated_at']}")]
     blocks = [{"type": "callout", "callout": {"rich_text": head, "icon": {"type": "emoji", "emoji": "🎬"}}}]
     if rep.get("analysis_note"):
         blocks.append(_para(_rt(rep["analysis_note"], color="gray")))
 
-    rows = [["R", "勝者", "勝ち方", "攻守", f"{t1} 購入", f"{t2} 購入", "キル", "時間"]]
+    rows = [["R", "スコア", "勝者", "勝ち方", f"{t1} 購入・武器", f"{t2} 購入・武器", "先制キル", "キル", "ULT 使用", "時間"]]
     for r in rep["rounds"]:
-        rows.append([str(r["n"]), r.get("winner") or "-", r.get("how_ja") or "-", r.get("side") or "-",
-                     r.get("buy1") or "-", r.get("buy2") or "-", str(len(r.get("kills") or [])),
-                     r.get("duration") or "-"])
+        rcell = [_rt(f"R{r['n']} ▶", link=r["yt_url"])] if r.get("yt_url") else f"R{r['n']}"
+        win = S.tag(rep, r.get("winner"))
+        rows.append([rcell, r.get("score") or "-", [_rt(win, bold=True, color="blue" if r.get("winner_no") == 1 else "red")],
+                     S.how(r), S.buy_cell(r, "1"), S.buy_cell(r, "2"), S.first_kill(rep, r),
+                     S.kill_count(rep, r), S.ult_used(r), r.get("duration") or "-"])
     blocks += [_h(2, "ラウンド一覧"), _table(rows), _h(2, "ラウンド詳細")]
 
     for r in rep["rounds"]:
@@ -197,27 +203,36 @@ def build_blocks(rep: dict, uploads: dict[str, str | None]) -> list[dict]:
         kids = []
         line = []
         if r.get("yt_url"):
-            line += [_rt("▶ このラウンドを見る", link=r["yt_url"]), _rt("　")]
-        line.append(_rt(f"{t1}: {r.get('buy1') or '-'}・残り {r.get('bank1') or '-'}k ／ "
-                        f"{t2}: {r.get('buy2') or '-'}・残り {r.get('bank2') or '-'}k"))
-        kids.append(_para(*line))
+            line += [_rt("▶ このラウンドを見る", link=r["yt_url"]), _rt(f"　ラウンド時間 {r.get('duration') or '-'}")]
+        if line:
+            kids.append(_para(*line))
+        for no, tg in (("1", t1), ("2", t2)):
+            bank = r.get(f"bank{no}")
+            kids.append(_bullet(_rt(f"{tg}：", bold=True), _rt(f"{r.get(f'buy{no}') or '-'}"
+                                                              + (f"（残り {bank}k）" if bank is not None else "")),
+                                _rt(("　" + S.player_weapons(r, no)) if S.player_weapons(r, no) else "")))
         kids.append(_img(uploads.get(a.get("minimap_start")), "ラウンド開始時のミニマップ"))
-        kids.append(_img(uploads.get(a.get("minimap_gif")), f"ラウンド中のミニマップ（{rep.get('gif_speed', 4)}倍速）"))
+        kids.append(_img(uploads.get(a.get("minimap_gif")), f"ラウンド中のミニマップ（{rep.get('gif_speed', 4)}倍速・リプレイ除外）"))
         kids.append(_img(uploads.get(a.get("buy_panels")), "購入フェーズ終了時のパネル（武器・アーマー・ULT）"))
         if r.get("kills"):
             kids.append(_para(_rt("キルログ", bold=True)))
             for k in r["kills"]:
+                w = f"［{k['weapon_ja']}］" if k.get("weapon_ja") else ""
                 kids.append(_bullet(_rt(f"{k.get('timer') or '--:--'}  "),
                                     _rt(k.get("killer") or "?", bold=True),
-                                    _rt(f"（{k.get('killer_team') or '?'}）→ {k.get('victim') or '?'}")))
+                                    _rt(f"（{S.tag(rep, k.get('killer_team'))}）{w} → {k.get('victim') or '?'}")))
             kids.append(_img(uploads.get(a.get("kill_strip")), "キルフィードの切り抜き"))
-        if r.get("ults"):
-            kids.append(_para(_rt("ULT 使用（β・自動検出）", bold=True)))
-            for u in r["ults"]:
-                kids.append(_bullet(_rt(f"{u.get('timer') or '--:--'}  {u.get('player') or '?'}（{u.get('team') or '?'}）")))
+        if r.get("ults") or r.get("ult_ready"):
+            kids.append(_para(_rt("ULT", bold=True)))
+            if r.get("ult_ready"):
+                kids.append(_bullet(_rt("開始時に溜まっていた：" + "、".join(r["ult_ready"]))))
+            for u in r.get("ults") or []:
+                kids.append(_bullet(_rt(f"{u.get('timer') or '--:--'}  {u.get('player') or '?'}"
+                                        + (f"（{u['agent']}）" if u.get("agent") else "")
+                                        + f" が使用（{S.tag(rep, u.get('team'))}）")))
         for n in r.get("notes") or []:
             kids.append(_para(_rt(n, color="gray")))
-        title = f"R{r['n']}　{r.get('winner') or '?'}（{r.get('how_ja') or '?'}・{r.get('side') or '?'}）"
+        title = f"R{r['n']}　{S.tag(rep, r.get('winner'))} 勝利　{S.how(r)}　{r.get('score') or ''}"
         blocks.append(_h(3, title, [k for k in kids if k]))
     return blocks
 

@@ -25,7 +25,7 @@ a:focus-visible,summary:focus-visible{outline:4px solid var(--focus);outline-off
 .toc{display:flex;flex-wrap:wrap;gap:8px;padding:0;list-style:none}
 .toc a{display:inline-block;padding:6px 12px;border:1px solid var(--line);border-radius:999px;text-decoration:none}
 .tbl{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:14px;margin:8px 0 16px}
-th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;white-space:nowrap}
+th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top;white-space:nowrap}
 th{background:var(--bg-sub);font-weight:700}
 .w1{color:var(--key);font-weight:700}.w2{color:var(--ng);font-weight:700}
 details{border:1px solid var(--line);border-radius:var(--radius);margin:8px 0;background:var(--bg)}
@@ -53,46 +53,59 @@ def _img(path: str | None, base: Path, cap: str) -> str:
 
 
 def _map_section(rep: dict, base: Path) -> str:
-    t1, t2 = rep["team1"], rep["team2"]
+    from . import summary as S
+    t1, t2 = rep["tag1"], rep["tag2"]
     aid = f"m{rep['match_id']}-{rep['order']}"
     links = [f'<a href="{_e(rep["vlr_url"])}">VLR</a>']
     if rep.get("vod_url"):
         links.insert(0, f'<a href="{_e(rep["vod_url"])}">VOD</a>')
-    out = [f'<h2 id="{aid}">{_e(t1)} {rep["score1"]} - {rep["score2"]} {_e(t2)}　<span class="sub">'
+    out = [f'<h2 id="{aid}">{_e(rep["team1"])} {rep["score1"]} - {rep["score2"]} {_e(rep["team2"])}　<span class="sub">'
            f'{_e(rep["map"])}（Map {rep["order"]}）</span></h2>',
            f'<p class="sub">{_e(rep.get("event"))} / {_e(rep.get("stage"))}　{" ・ ".join(links)}</p>']
     if rep.get("analysis_note"):
         out.append(f'<p class="note">{_e(rep["analysis_note"])}</p>')
-    rows = "".join(
-        f'<tr><td>{r["n"]}</td><td class="{"w1" if r.get("winner") == t1 else "w2"}">{_e(r.get("winner"))}</td>'
-        f'<td>{_e(r.get("how_ja"))}</td><td>{_e(r.get("side"))}</td><td>{_e(r.get("buy1"))}</td>'
-        f'<td>{_e(r.get("buy2"))}</td><td>{len(r.get("kills") or [])}</td><td>{_e(r.get("duration"))}</td></tr>'
-        for r in rep["rounds"])
-    out.append(f'<div class="tbl"><table><thead><tr><th>R</th><th>勝者</th><th>勝ち方</th><th>攻守</th>'
-               f'<th>{_e(t1)} 購入</th><th>{_e(t2)} 購入</th><th>キル</th><th>時間</th></tr></thead>'
-               f'<tbody>{rows}</tbody></table></div>')
-    gif_cap = "ラウンド中のミニマップ（%s倍速）" % rep.get("gif_speed", 4)
+
+    def br(x):
+        return _e(x).replace("\n", "<br>")
+
+    rows = []
+    for r in rep["rounds"]:
+        rlink = f'<a href="{_e(r["yt_url"])}">R{r["n"]} ▶</a>' if r.get("yt_url") else f'R{r["n"]}'
+        cls = "w1" if r.get("winner_no") == 1 else "w2"
+        rows.append(f'<tr><th scope="row">{rlink}</th><td>{_e(r.get("score"))}</td>'
+                    f'<td class="{cls}">{_e(S.tag(rep, r.get("winner")))}</td><td>{_e(S.how(r))}</td>'
+                    f'<td>{br(S.buy_cell(r, "1"))}</td><td>{br(S.buy_cell(r, "2"))}</td>'
+                    f'<td>{_e(S.first_kill(rep, r))}</td><td>{_e(S.kill_count(rep, r))}</td>'
+                    f'<td>{_e(S.ult_used(r))}</td><td>{_e(r.get("duration") or "-")}</td></tr>')
+    out.append(f'<div class="tbl"><table><thead><tr><th>R</th><th>スコア</th><th>勝者</th><th>勝ち方</th>'
+               f'<th>{_e(t1)} 購入・武器</th><th>{_e(t2)} 購入・武器</th><th>先制キル</th><th>キル</th>'
+               f'<th>ULT 使用</th><th>時間</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>')
+    gif_cap = "ラウンド中のミニマップ（%s倍速・リプレイ除外）" % rep.get("gif_speed", 4)
     for r in rep["rounds"]:
         a = r.get("assets") or {}
-        kills = "".join(f'<li>{_e(k.get("timer"))}　<b>{_e(k.get("killer"))}</b>（{_e(k.get("killer_team"))}）'
-                        f'→ {_e(k.get("victim"))}</li>' for k in r.get("kills") or [])
-        ults = "".join(f'<li>{_e(u.get("timer"))}　{_e(u.get("player"))}（{_e(u.get("team"))}）</li>'
-                       for u in r.get("ults") or [])
+        kills = "".join(f'<li>{_e(k.get("timer"))}　<b>{_e(k.get("killer"))}</b>（{_e(S.tag(rep, k.get("killer_team")))}）'
+                        + (f'［{_e(k["weapon_ja"])}］' if k.get("weapon_ja") else "")
+                        + f' → {_e(k.get("victim"))}</li>' for k in r.get("kills") or [])
+        ults = "".join(f'<li>{_e(u.get("timer"))}　{_e(u.get("player"))}'
+                       + (f'（{_e(u["agent"])}）' if u.get("agent") else "")
+                       + f' が使用（{_e(S.tag(rep, u.get("team")))}）</li>' for u in r.get("ults") or [])
         yt = f'<a href="{_e(r["yt_url"])}">▶ このラウンドを見る</a>　' if r.get("yt_url") else ""
-        ready = f'<p class="sub">ラウンド開始時に ULT が溜まっていた（β）：{_e("、".join(r["ult_ready"]))}</p>' \
-            if r.get("ult_ready") else ""
+        ready = f'<p class="sub">開始時に ULT が溜まっていた：{_e("、".join(r["ult_ready"]))}</p>' if r.get("ult_ready") else ""
+        buys = "".join(f'<li><b>{_e(tg)}</b>：{_e(r.get(f"buy{no}") or "-")}'
+                       + (f'（残り {_e(r.get(f"bank{no}"))}k）' if r.get(f"bank{no}") is not None else "")
+                       + (f'　{_e(S.player_weapons(r, no))}' if S.player_weapons(r, no) else "") + '</li>'
+                       for no, tg in (("1", t1), ("2", t2)))
         notes = "".join(f'<p class="note">{_e(n)}</p>' for n in r.get("notes") or [])
         out.append(
-            f'<details><summary>R{r["n"]}　{_e(r.get("winner"))}　<span class="chip">{_e(r.get("how_ja"))}</span> '
-            f'<span class="chip">{_e(r.get("side"))}</span></summary><div class="body">'
-            f'<p>{yt}{_e(t1)}: {_e(r.get("buy1"))}・残り {_e(r.get("bank1"))}k ／ {_e(t2)}: {_e(r.get("buy2"))}'
-            f'・残り {_e(r.get("bank2"))}k</p>{ready}'
+            f'<details><summary>R{r["n"]}　{_e(S.tag(rep, r.get("winner")))} 勝利　<span class="chip">{_e(S.how(r))}</span> '
+            f'<span class="chip">{_e(r.get("score"))}</span></summary><div class="body">'
+            f'<p>{yt}ラウンド時間 {_e(r.get("duration") or "-")}</p><ul class="kills">{buys}</ul>{ready}'
             f'<div class="grid">{_img(a.get("minimap_start"), base, "ラウンド開始時のミニマップ")}'
             f'{_img(a.get("minimap_gif"), base, gif_cap)}</div>'
             f'{_img(a.get("buy_panels"), base, "購入フェーズ終了時のパネル（武器・アーマー・ULT）")}'
             + (f'<h3>キルログ</h3><ul class="kills">{kills}</ul>' if kills else "")
             + _img(a.get("kill_strip"), base, "キルフィードの切り抜き")
-            + (f'<h3>ULT 使用（β）</h3><ul class="kills">{ults}</ul>' if ults else "")
+            + (f'<h3>ULT 使用</h3><ul class="kills">{ults}</ul>' if ults else "")
             + notes + "</div></details>")
     return "\n".join(out)
 

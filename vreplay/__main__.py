@@ -52,12 +52,16 @@ def main():
 
 
 def calibrate(cfg: dict, url: str, order: int, at: float, span: int = 150):
+    """指定した時刻から span 秒ぶんを取得し、レイアウト・カード・キルフィードの検出結果を画像で確認する。"""
     import cv2
 
     from .extract import Roster, find_killfeed, panel_debug
-    from .hud import OCR, autocalibrate, draw_rois, read_hud
+    from .hud import draw_rois
+    from .layout import card_geometry, choose_preset, find_cards, hud_crops, parse_round, parse_score, parse_timer
+    from .ocr import OCR, CachedReader
     from .pipeline import _work_root, video_cache_dir
     from .video import download_segment, iter_frames, resolve_cookies
+    from .weapons import load_book
 
     m = vlr.parse_match(url)
     md = next((x for x in m.maps if x.order == order), None)
@@ -71,14 +75,18 @@ def calibrate(cfg: dict, url: str, order: int, at: float, span: int = 150):
         (out / old).unlink(missing_ok=True)
     s = int(md.vod_t + at)
     print(f"{m.title} Map {order} {md.name}：マップ開始から {int(at)}〜{int(at) + span} 秒を取得")
-    # 動画は Colab のローカルに落とす（Drive 上に直接書くと ffmpeg が失敗することがある）
     vid = download_segment(md.vod_id, s, s + span, _work_root(cfg), cfg["video"]["max_height"], resolve_cookies(cfg),
                            cache_dirs=[video_cache_dir(cfg)], log=print)
     frames = [f for _, f in iter_frames(vid, fps=30 / span)]
     ocr = OCR()
-    roi, msg = autocalibrate(ocr, frames[::2], dict(cfg["hud"]["roi"]))
-    print(msg)
-
+    name, hud, nread = choose_preset(CachedReader(ocr), frames, cfg["hud"]["round_timer_sec"])
+    roi = dict(cfg["hud"]["roi"])
+    roi.update(hud)
+    print(f"レイアウト: {name}（タイマーが読めたフレーム {nread}/{len(frames)}）")
+    cards = find_cards(frames)
+    H, W = frames[0].shape[:2]
+    geo = card_geometry(cards, W, H) if cards else None
+    print("カード位置:", "自動検出" if geo else "見つかりませんでした")
     roster = Roster([(p.name, m.team1 if p.team == 1 else m.team2) for p in md.players])
     kf, hits = find_killfeed(ocr, frames, roster)
     if kf:
@@ -90,19 +98,19 @@ def calibrate(cfg: dict, url: str, order: int, at: float, span: int = 150):
         print(f"キルフィード検出：{len(hits)} 行（いちばん多いフレームで {counts[best]} 行）")
     else:
         best = len(frames) // 2
-        print("キルフィードが見つかりませんでした。--at を変えるか --span を長くして試してください"
-              f"（{len(hits)} 行のみ検出）")
+        print(f"キルフィードが見つかりませんでした（{len(hits)} 行のみ検出）。--at や --span を変えて試してください")
     f = frames[best]
-    cv2.imwrite(str(out / "rois.jpg"), draw_rois(f, roi))
+    cv2.imwrite(str(out / "rois.jpg"), draw_rois(f, roi, geo))
     cv2.imwrite(str(out / "frame.jpg"), f)
-    pimg, scores = panel_debug(f, cfg)
-    cv2.imwrite(str(out / "panels.jpg"), pimg)
-    print("HUD 読み取り（timer, 左スコア, 右スコア）:", read_hud(ocr, f, roi))
-    print("ULT スコア（しきい値 %.2f 超えで「溜まっている」、緑枠）:" % cfg["hud"]["ult_ready_threshold"], scores)
+    res = CachedReader(ocr).ocr.rec(hud_crops(f, roi))
+    print("HUD 読み取り：タイマー", parse_timer(res[0][0]), "／スコア", parse_score(res[1][0]), "-", parse_score(res[2][0]),
+          "／ラウンド", parse_round(res[3][0]), f"（生の文字 {[r[0] for r in res]}）")
+    if geo:
+        pimg, info = panel_debug(f, geo, load_book(cfg))
+        cv2.imwrite(str(out / "panels.jpg"), pimg)
+        for k, v in info.items():
+            print(f"  {k}: {v}")
     print("確認画像:", out / "rois.jpg", "/", out / "panels.jpg")
-    print("検出した ROI（本番はマップごとに自動検出します。固定したいときは config.yaml の hud.roi に貼り付け）:")
-    for k in ("timer", "score_left", "score_right", "killfeed"):
-        print(f"    {k}: [{', '.join(f'{v:.3f}' for v in roi[k])}]")
 
 
 if __name__ == "__main__":

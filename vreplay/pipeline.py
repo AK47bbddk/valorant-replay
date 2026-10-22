@@ -1,21 +1,26 @@
-"""全体の流れ：VLR → Notion upsert → 動画解析 → Notion 本文／HTML レポート。"""
+"""全体の流れ：VLR → Notion upsert → 動画解析 → Notion 本文／HTML レポート。
+
+速さのために：
+- 解析するマップの動画は最初にまとめて裏でダウンロードを始める（解析中に次のマップを取得）
+- 動画の解析は時間で分割して CPU 数ぶんのプロセスで同時に行う（scan.py）
+- ラウンドごとの素材づくり（GIF・キルログ OCR・武器判別）もスレッドで並列に行う
+"""
 from __future__ import annotations
 
 import json
 import os
 import re
 import shutil
+import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
 
 from . import report, vlr
-from .config import crop
-from .hud import fmt_clock
 from .notion import Notion, how_ja, upsert_match, write_map_page
-from .rounds import Sample, orientation, segment
 
 JST = vlr.JST
 
@@ -38,23 +43,28 @@ def _buy(level: str | None, loadout: float | None) -> str | None:
     if not level:
         return None
     ja = BUY_JA.get(level, level)
-    return f"{ja}（装備 {loadout:.1f}k）" if loadout is not None else ja
+    return f"{ja} {loadout:.1f}k" if loadout is not None else ja
 
 
 def base_report(m: vlr.Match, md: vlr.MapData, cfg: dict) -> dict:
     econ = {e.n: e for e in md.econ}
     rounds = []
+    s1 = s2 = 0
     for r in md.rounds:
         e = econ.get(r.n)
+        s1 += r.winner == 1
+        s2 += r.winner == 2
         rounds.append({
             "n": r.n, "winner": m.team1 if r.winner == 1 else m.team2 if r.winner == 2 else None,
+            "winner_no": r.winner, "score": f"{s1}-{s2}",
             "how": r.how, "how_ja": how_ja(r.how), "side": r.side,
             "buy1": _buy(e.buy1, e.loadout1) if e else None, "buy2": _buy(e.buy2, e.loadout2) if e else None,
             "bank1": e.bank1 if e else None, "bank2": e.bank2 if e else None,
-            "kills": [], "ults": [], "ult_ready": [], "assets": {}, "notes": [],
+            "kills": [], "ults": [], "ult_ready": [], "weapons": {}, "assets": {}, "notes": [],
         })
     return {
-        "match_id": m.id, "vlr_url": m.url, "team1": m.team1, "team2": m.team2, "event": m.event,
+        "match_id": m.id, "vlr_url": m.url, "team1": m.team1, "team2": m.team2,
+        "tag1": m.tag1 or m.team1[:4].upper(), "tag2": m.tag2 or m.team2[:4].upper(), "event": m.event,
         "stage": m.stage, "date": m.dt_jst.date().isoformat() if m.dt_jst else None,
         "map": md.name, "order": md.order, "score1": md.score1, "score2": md.score2,
         "vod_url": md.vod_url, "players": [p.__dict__ for p in md.players],
@@ -73,98 +83,169 @@ def _segment_bounds(m: vlr.Match, md: vlr.MapData, cfg: dict) -> tuple[int, int]
     return start, end
 
 
-def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: Path, get_ocr, log=print):
+def download(cfg: dict, m: vlr.Match, md: vlr.MapData, log=print) -> Path:
+    from .video import download_segment, resolve_cookies
+    start, end = _segment_bounds(m, md, cfg)
+    t0 = time.time()
+    p = download_segment(md.vod_id, start, end, _work_root(cfg), cfg["video"]["max_height"], resolve_cookies(cfg),
+                         cache_dirs=[video_cache_dir(cfg)], log=log)
+    log(f"    動画を取得：{md.name}（{p.stat().st_size / 1e6:.0f} MB, {time.time() - t0:.0f} 秒）")
+    return p
+
+
+# ---------------------------------------------------------------- キャリブレーション
+def calibrate(cfg: dict, path: Path, md: vlr.MapData, roster, n: int = 30, log=print):
+    """放送レイアウトの選択・カード位置・キルフィード位置を、区間全体から抜いた n 枚で決める。"""
+    from .extract import find_killfeed
+    from .layout import card_geometry, choose_preset, find_cards
+    from .ocr import OCR, CachedReader
+    from .video import grab, probe
+    W, H, dur = probe(path)
+    pts = np.linspace(min(120, dur * 0.1), max(dur - 60, dur * 0.9), n)
+    with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 2)) as ex:
+        frames = [f for f in ex.map(lambda tt: grab(path, float(tt)), pts) if f is not None]
+    ocr = OCR()
+    roi = dict(cfg["hud"]["roi"])
+    name, hud, nread = choose_preset(CachedReader(ocr), frames, cfg["hud"]["round_timer_sec"])
+    roi.update(hud)
+    msg = [f"レイアウト {name}（タイマー {nread}/{len(frames)} 枚）"]
+    cards = find_cards(frames)
+    geo = card_geometry(cards, W, H) if cards else None
+    msg.append("カード位置 自動検出" if geo else "カード位置 見つからず（武器・ULT は無効）")
+    if md.players:
+        kf, hits = find_killfeed(None, frames, roster)
+        if kf:
+            roi["killfeed"] = kf
+            msg.append(f"キルフィード 自動検出（{len(hits)} 行）")
+    return roi, geo, frames, "／".join(msg), (W, H, dur)
+
+
+# ---------------------------------------------------------------- 名前（カードの選手）
+def slot_names(store, idx, geo, roster, team_left, team_right) -> list[tuple[str, str]]:
+    """カード 10 枚の (選手名, チーム)。名前の位置を直接読む（検出なし・まとめて認識）。読めなければ「左1」など。"""
+    from .extract import _ocr
+    from .layout import panel_bbox, shift
+    crops, meta = [], []
+    for side, team in (("L", team_left), ("R", team_right)):
+        panel = store.get(idx, f"panel{side}") if idx is not None else None
+        bx = panel_bbox(geo, side) if geo else None
+        for k in range(5):
+            img = None
+            if panel is not None and bx:
+                x0, y0, x1, y1 = shift(geo[side][k]["name"], bx[0], bx[1])
+                img = panel[max(0, y0):y1, max(0, x0):x1]
+            crops.append(img)
+            meta.append((side, k, team))
+    res = _ocr().rec(crops)
+    out = []
+    for (side, k, team), (text, _) in zip(meta, res):
+        nm, tm = roster.snap(text, team) if text else (None, None)
+        out.append((nm if tm == team else f"{'左' if side == 'L' else '右'}{k + 1}", team))
+    return out
+
+
+# ---------------------------------------------------------------- 動画解析
+def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: Path, path: Path, log=print):
     from . import extract as X
-    from .hud import autocalibrate, read_hud
-    from .video import download_segment, grab, iter_frames, probe, resolve_cookies
+    from .rounds import agreement, assign_rounds, liveness, orientation, segment
+    from .scan import scan
+    from .video import gpu_decode_ok
+    from .weapons import ja as wja
+    from .weapons import load_book
 
     vcfg, hcfg, ocfg = cfg["video"], cfg["hud"], cfg["output"]
-    start, end = _segment_bounds(m, md, cfg)
-    work = _work_root(cfg)
-    log(f"  動画 {md.vod_id} {start}s〜{end}s")
-    vid = download_segment(md.vod_id, start, end, work, vcfg["max_height"], resolve_cookies(cfg),
-                           cache_dirs=[video_cache_dir(cfg)], log=log)
-    store = X.FrameStore(work / f"frames_{m.id}_{md.order}")
+    t_start = time.time()
+    start, _ = _segment_bounds(m, md, cfg)
+    roster = X.Roster([(p.name, m.team1 if p.team == 1 else m.team2) for p in md.players])
+    agent = {p.name: p.agent for p in md.players}
+    roi, geo, _, msg, (W, H, dur) = calibrate(cfg, path, md, roster, log=log)
+    t_cal = time.time() - t_start
+    log(f"    {msg}（{t_cal:.0f} 秒）")
+    hw = gpu_decode_ok(str(path))
+    store = X.FrameStore(_work_root(cfg) / f"frames_{m.id}_{md.order}")
     try:
-        ocr = get_ocr()
-        W, H, dur = probe(vid)
-        roi = dict(hcfg["roi"])
-        msg = "設定値の ROI を使用"
-        roster = X.Roster([(p.name, m.team1 if p.team == 1 else m.team2) for p in md.players])
-        if hcfg.get("auto_calibrate"):
-            pts = np.linspace(min(90, dur * 0.1), max(dur - 90, dur * 0.9), 36)
-            frames = [f for f in (grab(vid, float(t)) for t in pts) if f is not None]
-            roi, msg = autocalibrate(ocr, frames[::3], roi)
-            if md.players:
-                kf, hits = X.find_killfeed(ocr, frames, roster)
-                if kf:
-                    roi["killfeed"] = kf
-                    msg += f"／キルフィード自動検出（{len(hits)} 行）"
-                else:
-                    msg += "／キルフィードは設定値を使用"
-        log(f"  {msg}")
-
-        fps = vcfg["fps"]
-        samples: list[Sample] = []
-        for i, (t, f) in enumerate(iter_frames(vid, fps)):
-            timer, sl, sr = read_hud(ocr, f, roi, hcfg["round_timer_sec"])
-            samples.append(Sample(t, timer, sl, sr))
-            for name in ("minimap", "killfeed", "panel_left", "panel_right"):
-                store.put(i, name, crop(f, roi[name]))
-            if i % 600 == 0:
-                log(f"    {t / 60:5.1f} 分  timer={timer} score={sl}-{sr}")
-
-        det, stats = segment(samples, hcfg["round_timer_sec"], hcfg["buy_phase_max_sec"])
-        team1_left, agree = orientation(det, {r.n: r.winner for r in md.rounds})
-        team_left, team_right = (m.team1, m.team2) if team1_left else (m.team2, m.team1)
-        by_n = {r["n"]: r for r in rep["rounds"]}
+        t0 = time.time()
+        obs = scan(path, dur, vcfg["fps"], roi, geo, cfg, store.root, hw, log=log)
+        log(f"    スキャン {len(obs['t'])} 枚 {time.time() - t0:.0f} 秒（{obs['workers']} 並列・デコード {'GPU' if hw else 'CPU'}・OCR {obs['ocr_calls']} 回）")
+        t, timer, sl, sr = obs["t"], obs["timer"], obs["sl"], obs["sr"]
+        conf = np.array([a is not None and b is not None and c is not None for a, b, c in zip(timer, sl, sr)])
+        live, _, linfo = liveness(obs["band"], conf)
+        rid = assign_rounds(live, sl, sr, obs["rnd"], md.total_rounds or None)
+        det, stats = segment(t, live, rid, timer, sl, sr, md.total_rounds or None,
+                             hcfg["round_timer_sec"], hcfg["buy_phase_max_sec"])
+        winners = {r.n: r.winner for r in md.rounds}
+        orient = orientation(det, winners)
+        agree = agreement(det, winners, orient)
+        book = load_book(cfg)
         out_dir.mkdir(parents=True, exist_ok=True)
+        by_n = {r["n"]: r for r in rep["rounds"]}
+        fps = vcfg["fps"]
 
-        for r in det:
+        def work(r):
             rr = by_n.get(r.n)
             if rr is None:
-                if md.rounds:          # VLR のラウンド数を超える検出は誤検出として捨てる
-                    continue
-                side_team = {"L": team_left, "R": team_right}.get(r.winner_side or "")
-                rr = {"n": r.n, "winner": side_team, "how": None, "how_ja": None, "side": None,
-                      "kills": [], "ults": [], "ult_ready": [], "assets": {}, "notes": []}
-                rep["rounds"].append(rr)
-                by_n[r.n] = rr
+                return
+            team_left, team_right = (m.team1, m.team2) if orient.get(r.n, True) else (m.team2, m.team1)
+            fidx = [obs["idx"][i] for i in r.live]
+            times = [t[i] for i in r.live]
+            labels = [X.clock(timer[i]) for i in r.live]
             a = rr["assets"]
-            first = next((i for i in r.live if samples[i].t >= r.t_drop + 1), r.live[0] if r.live else None)
-            if first is not None:
-                p = X.save_still(store.get(first, "minimap"), out_dir / f"r{r.n:02d}_start.jpg")
+            if r.first_idx is not None:
+                p = X.save_still(store.get(obs["idx"][r.first_idx], "minimap"), out_dir / f"r{r.n:02d}_start.jpg")
                 a["minimap_start"] = str(p) if p else None
-            g = X.make_gif(store, samples, r.live, out_dir / f"r{r.n:02d}_minimap.gif", r.n, fps,
+            g = X.make_gif(store, fidx, labels, out_dir / f"r{r.n:02d}_minimap.gif", r.n, fps,
                            ocfg["gif_speed"], ocfg["gif_width"], ocfg["gif_max_frames"])
             a["minimap_gif"] = str(g) if g else None
-            b = X.buy_image(store, r, out_dir)
+            wi = r.buy_idx if r.buy_idx is not None else r.first_idx
+            widx = obs["idx"][wi] if wi is not None else None
+            b = X.buy_image(store, widx, out_dir / f"r{r.n:02d}_buy.jpg")
             a["buy_panels"] = str(b) if b else None
-            names = X.slot_names(ocr, store, r.buy_idx, cfg, roster, team_left, team_right)
-            kills, strip = X.kills_in_round(ocr, store, samples, r, roster, out_dir)
+            names = slot_names(store, widx, geo, roster, team_left, team_right) if geo else []
+            if geo and widx is not None:
+                ws = X.weapons_from_panels(book, store, widx, geo)
+                al = X.alive_from_panels(store, widx, geo)
+                wt = {m.team1: [], m.team2: []}
+                for s_, ((nm, tm), (w, _), ok) in enumerate(zip(names, ws, al)):
+                    if ok:
+                        wt[tm].append({"player": nm, "agent": agent.get(nm), "weapon": w, "weapon_ja": wja(w) if w else "?"})
+                rr["weapons"] = {"1": wt[m.team1], "2": wt[m.team2]}
+            kills, strip = X.kills_in_round(store, fidx, times, labels, roster, book, out_dir / f"r{r.n:02d}_kills.jpg")
+            for k in kills:
+                k["weapon_ja"] = wja(k["weapon"]) if k.get("weapon") else None
             a["kill_strip"] = str(strip) if strip else None
-            ults, ready = X.ults_in_round(store, samples, r, cfg, names)
+            if geo and r.live:
+                evs, ready0 = X.ult_events(obs["ult"], obs["alive"], r.live)
+                rr["ults"] = [{"t": round(t[r.live[j]], 1), "timer": labels[j], "player": names[s_][0],
+                               "team": names[s_][1], "agent": agent.get(names[s_][0])} for s_, j in evs if s_ < len(names)]
+                rr["ult_ready"] = [names[s_][0] for s_ in ready0 if s_ < len(names)]
             rr.update({
-                "kills": kills, "ults": ults, "ult_ready": ready,
+                "kills": kills,
                 "yt_url": f"https://youtu.be/{md.vod_id}?t={int(start + max(0, r.t_drop - 5))}",
-                "duration": fmt_clock(r.t_end - r.t_drop),
+                "duration": X.clock(r.t_end - r.t_drop),
             })
             if r.drop_estimated:
-                rr["notes"].append("ラウンド開始時刻はタイマーが読めず推定値です")
-            if not r.live:
-                rr["notes"].append("ライブ映像を検出できませんでした（HUD が読めない可能性）")
-        rep["rounds"].sort(key=lambda x: x["n"])
+                rr["notes"].append("ラウンド開始時刻は推定値です（開始の瞬間が放送に映っていない）")
+
+        t1 = time.time()
+        with ThreadPoolExecutor(max_workers=max(2, min(8, os.cpu_count() or 2))) as ex:
+            for fut in [ex.submit(work, r) for r in det]:
+                try:
+                    fut.result()
+                except Exception:
+                    traceback.print_exc()
+        log(f"    ラウンドごとの素材 {len(det)} ラウンド {time.time() - t1:.0f} 秒")
+        found = {r.n for r in det}
+        for rr in rep["rounds"]:
+            if rr["n"] not in found:
+                rr["notes"].append("動画からこのラウンドを特定できませんでした（放送が別画面だった可能性）")
         rep["video_ok"] = True
-        rep["analysis_note"] = (f"{msg}／タイマー読取 {stats['timer_ok']:.0%}・スコア読取 {stats['score_ok']:.0%}"
-                                f"／検出ラウンド {len(det)}/{md.total_rounds or '?'}／画面左 = {team_left}"
-                                f"（VLR との一致率 {agree:.0%}）")
-        if stats["timer_ok"] < 0.3:
-            rep["analysis_note"] += "／タイマーがほぼ読めていません。`python -m vreplay calibrate` で ROI を確認してください"
+        rep["analysis_note"] = (f"{msg}／{linfo}／タイマー読取 {stats['timer_ok']:.0%}・スコア読取 {stats['score_ok']:.0%}"
+                                f"／検出ラウンド {len(det)}/{md.total_rounds or '?'}／VLR との勝敗一致 {agree:.0%}"
+                                f"／解析 {time.time() - t_start:.0f} 秒")
+        log(f"    {rep['analysis_note']}")
     finally:
         if not vcfg.get("keep_video"):
             shutil.rmtree(store.root, ignore_errors=True)
-            if Path(vid).parent == work:      # キャッシュ（Drive）の動画は消さない
-                Path(vid).unlink(missing_ok=True)
 
 
 def select_matches(cfg: dict, day: date, match_urls: list[str] | None, log=print):
@@ -240,16 +321,8 @@ def run(cfg: dict, day: date | None = None, match_urls: list[str] | None = None,
         log("NOTION_TOKEN が空なので Notion には書かず、HTML レポートだけ作ります"
             "（Colab の 🔑 に NOTION_TOKEN を登録し「ノートブックからのアクセス」をオンにしてください）")
 
-    _ocr = {}
-
-    def get_ocr():
-        if "r" not in _ocr:
-            from .hud import OCR
-            _ocr["r"] = OCR()
-        return _ocr["r"]
-
-    reports = []
-    blocked = False
+    # 1) 対象マップを決めて Notion の行を作る
+    todo, reports = [], []
     for m in select_matches(cfg, day, match_urls, log):
         log(f"● {m.title}  [{m.event} / {m.stage}]  {m.map_count}")
         pages = {}
@@ -271,33 +344,51 @@ def run(cfg: dict, day: date | None = None, match_urls: list[str] | None = None,
                 if prev:
                     reports.append(prev)
                 continue
-            log(f"  {md.order}. {md.name} {md.score1}-{md.score2}")
-            rep = base_report(m, md, cfg)
-            if no_video:
-                rep["analysis_note"] = "動画解析なし（VLR のデータのみ）"
-            elif not md.vod_id or md.vod_t is None:
-                rep["analysis_note"] = "マップ開始秒つきの VOD が無いため動画解析をスキップ"
-            elif blocked:
-                rep["analysis_note"] = "YouTube のボット判定で動画を取得できなかったため VLR のデータのみ（README「YouTube に弾かれるとき」）"
-            else:
-                try:
-                    analyze_video(cfg, m, md, rep, map_dir, get_ocr, log)
-                except Exception as e:
-                    if "ボット判定" in str(e):
-                        blocked = True        # 同じ実行で何度も試さない
-                        log(f"    {e}")
-                    else:
-                        traceback.print_exc()
-                    rep["analysis_note"] = f"動画解析に失敗：{e}"
-            map_dir.mkdir(parents=True, exist_ok=True)
-            done_json.write_text(json.dumps(rep, ensure_ascii=False, indent=1), encoding="utf-8")
-            if nt and page:
-                try:
-                    write_map_page(nt, page["id"], rep, force=force)
-                    log(f"    → Notion に書き込みました: {page.get('url', '')}")
-                except Exception as e:
-                    log(f"    Notion 書き込み失敗: {e}")
-            reports.append(rep)
+            todo.append((m, md, map_dir, page))
+
+    # 2) 動画を裏でまとめてダウンロード開始（同時 2 本まで）
+    dl = ThreadPoolExecutor(max_workers=2)
+    futs = {}
+    if not no_video:
+        for m, md, _, _ in todo:
+            if md.vod_id and md.vod_t is not None:
+                futs[(m.id, md.order)] = dl.submit(download, cfg, m, md, log)
+
+    # 3) 順に解析
+    blocked = False
+    for m, md, map_dir, page in todo:
+        log(f"  {m.title} {md.order}. {md.name} {md.score1}-{md.score2}")
+        rep = base_report(m, md, cfg)
+        fut = futs.get((m.id, md.order))
+        if no_video:
+            rep["analysis_note"] = "動画解析なし（VLR のデータのみ）"
+        elif fut is None:
+            rep["analysis_note"] = "マップ開始秒つきの VOD が無いため動画解析をスキップ"
+        elif blocked:
+            rep["analysis_note"] = "YouTube のボット判定で動画を取得できなかったため VLR のデータのみ（README「YouTube に弾かれるとき」）"
+        else:
+            try:
+                path = fut.result()
+                analyze_video(cfg, m, md, rep, map_dir, path, log)
+                if not cfg["video"].get("keep_video") and path.parent == _work_root(cfg):
+                    path.unlink(missing_ok=True)
+            except Exception as e:
+                if "ボット判定" in str(e):
+                    blocked = True
+                    log(f"    {e}")
+                else:
+                    traceback.print_exc()
+                rep["analysis_note"] = f"動画解析に失敗：{e}"
+        map_dir.mkdir(parents=True, exist_ok=True)
+        (map_dir / "report.json").write_text(json.dumps(rep, ensure_ascii=False, indent=1), encoding="utf-8")
+        if nt and page:
+            try:
+                write_map_page(nt, page["id"], rep, force=force)
+                log(f"    → Notion に書き込みました: {page.get('url', '')}")
+            except Exception as e:
+                log(f"    Notion 書き込み失敗: {e}")
+        reports.append(rep)
+    dl.shutdown(wait=False, cancel_futures=True)
 
     if cfg["output"].get("html_report") and reports:
         p = report.write(out_root, reports, day)

@@ -137,29 +137,50 @@ def _has_cuda() -> bool:
     return "cuda" in r.stdout
 
 
-def iter_frames(path: Path, fps: float, start: float = 0.0, duration: float | None = None):
-    """(t秒, BGR フレーム) を順に返す。t は動画ファイル先頭からの秒。"""
+@lru_cache(maxsize=8)
+def gpu_decode_ok(path: str) -> bool:
+    """GPU（NVDEC）でデコードできるか 1 秒だけ試す。"""
+    if not _has_cuda():
+        return False
+    for _ in iter_frames(Path(path), fps=1, start=0, duration=1.0, hwaccel=True, fallback=False):
+        return True
+    return False
+
+
+def iter_frames(path: Path, fps: float, start: float = 0.0, duration: float | None = None,
+                hwaccel: bool | None = None, fallback: bool = True):
+    """(t秒, BGR フレーム) を順に返す。t は動画ファイル先頭からの秒。
+
+    非参照フレーム（B フレーム）はデコードしない（-skip_frame noref）。2fps で間引くので影響はなく、デコードが速くなる。
+    """
     w, h, _ = probe(path)
-    base = ["ffmpeg", "-v", "error", "-nostdin"]
-    tail = ["-ss", str(start)] + (["-t", str(duration)] if duration else []) + [
-        "-i", str(path), "-vf", f"fps={fps}", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
-    for hw in ([["-hwaccel", "cuda"]] if _has_cuda() else []) + [[]]:
-        p = subprocess.Popen(base + hw + tail, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=w * h * 3 * 4)
+    if hwaccel is None:
+        hwaccel = gpu_decode_ok(str(path))
+    base = ["ffmpeg", "-v", "error", "-nostdin", "-skip_frame", "noref"]
+    tail = ["-ss", f"{start:.3f}"] + (["-t", f"{duration:.3f}"] if duration else []) + [
+        "-i", str(path), "-an", "-vf", f"fps={fps}", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+    tries = ([["-hwaccel", "cuda"]] if hwaccel else []) + ([[]] if (fallback or not hwaccel) else [])
+    for hw in tries:
+        p = subprocess.Popen(base + hw + tail, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=w * h * 3 * 4)
         n, size = 0, w * h * 3
-        while True:
-            buf = p.stdout.read(size)
-            if len(buf) < size:
-                break
-            yield start + n / fps, np.frombuffer(buf, np.uint8).reshape(h, w, 3)
-            n += 1
-        p.wait()
-        if n > 0 or not hw:
+        try:
+            while True:
+                buf = p.stdout.read(size)
+                if len(buf) < size:
+                    break
+                yield start + n / fps, np.frombuffer(buf, np.uint8).reshape(h, w, 3)
+                n += 1
+        finally:
+            p.stdout.close()
+            p.kill()
+            p.wait()
+        if n > 0:
             return
-        # CUDA デコードで 1 枚も出なければ CPU でやり直す
+        # GPU デコードで 1 枚も出なければ CPU でやり直す
 
 
 def grab(path: Path, t: float):
     """1 枚だけ取り出す（キャリブレーション用）。"""
-    for _, f in iter_frames(path, fps=1, start=t, duration=1.0):
+    for _, f in iter_frames(path, fps=1, start=t, duration=1.0, hwaccel=False):
         return f
     return None

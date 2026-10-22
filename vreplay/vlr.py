@@ -94,6 +94,8 @@ class Match:
     event: str = ""
     stage: str = ""
     dt_jst: datetime | None = None
+    tag1: str = ""
+    tag2: str = ""
     maps: list[MapData] = field(default_factory=list)
 
     @property
@@ -347,6 +349,9 @@ def parse_match(url: str, soup: BeautifulSoup | None = None, econ_soup: Beautifu
               team2=names[1] if len(names) > 1 else "?", event=event, stage=stage, dt_jst=_match_date(soup))
 
     games = [g for g in soup.select("div.vm-stats-game") if g.get("data-game-id") not in (None, "all")]
+    tags = [_t(x) for x in soup.select(".vlr-rounds-tag")][:2]
+    if len(tags) == 2:
+        m.tag1, m.tag2 = tags
     econ_games = {}
     if econ_soup is None and games:
         try:
