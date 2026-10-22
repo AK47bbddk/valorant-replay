@@ -73,7 +73,7 @@ def calibrate(cfg: dict, url: str, order: int, at: float, span: int = 150):
     print(f"{m.title} Map {order} {md.name}：マップ開始から {int(at)}〜{int(at) + span} 秒を取得")
     # 動画は Colab のローカルに落とす（Drive 上に直接書くと ffmpeg が失敗することがある）
     vid = download_segment(md.vod_id, s, s + span, _work_root(cfg), cfg["video"]["max_height"], resolve_cookies(cfg),
-                           cache_dirs=[video_cache_dir(cfg)])
+                           cache_dirs=[video_cache_dir(cfg)], log=print)
     frames = [f for _, f in iter_frames(vid, fps=30 / span)]
     ocr = OCR()
     roi, msg = autocalibrate(ocr, frames[::2], dict(cfg["hud"]["roi"]))

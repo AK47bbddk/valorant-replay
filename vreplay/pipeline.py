@@ -83,7 +83,7 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
     work = _work_root(cfg)
     log(f"  動画 {md.vod_id} {start}s〜{end}s")
     vid = download_segment(md.vod_id, start, end, work, vcfg["max_height"], resolve_cookies(cfg),
-                           cache_dirs=[video_cache_dir(cfg)])
+                           cache_dirs=[video_cache_dir(cfg)], log=log)
     store = X.FrameStore(work / f"frames_{m.id}_{md.order}")
     try:
         ocr = get_ocr()
@@ -218,7 +218,7 @@ def fetch(cfg: dict, day: date | None = None, match_urls: list[str] | None = Non
                 continue
             start, end = _segment_bounds(m, md, cfg)
             try:
-                p = download_segment(md.vod_id, start, end, cache, cfg["video"]["max_height"], cookies)
+                p = download_segment(md.vod_id, start, end, cache, cfg["video"]["max_height"], cookies, log=log)
                 log(f"  {md.order}. {md.name}: {p.name}（{p.stat().st_size / 1e6:.0f} MB）")
                 got.append(p)
             except RuntimeError as e:

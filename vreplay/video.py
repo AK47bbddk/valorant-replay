@@ -57,50 +57,67 @@ def find_cached(video_id: str, start: int, end: int, dirs) -> Path | None:
     return None
 
 
+# YouTube の取得方法（yt-dlp の player_client）。None は yt-dlp の既定。
+# 一部の形式は数 MB 進むと 403 で切られる（ffmpeg exited with code 8）ため、順に試す
+CLIENTS = [None, "web_safari", "tv", "mweb", "web_embedded"]
+
+
+def _err_lines(stderr: str, n: int = 6) -> str:
+    keys = ("ERROR", "error", "Error", "403", "failed", "Invalid", "denied")
+    lines = [l.strip() for l in stderr.replace("\r", "\n").splitlines() if any(k in l for k in keys)]
+    return " / ".join(lines[-n:]) or stderr.strip()[-300:]
+
+
 def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_height: int = 1080,
-                     cookies: str = "", cache_dirs=(), local: bool = False) -> Path:
+                     cookies: str = "", cache_dirs=(), log=None) -> Path:
     hit = find_cached(video_id, start, end, [out_dir, *cache_dirs])
     if hit:
         return hit
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = f"{video_id}_{start}_{end}"
-    cmd = [sys.executable, "-m", "yt_dlp", "--quiet", "--no-warnings", "--no-part", "--sleep-requests", "1",
-           "-f", f"bv*[height<={max_height}][vcodec^=avc1]/bv*[height<={max_height}]/b[height<={max_height}]",
-           "--download-sections", f"*{start}-{end}",
-           "-o", str(out_dir / (stem + ".%(ext)s")),
-           f"https://www.youtube.com/watch?v={video_id}"]
-    if cookies and Path(cookies).exists():
-        cmd[3:3] = ["--cookies", cookies]
-    # yt-dlp は YouTube の n チャレンジを解くのに JS ランタイム（deno 推奨）と解読スクリプト（yt-dlp-ejs）を使う
     env = _ytdlp_env()
-    if not shutil.which("deno", path=env["PATH"]) and shutil.which("node"):
-        cmd[3:3] = ["--js-runtimes", "node"]
-    cmd[3:3] = ["--remote-components", "ejs:github"]   # yt-dlp-ejs が無くても解読スクリプトを取得できるように
-    r = subprocess.run(cmd, capture_output=True, text=True, env=env)
-    files = find_cached(video_id, start, end, [out_dir])
-    if r.returncode != 0:
-        for p in out_dir.glob(stem + ".*"):     # 途中まで書かれた壊れたファイルをキャッシュと誤認しないよう消す
+    # いったんローカルの一時フォルダに落としてから移す（Drive などに ffmpeg が直接書くと失敗することがある）
+    tmp = Path(tempfile.mkdtemp(prefix="vreplay_"))
+    errors = []
+    for client in CLIENTS:
+        cmd = [sys.executable, "-m", "yt_dlp", "--no-warnings", "--no-part", "--no-progress",
+               "--sleep-requests", "1", "--remote-components", "ejs:github",
+               "-f", f"bv*[height<={max_height}][vcodec^=avc1]/bv*[height<={max_height}]/b[height<={max_height}]",
+               "--download-sections", f"*{start}-{end}",
+               "-o", str(tmp / (stem + ".%(ext)s")),
+               f"https://www.youtube.com/watch?v={video_id}"]
+        if cookies and Path(cookies).exists():
+            cmd[3:3] = ["--cookies", cookies]
+        if client:
+            cmd[3:3] = ["--extractor-args", f"youtube:player_client={client}"]
+        if not shutil.which("deno", path=env["PATH"]) and shutil.which("node"):
+            cmd[3:3] = ["--js-runtimes", "node"]
+        r = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        got = find_cached(video_id, start, end, [tmp])
+        if r.returncode == 0 and got:
+            dst = out_dir / got.name
+            shutil.move(str(got), dst)
+            shutil.rmtree(tmp, ignore_errors=True)
+            if errors and log:
+                log(f"    取得方法 {client} で成功（既定の方法は失敗）")
+            return dst
+        for p in tmp.glob(stem + ".*"):         # 途中まで書かれた壊れたファイルは消す
             p.unlink(missing_ok=True)
-        files = None
-    if r.returncode != 0 and "ffmpeg exited" in r.stderr and not local:
-        # ネットワークドライブ（Colab の Drive など）への直接書き込みで ffmpeg が失敗したらローカル経由でやり直す
-        tmp = Path(tempfile.mkdtemp(prefix="vreplay_"))
-        got = download_segment(video_id, start, end, tmp, max_height, cookies, local=True)
-        dst = out_dir / got.name
-        shutil.move(str(got), dst)
-        return dst
-    if r.returncode != 0 or not files:
         if "Sign in to confirm" in r.stderr:
+            shutil.rmtree(tmp, ignore_errors=True)
             extra = ("（cookies は読み込めています。それでも弾かれる場合は、cookies が無効になっているか、"
-                     "Colab の IP 自体がブロックされています。② の自宅 PC で取得する方法が確実です）") if cookies else ""
-            raise RuntimeError(COOKIE_HELP + extra + f"\n  yt-dlp: {r.stderr.strip()[-300:]}")
-        hint = ""
-        if "challenge solving failed" in r.stderr or "Only images are available" in r.stderr:
-            hint = ("（YouTube の暗号解読に失敗：JS ランタイムがありません。Colab ではセル1で deno が入ります。"
-                    "自宅 PC では `winget install DenoLand.Deno` を実行してください）")
-        raise RuntimeError(f"yt-dlp failed{hint}: {r.stderr.strip()[-400:]}")
-    return files
+                     "この IP 自体がブロックされています。② の自宅 PC で取得する方法が確実です）") if cookies else ""
+            raise RuntimeError(COOKIE_HELP + extra + f"\n  yt-dlp: {_err_lines(r.stderr)}")
+        errors.append(f"[{client or '既定'}] {_err_lines(r.stderr)}")
+    shutil.rmtree(tmp, ignore_errors=True)
+    hint = ""
+    joined = " ".join(errors)
+    if "challenge solving failed" in joined or "Only images are available" in joined:
+        hint = ("（YouTube の暗号解読に失敗：JS ランタイムがありません。Colab ではセル1で deno が入ります。"
+                "自宅 PC では `winget install DenoLand.Deno` を実行してください）")
+    raise RuntimeError(f"yt-dlp failed{hint}（{len(CLIENTS)} 通りの取得方法をすべて試しました）:\n  "
+                       + "\n  ".join(errors))
 
 
 def probe(path: Path) -> tuple[int, int, float]:
