@@ -1,0 +1,36 @@
+name: notion-init
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "inspect only or create the new databases"
+        type: choice
+        options: [inspect, create]
+        default: inspect
+      reference_db:
+        description: "Existing Notion database ID used as the schema/parent reference"
+        required: true
+        default: "37cd54a7c90b812eb284cdeca3e749be"
+      parent_page:
+        description: "Parent page ID (empty = parent of the reference database)"
+        required: false
+        default: ""
+jobs:
+  notion:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: NOTION_TOKEN
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -q requests
+      - name: Notion database setup
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+        run: >-
+          python -m vreplay.notion_init
+          --mode "${{ inputs.mode }}"
+          --reference-db "${{ inputs.reference_db }}"
+          --parent-page "${{ inputs.parent_page }}"
