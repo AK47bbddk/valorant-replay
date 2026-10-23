@@ -35,6 +35,20 @@ hud:
   buy_phase_max_sec: 30
   round_timer_sec: 100
 
+warehouse:
+  # 空なら output.dir/warehouse.sqlite3。大量の試合メタデータと解析結果を 1 つにまとめる。
+  path: ""
+
+tactics:
+  # ミニマップの点を拾う間隔（秒）。小さいほど細かいが、動画のデコードが増える。
+  sample_seconds: 6
+  # ラウンド開始から何秒を「スポーンにいる」とみなして、向き・チーム色の補正に使うか
+  spawn_window_seconds: 8
+  # サイト集計を始めるまで（開始から何秒後以降の点を使うか）
+  site_after_seconds: 20
+  min_dot_area: 4
+  max_dot_area: 450
+
 output:
   dir: /content/drive/MyDrive/valorant-replay
   gif_width: 320

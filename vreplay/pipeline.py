@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import perf, report, vlr
+from . import db, perf, report, tactics, vlr
 from .notion import Notion, how_ja, upsert_match, write_map_page
 
 JST = vlr.JST
@@ -189,6 +189,37 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
         agree = agreement(det, winners, orient)
         book = load_book(cfg)
         out_dir.mkdir(parents=True, exist_ok=True)
+        sides = db.side1_by_round(md)
+        for rr in rep["rounds"]:
+            rr["side1"] = sides.get(rr["n"])
+        tac_note = ""
+        try:
+            tac_rounds = [{
+                "n": r.n, "start": r.t_drop, "end": r.t_end, "side1": sides.get(r.n),
+                "plant": next((float(t[i]) for i in r.live if obs["spike"][i]), None),
+            } for r in det]
+            with perf.stage("tactics", tag=tag, label="サイト・位置の解析") as st_tac:
+                tac = tactics.analyze_video(cfg, path, md.name, tac_rounds, out_dir=out_dir, log=log,
+                                            store=store, obs=obs)
+            if tac:
+                rep["tactics"] = tac
+                for rr in rep["rounds"]:
+                    rt = tac["rounds"].get(str(rr["n"]))
+                    if not rt:
+                        continue
+                    top = sorted((rt.get("callouts") or {}).items(), key=lambda kv: kv[1], reverse=True)[:6]
+                    rr["tactics"] = {
+                        "site": rt.get("site"), "site_conf": rt.get("site_conf"),
+                        "sites": rt.get("sites"), "samples": rt.get("samples"), "dots": rt.get("dots"),
+                        "callouts": dict(top),
+                    }
+                bits = "・".join(f"{x['site']}{x['count']}" for x in (tac.get("sites") or [])[:3])
+                tac_note = (f"サイト {bits or '-'}・点 {tac['mean_dots']:.1f}/枚"
+                            f"・信頼度 {tac['confidence']:.0%}")
+                log(f"    {tac_note}（{perf.fmt_seconds(st_tac['seconds'])}）")
+        except Exception:
+            traceback.print_exc()
+            log("    サイト・位置の解析はスキップしました")
         by_n = {r["n"]: r for r in rep["rounds"]}
         fps = vcfg["fps"]
 
@@ -253,7 +284,8 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
         rep["video_ok"] = True
         rep["analysis_note"] = (f"{msg}／{linfo}／タイマー読取 {stats['timer_ok']:.0%}・スコア読取 {stats['score_ok']:.0%}"
                                 f"／検出ラウンド {len(det)}/{md.total_rounds or '?'}／VLR との勝敗一致 {agree:.0%}"
-                                f"／解析 {perf.fmt_seconds(time.time() - t_start)}")
+                                + (f"／{tac_note}" if tac_note else "")
+                                + f"／解析 {perf.fmt_seconds(time.time() - t_start)}")
         log(f"    {rep['analysis_note']}")
     finally:
         if not vcfg.get("keep_video"):

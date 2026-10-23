@@ -206,6 +206,65 @@ def list_results(target: date, pages: int = 4) -> list[dict]:
     return out
 
 
+def _items_under_label(label) -> list[dict]:
+    """結果一覧の日付見出しの下にある試合カードを共通の形にする。"""
+    out = []
+    card = label.find_next_sibling("div", class_="wf-card")
+    for a in (card.select("a.match-item") if card else []):
+        teams = [_t(x) for x in a.select(".match-item-vs-team-name .text-of")]
+        ev = a.select_one(".match-item-event")
+        series = _t(ev.select_one(".match-item-event-series")) if ev else ""
+        event = _t(ev).replace(series, "").strip() if ev else ""
+        vod = " ".join(_t(v) for v in a.select(".match-item-vod"))
+        out.append({
+            "url": BASE + a.get("href", ""),
+            "team1": teams[0] if teams else "", "team2": teams[1] if len(teams) > 1 else "",
+            "event": event, "stage": series,
+            "has_vod": "youtube" in vod.lower(),
+        })
+    return out
+
+
+def iter_results(start: date, end: date, pages_max: int = 5000, log=None):
+    """VLR の結果一覧を古い方向へたどり、start〜end（米国東部時間の見出し）の候補を返す。
+
+    見出しの日付は閲覧地域のタイムゾーンなので、boundary は前後 1 日広げる。
+    正確な日時は試合ページの data-utc-ts で確定する（backfill 側で JST に変換して絞る）。
+    """
+    lo, hi = start - timedelta(days=1), end + timedelta(days=1)
+    seen: set[str] = set()
+    for page in range(1, pages_max + 1):
+        soup = fetch(f"/matches/results/?page={page}")
+        page_oldest = None
+        labels = soup.select("div.wf-label.mod-large")
+        if not labels:
+            break
+        for label in labels:
+            dtext = _t(label)
+            if dtext == "Today":
+                day = datetime.now().date()
+            elif dtext == "Yesterday":
+                day = datetime.now().date() - timedelta(days=1)
+            else:
+                try:
+                    day = datetime.strptime(dtext, "%a, %B %d, %Y").date()
+                except ValueError:
+                    continue
+            page_oldest = day if page_oldest is None or day < page_oldest else page_oldest
+            if not (lo <= day <= hi):
+                continue
+            for it in _items_under_label(label):
+                if it["url"] in seen:
+                    continue
+                seen.add(it["url"])
+                it["label_date"] = day
+                yield it
+        if log and page % 20 == 0:
+            log(f"  VLR 結果一覧 {page} ページ目（いちばん古い見出し {page_oldest}）…")
+        if page_oldest is None or page_oldest < lo:
+            break
+
+
 def filter_results(items: list[dict], f: dict) -> list[dict]:
     inc = [s.lower() for s in f.get("event_include") or []]
     exc = [s.lower() for s in f.get("event_exclude") or []]

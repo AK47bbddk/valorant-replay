@@ -6,6 +6,11 @@
   python -m vreplay run --upsert-only         # Notion の試合・マップ行だけ（GitHub Actions 用）
   python -m vreplay calibrate --match URL --map 1 --at 600   # ROI 確認画像を出す
   python -m vreplay fetch                     # 自宅 PC 用：動画の該当区間だけ Drive に保存（Colab のボット判定回避）
+  python -m vreplay backfill --from 2024-01-01 --to 2026-12-31  # 過去試合のメタデータを DB に入れる
+  python -m vreplay batch --limit 20          # DB の未処理マップを動画解析（再開可能）
+  python -m vreplay playbook                  # チーム別・構成別の HTML を作る
+  python -m vreplay sync                      # 既存の report.json を DB に取り込む
+  python -m vreplay stats                     # DB の件数
 """
 from __future__ import annotations
 
@@ -34,8 +39,40 @@ def main():
     c.add_argument("--match", required=True)
     c.add_argument("--map", type=int, default=1)
     c.add_argument("--at", type=float, default=600, help="マップ開始から何秒後から見るか")
-    c.add_argument("--span", type=int, default=150, help="何秒ぶん取得してキルフィードを探すか")
+    c.add_argument("--span", type=int, default=150, help="何秒かん取得してキルフィードを探すか")
     c.add_argument("--config")
+
+    b = sub.add_parser("backfill", help="過去の試合メタデータを VLR から DB に入れる（動画なし）")
+    b.add_argument("--from", dest="start", default="2024-01-01", help="YYYY-MM-DD")
+    b.add_argument("--to", dest="end", default=date.today().isoformat(), help="YYYY-MM-DD")
+    b.add_argument("--limit", type=int, help="追加する試合数の上限")
+    b.add_argument("--pages-max", type=int, default=5000)
+    b.add_argument("--all-events", action="store_true", help="Tier1 以外も含める")
+    b.add_argument("--dry-run", action="store_true", help="候補の数だけ数える")
+    b.add_argument("--config")
+
+    bt = sub.add_parser("batch", help="DB の未処理マップを動画解析する（再開可能）")
+    bt.add_argument("--from", dest="start", help="この日以降（YYYY-MM-DD）")
+    bt.add_argument("--to", dest="end", help="この日まで（YYYY-MM-DD）")
+    bt.add_argument("--limit", type=int, help="処理するマップ数の上限")
+    bt.add_argument("--no-retry", action="store_true", help="失敗済みマップを飛ばす")
+    bt.add_argument("--shard", help="1/4 のように分割（別プロセスで回すとき用）")
+    bt.add_argument("--force", action="store_true", help="report.json があっても作り直す")
+    bt.add_argument("--out", help="出力ルート（既定 output.dir）")
+    bt.add_argument("--config")
+
+    pb = sub.add_parser("playbook", help="DB からチーム別・構成別の HTML を作る")
+    pb.add_argument("--out", help="出力先（既定 output.dir/playbook）")
+    pb.add_argument("--min-maps", type=int, default=1, help="このマップ数未満のチーム/構成を省く")
+    pb.add_argument("--config")
+
+    sy = sub.add_parser("sync", help="既存の report.json をまとめて DB に入れる")
+    sy.add_argument("--root", help="report.json を探すルート（既定 output.dir）")
+    sy.add_argument("--config")
+
+    st = sub.add_parser("stats", help="DB の中身の件数を表示")
+    st.add_argument("--config")
+
     a = ap.parse_args()
     cfg = config.load(a.config)
 
@@ -47,6 +84,32 @@ def main():
         day = None if a.date == "yesterday" else date.fromisoformat(a.date)
         from .pipeline import fetch
         fetch(cfg, day=day, match_urls=a.match)
+    elif a.cmd == "backfill":
+        from .backfill import run as backfill
+        backfill(cfg, date.fromisoformat(a.start), date.fromisoformat(a.end), limit=a.limit,
+                 pages_max=a.pages_max, tier1=not a.all_events, dry_run=a.dry_run)
+    elif a.cmd == "batch":
+        from .batch import run as batch
+        batch(cfg, start=a.start, end=a.end, limit=a.limit, retry_failed=not a.no_retry,
+              shard=a.shard, force=a.force, out_root=Path(a.out) if a.out else None)
+    elif a.cmd == "playbook":
+        from .playbook import build
+        out = Path(a.out) if a.out else Path(cfg["output"]["dir"]) / "playbook"
+        build(cfg, out, min_maps=a.min_maps)
+    elif a.cmd == "sync":
+        from . import db
+        conn = db.connect(db.warehouse_path(cfg))
+        root = Path(a.root) if a.root else Path(cfg["output"]["dir"])
+        n = db.sync_reports(conn, root)
+        print(f"{n} 件の report.json を DB に取り込みました（{db.warehouse_path(cfg)}）")
+        print(db.stats(conn))
+    elif a.cmd == "stats":
+        from . import db
+        conn = db.connect(db.warehouse_path(cfg))
+        st = db.stats(conn)
+        print(f"DB: {db.warehouse_path(cfg)}")
+        for k, v in st.items():
+            print(f"  {k}: {v}")
     else:
         calibrate(cfg, a.match, a.map, a.at, a.span)
 

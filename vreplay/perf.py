@@ -37,6 +37,7 @@ STAGE_JA = {
     "download": "動画の取得",
     "calibrate": "キャリブレーション",
     "scan": "HUD スキャン",
+    "tactics": "サイト・位置の解析",
     "assets": "ラウンド素材",
     "notion": "Notion 書き込み",
     "html": "HTML レポート",
@@ -359,7 +360,7 @@ def fmt_resources(r: dict | None) -> str:
 
 def note(entries_: list[dict], total_sec: float | None = None) -> str:
     """Notion / HTML に 1 行で出す「処理時間とリソース」。"""
-    rows = [e for e in entries_ if e["stage"] in ("download", "calibrate", "scan", "assets")]
+    rows = [e for e in entries_ if e["stage"] in ("download", "calibrate", "scan", "tactics", "assets")]
     if not rows:
         return ""
     parts = [f"{STAGE_JA.get(e['stage'], e['stage'])} {fmt_seconds(e.get('seconds'))}" for e in rows]

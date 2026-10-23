@@ -79,8 +79,6 @@ def scan_chunk(job: ScanJob) -> dict:
         alive, ult = card_features(f, job.geo)
         batch.append((idx, t, crops, band, alive, ult))
         mm = crop(f, job.roi["minimap"])
-        h, w = mm.shape[:2]
-        mm = cv2.resize(mm, (job.gif_width, int(h * job.gif_width / max(w, 1))), interpolation=cv2.INTER_AREA)
         futs.append(pool.submit(_save, store, idx, "minimap", mm, 80))
         futs.append(pool.submit(_save, store, idx, "killfeed", crop(f, job.roi["killfeed"]), 90))
         if job.geo:

@@ -51,6 +51,7 @@ def silhouette(img, white_v: int = 185, white_s: int = 80, min_area_frac: float 
 
 
 HUD_TEMPLATES = Path(__file__).parent / "data" / "hud_weapons.npz"
+BUNDLED_TEMPLATES = Path(__file__).parent / "data" / "api_weapons.npz"
 
 
 def _iou_fit(m: np.ndarray, t: np.ndarray) -> float:
@@ -86,34 +87,38 @@ class WeaponBook:
     @classmethod
     def load(cls, cache_dir: str | Path) -> "WeaponBook | None":
         hud = dict(np.load(HUD_TEMPLATES)) if HUD_TEMPLATES.exists() else {}
+        tpl: dict[str, np.ndarray] = {}
+        # 同梱の見本を先に読む（オフラインでも武器判定を動かす）
+        if BUNDLED_TEMPLATES.exists():
+            z = np.load(BUNDLED_TEMPLATES, allow_pickle=False)
+            tpl.update({k: z[k] for k in z.files})
         cache = Path(cache_dir) / "weapons.npz"
         if cache.exists():
             z = np.load(cache, allow_pickle=False)
-            return cls({k: z[k] for k in z.files}, hud)
-        try:
-            data = requests.get(API, timeout=20).json()["data"]
-        except Exception:
-            return None
-        tpl = {}
-        for w in data:
-            url = w.get("killStreamIcon") or w.get("displayIcon")
-            if not url:
-                continue
-            try:
-                raw = requests.get(url, timeout=20).content
-                img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_UNCHANGED)
-                m = silhouette(img)
-                if m is not None:
-                    tpl[w["displayName"]] = m
-            except Exception:
-                continue
+            tpl.update({k: z[k] for k in z.files})
         if not tpl:
-            return None
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(cache, **tpl)
-        return cls(tpl, hud)
+            try:
+                data = requests.get(API, timeout=20).json()["data"]
+            except Exception:
+                return cls({}, hud) if hud else None
+            for w in data:
+                url = w.get("killStreamIcon") or w.get("displayIcon")
+                if not url:
+                    continue
+                try:
+                    raw = requests.get(url, timeout=20).content
+                    img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_UNCHANGED)
+                    m = silhouette(img)
+                    if m is not None:
+                        tpl[w["displayName"]] = m
+                except Exception:
+                    continue
+            if tpl:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                np.savez_compressed(cache, **tpl)
+        return cls(tpl, hud) if (tpl or hud) else None
 
-    def classify(self, img, mirror: bool = False, min_score: float = 0.6) -> tuple[str | None, float]:
+    def classify(self, img, mirror: bool = False, min_score: float = 0.5) -> tuple[str | None, float]:
         """返り値 (英語名, 一致度 0〜1)。アイコンが無い・自信がないときは (None, 一致度)。"""
         m = silhouette(img)
         if m is None or m.shape[1] < 8 or m.shape[0] < 4:

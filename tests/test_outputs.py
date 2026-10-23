@@ -55,6 +55,28 @@ def test_gif_kills_ults(tmp_path, monkeypatch):
     assert [s for s, _ in ev] == [5] and sorted(ready0) == [0, 5]
 
 
+def test_ult_events_short_empty_and_partial_drop():
+    n = 8
+    ult = np.zeros((n, 10), np.float32)
+    alive = np.ones((n, 10), bool)
+    # 使用直後に 1 枚だけ空 → 検出
+    ult[1:3, 0] = 0.85
+    ult[3:, 0] = 0.1
+    # 溜まり→半端な値→空 → 検出
+    ult[1:3, 1] = 0.9
+    ult[3, 1] = 0.55
+    ult[4:, 1] = 0.1
+    # 一瞬空になって戻ったノイズ → 検出しない
+    ult[1:3, 2] = 1.0
+    ult[3, 2] = 0.0
+    ult[4:, 2] = 1.0
+    # 1 枚だけ溜まって空 → 検出
+    ult[2, 3] = 0.85
+    ult[3:, 3] = 0.2
+    ev, _ = X.ult_events(ult, alive, list(range(n)))
+    assert [(s, j) for s, j in ev] == [(0, 3), (1, 3), (3, 3)]
+
+
 def test_roster_snap():
     r = X.Roster([("Derke", "VIT"), ("luk xo", "LOUD"), ("SpiritZ1", "DRG")])
     assert r.snap("VITDerke") == ("Derke", "VIT")

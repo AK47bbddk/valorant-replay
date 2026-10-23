@@ -57,6 +57,37 @@ Notion に次の 2 つのデータソースがすでにある。新しい DB は
    - 同じ内容の HTML レポートを Google Drive にも出す（デジタル庁デザインシステムに準拠：Noto Sans JP、本文コントラスト 4.5:1 以上、フォーカスは黄＋黒）
 8. **冪等性**：本文がすでにあるマップはスキップ（`--force` で作り直し）。
 
+## 大量データ（2024〜2026）とプレイブック
+
+前日分だけでなく、過去の VCT Tier1 をまとめて分析できるようにする。動画は重いので、メタデータを先に全部入れ、動画は選んで後から埋める。
+
+1. **ウェアハウス（SQLite）**：`vreplay/db.py`。`matches` / `maps` / `players` / `rounds` / `comps` / `failures`。
+   - `maps.status` は `meta`（メタだけ）→ `done`（動画解析済み）/ `failed`。
+   - `backfill` は VLR の結果一覧を日付でさかのぼり、試合ページからマップ・ラウンド・選手・VOD 秒を入れる。Tier1 以外（Challengers / GC / Game Changers など）は既定で除外。
+   - `batch` は DB の `meta`（必要なら `failed`）を拾って通常の動画解析を回し、`report.json` と画像を日付フォルダに書き、DB に反映する。`status='done'` は飛ばすので再開できる。`--shard 1/4` で分割、`--limit`、`--force`、`--no-retry` に対応。
+2. **サイト・位置（`vreplay/tactics.py`）**：各ラウンドの開始から一定時間、ミニマップのチーム色の点を一定間隔（既定 6 秒）で検出する。
+   - valorant-api.com のマップ・コールアウトを取得して 0〜1 に正規化し、最寄りのコールアウトと A/B/C サイトに割り当てる。
+   - スポーン付近の点の偏りから、90 度単位の回転・反転と「暖色がチーム1か」を自動補正する。
+   - 出力は 16×16 の `grid` / `grid_team` / `grid_side`、サイト別回数、コールアウト別回数、代表位置（最大 12000 点）、ラウンド開始/終了/プラント時刻、信頼度。画像は `_tactics/<slug>.jpg`。positions は `[round, t, x, y, team, side, site, callout]`。
+   - スキャン時に保存したミニマップ画像（`frames_*/*_minimap.jpg`）を再利用し、動画の二度デコードを避ける。
+   - サイト名は近似。`confidence` / `site_conf` が低い場合は断定しない。
+3. **ラウンドの型（`vreplay/patterns.py`）**：positions とラウンド時刻・キルフィードから、防衛の初期配置/ローテーション/リテイク、攻撃のデフォルト/中盤/最終セット/ポストプラント、1ピック後を分類する。
+   - 人数は 1 サンプルあたりの平均で、`A2 B2 Mid1` のように表示する。個人 ID は取れないためチーム単位の重心・分布として扱う。
+   - プラント時刻は `scan.obs["spike"]` から、最初の設置後カウントダウンで判定する。
+4. **プレイブック（`vreplay/playbook.py`）**：DB からチーム×マップ、構成×マップの HTML を作る。
+   - 攻撃/防御の勝率、サイト別回数、コールアウト、ヒートマップ、構成ごとの勝率に加え、`patterns.py` の型別回数・勝率・例ラウンドを出す。
+   - 出力は `output.dir/playbook/index.html`、`team_<slug>.html`、`comp_<slug>.html`、`data.json`、`img/`。
+
+コマンド例：
+
+```powershell
+vreplay backfill --from 2024-01-01 --to 2026-12-31
+vreplay batch --limit 20
+vreplay playbook --min-maps 3
+```
+
+規模の現実：全期間の動画は数 TB・解析に数週間かかる。まず `backfill` で全メタデータを入れ、`playbook` で傾向を見てから、必要なチーム・期間に `batch --from ... --to ...` を絞る。
+
 ## 非機能要件
 
 - HUD の位置は放送で変わるので、レイアウトのプリセット選択・カードの円検出・キルフィードの選手名検出で自動で合わせる。

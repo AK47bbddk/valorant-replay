@@ -89,6 +89,12 @@ def _map_section(rep: dict, base: Path) -> str:
            f'<p class="sub">{_e(rep.get("event"))} / {_e(rep.get("stage"))}　{" ・ ".join(links)}</p>']
     if rep.get("analysis_note"):
         out.append(f'<p class="note">{_e(rep["analysis_note"])}</p>')
+    tac = rep.get("tactics") or {}
+    if tac.get("sites"):
+        sites = "、".join(f'{s.get("site")} {s.get("count")}R' for s in tac["sites"][:5])
+        conf = float(tac.get("confidence") or 0)
+        out.append(f'<p class="sub">推定サイト（動画のミニマップから・目安）：{_e(sites)}'
+                   f'　信頼度 {conf:.0%}</p>')
     if rep.get("perf_note"):
         out.append(f'<p class="sub">{_e(rep["perf_note"])}</p>')
     if rep.get("timings"):
@@ -130,10 +136,13 @@ def _map_section(rep: dict, base: Path) -> str:
                        + (f'　{_e(S.player_weapons(r, no))}' if S.player_weapons(r, no) else "") + '</li>'
                        for no, tg in (("1", t1), ("2", t2)))
         notes = "".join(f'<p class="note">{_e(n)}</p>' for n in r.get("notes") or [])
+        rt = r.get("tactics") or {}
+        site = (f'　推定サイト <b>{_e(rt["site"])}</b>'
+                f'（{float(rt.get("site_conf") or 0):.0%}）') if rt.get("site") else ""
         out.append(
             f'<details><summary>R{r["n"]}　{_e(S.tag(rep, r.get("winner")))} 勝利　<span class="chip">{_e(S.how(r))}</span> '
             f'<span class="chip">{_e(r.get("score"))}</span></summary><div class="body">'
-            f'<p>{yt}ラウンド時間 {_e(r.get("duration") or "-")}</p><ul class="kills">{buys}</ul>{ready}'
+            f'<p>{yt}ラウンド時間 {_e(r.get("duration") or "-")}{site}</p><ul class="kills">{buys}</ul>{ready}'
             f'<div class="grid">{_img(a.get("minimap_start"), base, "ラウンド開始時のミニマップ")}'
             f'{_img(a.get("minimap_gif"), base, gif_cap)}</div>'
             f'{_img(a.get("buy_panels"), base, "購入フェーズ終了時のパネル（武器・アーマー・ULT）")}'

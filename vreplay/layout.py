@@ -218,7 +218,7 @@ def card_geometry(cards: dict, W: int, H: int) -> dict:
                 "card": clip(xa, cy - 0.70 * s, xb, cy + 0.28 * s),
                 "name": clip(na, cy - 0.60 * s, nb, cy - 0.30 * s),
                 "ult": clip(cx - 1.1 * r, cy - 1.1 * r, cx + 1.1 * r, cy + 1.1 * r),
-                "weapon": clip(wa, cy - 0.22 * s, wb, cy + 0.14 * s),
+                "weapon": clip(wa, cy - 0.22 * s, wb, cy + 0.20 * s),
                 "hp": clip(ha, cy - 0.30 * s, hb, cy - 0.15 * s),
             })
         out[side] = rows

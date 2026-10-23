@@ -107,20 +107,24 @@ def is_alive(hp_crop) -> bool:
 
 
 def ult_ring(ult_crop) -> float:
-    """ULT アイコン外周の点灯率。溜まると途切れのない白い輪（≒1.0）、未完成は点線（ポイント数に比例）。"""
+    """ULT アイコン外周の点灯部（溜まると途切れなくなり≒1.0、未完成は点線（ポイント数に比例）。"""
     if ult_crop is None or ult_crop.size == 0:
         return 0.0
     h, w = ult_crop.shape[:2]
     cy, cx = h / 2, w / 2
-    r = min(h, w) / 2 / 1.1                     # ult 枠は半径の 1.1 倍で切っている
+    r = min(h, w) / 2 / 1.1                     # ult 枠は半径の 1.1 倍で切ってある
     hsv = cv2.cvtColor(ult_crop, cv2.COLOR_BGR2HSV)
     ang = np.linspace(0, 2 * np.pi, 180, endpoint=False)
     best = 0.0
-    for rad in np.linspace(0.8, 1.08, 6):
-        xs = np.clip((cx + rad * r * np.cos(ang)).astype(int), 0, w - 1)
-        ys = np.clip((cy + rad * r * np.sin(ang)).astype(int), 0, h - 1)
-        px = hsv[ys, xs]
-        best = max(best, float(np.mean((px[:, 2] > 170) & (px[:, 1] < 90))))
+    # HUD の丸は数 px ずれる。中心を少しずらして最も点灯している円を採る
+    for oy, ox in ((0, 0), (-0.06, 0), (0.06, 0), (0, -0.06), (0, 0.06)):
+        ccx, ccy = cx + ox * r, cy + oy * r
+        for rad in np.linspace(0.80, 1.10, 8):
+            xs = np.clip((ccx + rad * r * np.cos(ang)).astype(int), 0, w - 1)
+            ys = np.clip((ccy + rad * r * np.sin(ang)).astype(int), 0, h - 1)
+            px = hsv[ys, xs]
+            score = float(np.mean((px[:, 2] >= 150) & (px[:, 1] <= 110)))
+            best = max(best, score)
     return best
 
 
@@ -178,24 +182,46 @@ def buy_image(store: FrameStore, idx: int | None, path: Path) -> Path | None:
     return path
 
 
-def ult_events(ult: np.ndarray, alive: np.ndarray, idxs: list[int], ready_th: float = 0.9, empty_th: float = 0.3):
-    """ライブ区間で「生存したまま 溜まっている（2 連続）→ 空（2 連続）」になった瞬間を ULT 使用とする。
+def ult_events(ult: np.ndarray, alive: np.ndarray, idxs: list[int], ready_th: float = 0.75, empty_th: float = 0.45):
+    """ライブ区間で「溜まっている → 空」になった瞬間を ULT 使用とする。
 
+    2fps では使用直後にリングが空になり、そのまま死亡すると空フレームが 1 枚しか残らない。
+    そのため「溜まり」は 1 フレームから、「空」は次フレームが空または死亡/末尾なら確定とする。
     返り値: ([(スロット番号 0..9, 使用時の位置 j)], ラウンド開始時に溜まっていたスロット)
     """
     events, ready0 = [], []
+    drop_th = max(empty_th, round(ready_th - 0.2, 2)) + 1e-6
     for s in range(10):
-        hist = []
-        for j, i in enumerate(idxs):
-            if not alive[i, s]:
-                hist.append(None)
+        vals = [None if not alive[i, s] else float(ult[i, s]) for i in idxs]
+        states = []
+        ready_run, last_ready = 0, None
+        for j, v in enumerate(vals):
+            if v is None:
+                states.append(None)
+                ready_run, last_ready = 0, None
                 continue
-            v = ult[i, s]
-            hist.append("R" if v >= ready_th else "E" if v <= empty_th else "-")
-            if len(hist) >= 4 and hist[-4] == "R" and hist[-3] == "R" and hist[-2] == "E" and hist[-1] == "E":
-                events.append((s, j - 1))
-        first = [h for h in hist[:4] if h is not None]
-        if first and first.count("R") >= max(1, len(first) // 2 + 1):
+            if v >= ready_th:
+                states.append("R")
+                ready_run += 1
+                last_ready = j
+                continue
+            if v <= drop_th:
+                states.append("E")
+                if ready_run and last_ready is not None and j - last_ready <= 3:
+                    nxt = next((x for x in vals[j + 1:j + 3] if x is not None), None)
+                    if nxt is None or nxt <= drop_th:
+                        events.append((s, j))
+                ready_run, last_ready = 0, None
+                continue
+            states.append("-")
+        initial = []
+        for h in states[:6]:
+            if h is None:
+                continue
+            if h != "R":
+                break
+            initial.append(h)
+        if initial:
             ready0.append(s)
     return sorted(events, key=lambda e: e[1]), ready0
 
