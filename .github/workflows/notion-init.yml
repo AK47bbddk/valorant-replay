@@ -19,6 +19,14 @@ on:
         description: "Comma-separated data source IDs to inspect (optional)"
         required: false
         default: ""
+      match_ds:
+        description: "Existing match data source ID (schema source)"
+        required: false
+        default: "34cd54a7-c90b-80fd-9f31-000b2682704c"
+      map_ds:
+        description: "Existing map data source ID (schema source)"
+        required: false
+        default: "34cd54a7-c90b-8180-a2df-000b5f0d3378"
 jobs:
   notion:
     runs-on: ubuntu-latest
@@ -39,3 +47,5 @@ jobs:
           --reference-db "${{ inputs.reference_db }}"
           --parent-page "${{ inputs.parent_page }}"
           --data-sources "${{ inputs.data_sources }}"
+          --match-ds "${{ inputs.match_ds }}"
+          --map-ds "${{ inputs.map_ds }}"

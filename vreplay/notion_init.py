@@ -13,6 +13,8 @@ from .notion import Notion
 
 MATCH_TITLE = "大会ログくん（新）"
 MAP_TITLE = "マップ詳細（新）"
+MATCH_DS = "34cd54a7-c90b-80fd-9f31-000b2682704c"
+MAP_DS = "34cd54a7-c90b-8180-a2df-000b5f0d3378"
 
 
 def clean_id(value: str | None) -> str:
@@ -80,37 +82,60 @@ def inspect_data_sources(nt: Notion, ids: list[str]) -> dict:
     return {"bot": nt.req("GET", "/users/me").get("name"), "data_sources": out}
 
 
-def _match_props() -> dict:
-    return {
-        "名前": {"title": {}},
-        "試合URL": {"url": {}},
-        "動画URL": {"url": {}},
-        "試合日": {"date": {}},
-        "ステージ": {"rich_text": {}},
-        "マップカウント": {"rich_text": {}},
-        "トーナメント": {"select": {"options": []}},
-        "Tier": {"select": {"options": [
-            {"name": n} for n in ("Tier1", "Tier2", "GC", "Unknown")
-        ]}},
-        "地域": {"select": {"options": []}},
-        "チーム": {"multi_select": {"options": []}},
-    }
+def _clone_props(props: dict) -> dict:
+    out = {}
+    for name, prop in props.items():
+        t = prop.get("type")
+        if t == "relation":
+            continue
+        if t == "title":
+            out[name] = {"title": {}}
+        elif t == "rich_text":
+            out[name] = {"rich_text": {}}
+        elif t == "url":
+            out[name] = {"url": {}}
+        elif t == "date":
+            out[name] = {"date": {}}
+        elif t == "number":
+            out[name] = {"number": {"format": (prop.get("number") or {}).get("format", "number")}}
+        elif t in ("select", "multi_select"):
+            opts = []
+            for o in (prop.get(t) or {}).get("options") or []:
+                item = {"name": o["name"]}
+                if o.get("color"):
+                    item["color"] = o["color"]
+                opts.append(item)
+            out[name] = {t: {"options": opts}}
+        elif t == "checkbox":
+            out[name] = {"checkbox": {}}
+        else:
+            raise RuntimeError(f"unsupported property type: {name} ({t})")
+    return out
 
 
-def _map_props(match_ds: str) -> dict:
-    return {
-        "マップ名": {"title": {}},
-        "マップ順": {"number": {"format": "number"}},
-        "動画URL": {"url": {}},
-        "勝者": {"select": {"options": []}},
-        "チーム1ラウンド": {"number": {"format": "number"}},
-        "チーム2ラウンド": {"number": {"format": "number"}},
-        "合計ラウンド": {"number": {"format": "number"}},
-        "試合": {"relation": {
-            "data_source_id": match_ds,
-            "dual_property": {"synced_property_name": "マップ"},
-        }},
-    }
+def _find_existing(nt: Notion, title: str) -> tuple[str, str] | None:
+    res = nt.req("POST", "/search", {"query": title, "page_size": 100})
+    for obj in res.get("results", []):
+        if obj.get("object") != "database":
+            continue
+        got = "".join(x.get("plain_text", "") for x in obj.get("title") or [])
+        if got != title:
+            continue
+        db_id = obj["id"]
+        ds_id = _ds_id(obj)
+        if not ds_id:
+            obj = nt.req("GET", f"/databases/{db_id}")
+            ds_id = _ds_id(obj)
+        if ds_id:
+            return db_id, ds_id
+    return None
+
+
+def _create_or_reuse(nt: Notion, parent_id: str, title: str, props: dict) -> tuple[str, str]:
+    found = _find_existing(nt, title)
+    if found:
+        return found
+    return _create(nt, parent_id, title, props)
 
 
 def _create(nt: Notion, parent_id: str, title: str, props: dict) -> tuple[str, str]:
@@ -133,9 +158,29 @@ def _create(nt: Notion, parent_id: str, title: str, props: dict) -> tuple[str, s
     return db_id, ds_id
 
 
-def create(nt: Notion, parent_id: str, ref_id: str) -> dict:
-    match_db, match_ds = _create(nt, parent_id, MATCH_TITLE, _match_props())
-    map_db, map_ds = _create(nt, parent_id, MAP_TITLE, _map_props(match_ds))
+def create(nt: Notion, parent_id: str, ref_id: str, match_src: str, map_src: str) -> dict:
+    match_src = nt.req("GET", f"/data_sources/{clean_id(match_src)}")
+    map_src = nt.req("GET", f"/data_sources/{clean_id(map_src)}")
+    match_props = _clone_props(match_src.get("properties") or {})
+    map_props = _clone_props(map_src.get("properties") or {})
+
+    match_db, match_ds = _create_or_reuse(nt, parent_id, MATCH_TITLE, match_props)
+    map_props["試合"] = {"relation": {
+        "data_source_id": match_ds,
+        "dual_property": {"synced_property_name": "マップ"},
+    }}
+    map_db, map_ds = _create_or_reuse(nt, parent_id, MAP_TITLE, map_props)
+
+    match_now = nt.req("GET", f"/data_sources/{match_ds}")
+    rel = (match_now.get("properties") or {}).get("マップ") or {}
+    if (rel.get("relation") or {}).get("data_source_id") != map_ds:
+        nt.req("PATCH", f"/data_sources/{map_ds}", {"properties": {
+            "試合": {"relation": {
+                "data_source_id": match_ds,
+                "dual_property": {"synced_property_name": "マップ"},
+            }},
+        }})
+
     return {
         "reference_database_id": ref_id,
         "parent_page_id": parent_id,
@@ -150,6 +195,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--reference-db", default="37cd54a7c90b812eb284cdeca3e749be")
     ap.add_argument("--data-sources", default="")
+    ap.add_argument("--match-ds", default=MATCH_DS)
+    ap.add_argument("--map-ds", default=MAP_DS)
     ap.add_argument("--parent-page", default="")
     ap.add_argument("--mode", choices=("inspect", "create"), default="inspect")
     a = ap.parse_args(argv)
@@ -173,8 +220,8 @@ def main(argv: list[str] | None = None) -> int:
     parent = clean_id(a.parent_page) or clean_id((info["database"].get("parent") or {}).get("page_id"))
     if not parent:
         raise SystemExit("parent page id is not available; pass --parent-page")
-    out = create(nt, parent, ref_id)
-    print(json.dumps(out, ensure_ascii=False, indent=2))
+    out = create(nt, parent, ref_id, a.match_ds, a.map_ds)
+    print(json.dumps(out, ensure_ascii=True, indent=2))
     return 0
 
 
