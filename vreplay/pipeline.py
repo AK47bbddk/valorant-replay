@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import db, perf, report, tactics, vlr
+from . import db, perf, report, vlr
 from .notion import Notion, how_ja, upsert_match, write_map_page
 
 JST = vlr.JST
@@ -198,6 +198,7 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                 "n": r.n, "start": r.t_drop, "end": r.t_end, "side1": sides.get(r.n),
                 "plant": next((float(t[i]) for i in r.live if obs["spike"][i]), None),
             } for r in det]
+            from . import tactics
             with perf.stage("tactics", tag=tag, label="サイト・位置の解析") as st_tac:
                 tac = tactics.analyze_video(cfg, path, md.name, tac_rounds, out_dir=out_dir, log=log,
                                             store=store, obs=obs)
