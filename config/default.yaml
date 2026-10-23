@@ -58,5 +58,5 @@ output:
 
 notion:
   enabled: true
-  match_data_source: 34cd54a7-c90b-80fd-9f31-000b2682704c
-  map_data_source: 34cd54a7-c90b-8180-a2df-000b5f0d3378
+  match_data_source: e70c4f36-8160-4ce0-a35b-dfe52f0f7e16
+  map_data_source: 3baf8426-8608-49dd-beb6-f8e894447f57

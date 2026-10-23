@@ -1,5 +1,5 @@
 # 毎朝 5:23（JST）に前日の試合を VLR から取り、Notion の「大会ログくん」「マップ詳細」の行だけ更新する。
-# 動画解析（GPU）は Colab 側。リポジトリの Settings → Secrets → Actions に NOTION_TOKEN を登録すること。
+# 動画解析（GPU）は Colab 側。リポジトリの Environment「NOTION_TOKEN」に NOTION_TOKEN を登録すること。
 name: daily-notion
 on:
   schedule:
@@ -13,6 +13,7 @@ jobs:
   upsert:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    environment: NOTION_TOKEN
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

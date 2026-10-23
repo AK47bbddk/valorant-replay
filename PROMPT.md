@@ -15,12 +15,12 @@ VALORANT のプロ試合を、翌朝ページを1枚見るだけでふり返れ�
 
 Notion に次の 2 つのデータソースがすでにある。新しい DB は作らず、ここに書き込む。
 
-1. **大会ログくん**（試合 1 行 = 1 試合） data source: `34cd54a7-c90b-80fd-9f31-000b2682704c`
+1. **大会ログくん**（試合 1 行 = 1 試合） data source: `e70c4f36-8160-4ce0-a35b-dfe52f0f7e16`
    - `名前`(title, 例 "NRG vs 100 Thieves") / `試合URL`(url, VLR の試合URL・upsert キー) / `動画URL`(url)
    - `試合日`(date, **JST の日付**) / `ステージ`(text) / `マップカウント`(text, 例 "2-1")
    - `トーナメント`(select) / `Tier`(select: Tier1, Tier2, GC, Unknown) / `地域`(select) / `チーム`(multi_select)
    - `マップ`(relation → マップ詳細)
-2. **マップ詳細**（1 行 = 1 マップ） data source: `34cd54a7-c90b-8180-a2df-000b5f0d3378`
+2. **マップ詳細**（1 行 = 1 マップ） data source: `3baf8426-8608-49dd-beb6-f8e894447f57`
    - `マップ名`(title, 例 "NRG vs 100 Thieves Abyss") / `マップ順`(number) / `動画URL`(url, **マップ開始秒つき** 例 `https://youtu.be/xxxx?t=405`)
    - `勝者`(select) / `チーム1ラウンド` / `チーム2ラウンド` / `合計ラウンド`(number) / `試合`(relation)
    - **ページ本文は空**。ここにラウンドごとの分析を書き込む。

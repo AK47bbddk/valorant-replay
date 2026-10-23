@@ -149,8 +149,9 @@ vreplay playbook
 `.github/workflows/daily-notion.yml` が毎朝 5:23（JST）に前日の試合を VLR から取り、Notion の「大会ログくん」「マップ詳細」の**行だけ**を更新します（GPU 不要、本文は書かない）。
 朝 Colab を実行すると、その行のマップページ本文に動画解析が埋まります。
 
-有効にするには、GitHub のリポジトリ → Settings → Secrets and variables → Actions に `NOTION_TOKEN` を登録してください。
+有効にするには、GitHub のリポジトリ → Settings → Environments で `NOTION_TOKEN` 環境を作り、その Environment secret に `NOTION_TOKEN` を登録してください。
 Actions タブの「daily-notion」→「Run workflow」で日付を指定した手動実行もできます。
+新しく2DBを作り直す場合は、Actions の「notion-init」で `mode=create` を実行します（既存DBのスキーマを複製し、relation も設定します）。
 
 ## 検出結果を確かめたいとき
 
