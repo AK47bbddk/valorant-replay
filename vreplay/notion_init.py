@@ -59,12 +59,23 @@ def inspect_data_sources(nt: Notion, ids: list[str]) -> dict:
         if not ds_id:
             continue
         ds = nt.req("GET", f"/data_sources/{ds_id}")
+        props = {}
+        for name, prop in (ds.get("properties") or {}).items():
+            item = {"type": prop.get("type")}
+            if prop.get("type") == "relation":
+                rel = prop.get("relation") or {}
+                item["relation"] = {
+                    "data_source_id": rel.get("data_source_id"),
+                    "database_id": rel.get("database_id"),
+                    "dual": bool(rel.get("dual_property")),
+                }
+            props[name] = item
         out[ds_id] = {
             "id": ds.get("id"),
             "title": "".join(x.get("plain_text", "") for x in ds.get("title") or []),
             "parent": ds.get("parent"),
             "database_parent": ds.get("database_parent"),
-            "properties": ds.get("properties") or {},
+            "properties": props,
         }
     return {"bot": nt.req("GET", "/users/me").get("name"), "data_sources": out}
 
@@ -149,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
     nt = Notion(token)
 
     if a.data_sources:
-        print(json.dumps(inspect_data_sources(nt, a.data_sources.split(",")), ensure_ascii=False, indent=2))
+        print(json.dumps(inspect_data_sources(nt, a.data_sources.split(",")), ensure_ascii=True, indent=2))
         return 0
 
     ref_id = clean_id(a.reference_db)
