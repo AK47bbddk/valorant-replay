@@ -98,14 +98,16 @@ def _clone_props(props: dict) -> dict:
             out[name] = {"date": {}}
         elif t == "number":
             out[name] = {"number": {"format": (prop.get("number") or {}).get("format", "number")}}
-        elif t in ("select", "multi_select"):
+        elif t == "multi_select":
+            out[name] = {"multi_select": {"options": []}}
+        elif t == "select":
             opts = []
-            for o in (prop.get(t) or {}).get("options") or []:
+            for o in (prop.get("select") or {}).get("options") or []:
                 item = {"name": o["name"]}
                 if o.get("color"):
                     item["color"] = o["color"]
                 opts.append(item)
-            out[name] = {t: {"options": opts}}
+            out[name] = {"select": {"options": opts[:100]}}
         elif t == "checkbox":
             out[name] = {"checkbox": {}}
         else:
