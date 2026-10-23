@@ -52,6 +52,23 @@ def inspect(nt: Notion, ref_id: str) -> dict:
     }
 
 
+def inspect_data_sources(nt: Notion, ids: list[str]) -> dict:
+    out = {}
+    for raw in ids:
+        ds_id = clean_id(raw)
+        if not ds_id:
+            continue
+        ds = nt.req("GET", f"/data_sources/{ds_id}")
+        out[ds_id] = {
+            "id": ds.get("id"),
+            "title": "".join(x.get("plain_text", "") for x in ds.get("title") or []),
+            "parent": ds.get("parent"),
+            "database_parent": ds.get("database_parent"),
+            "properties": ds.get("properties") or {},
+        }
+    return {"bot": nt.req("GET", "/users/me").get("name"), "data_sources": out}
+
+
 def _match_props() -> dict:
     return {
         "名前": {"title": {}},
@@ -121,6 +138,7 @@ def create(nt: Notion, parent_id: str, ref_id: str) -> dict:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--reference-db", default="37cd54a7c90b812eb284cdeca3e749be")
+    ap.add_argument("--data-sources", default="")
     ap.add_argument("--parent-page", default="")
     ap.add_argument("--mode", choices=("inspect", "create"), default="inspect")
     a = ap.parse_args(argv)
@@ -129,6 +147,11 @@ def main(argv: list[str] | None = None) -> int:
     if not token:
         raise SystemExit("NOTION_TOKEN is empty")
     nt = Notion(token)
+
+    if a.data_sources:
+        print(json.dumps(inspect_data_sources(nt, a.data_sources.split(",")), ensure_ascii=False, indent=2))
+        return 0
+
     ref_id = clean_id(a.reference_db)
     info = inspect(nt, ref_id)
 

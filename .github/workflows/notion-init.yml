@@ -15,6 +15,10 @@ on:
         description: "Parent page ID (empty = parent of the reference database)"
         required: false
         default: ""
+      data_sources:
+        description: "Comma-separated data source IDs to inspect (optional)"
+        required: false
+        default: ""
 jobs:
   notion:
     runs-on: ubuntu-latest
@@ -34,3 +38,4 @@ jobs:
           --mode "${{ inputs.mode }}"
           --reference-db "${{ inputs.reference_db }}"
           --parent-page "${{ inputs.parent_page }}"
+          --data-sources "${{ inputs.data_sources }}"
