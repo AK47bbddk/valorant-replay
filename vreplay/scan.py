@@ -96,15 +96,23 @@ def scan_chunk(job: ScanJob) -> dict:
         panel_boxes += [("", side, panel_bbox(job.geo, side)) for side in ("L", "R")]
     if job.panel_geo and job.panel_geo != job.geo:
         panel_boxes += [("_buy", side, panel_bbox(job.panel_geo, side)) for side in ("L", "R")]
-    out = {k: [] for k in ("idx", "t", "band", "timer_txt", "sl_txt", "sr_txt", "round_txt", "alive", "ult")}
+    from .extract import _bands_changed, killfeed_bands
+    import time as _time
+    out = {k: [] for k in ("idx", "t", "band", "timer_txt", "sl_txt", "sr_txt", "round_txt", "alive", "ult", "red")}
     batch = []
-    prev_kf = None
+    prev_kf, kf_bands, kf_last, kf_seen_bands = None, [], -1e9, False
+    prof = {"decode": 0.0, "ocr": 0.0, "features": 0.0, "save": 0.0}
+    # パネル（カード）の保存は、装備表の窓がある（2 パス目）ときは「開始 9 秒前〜開始 13 秒後」と 5 秒おきだけ
+    panel_windows = tuple((a, b + 10.0) for a, b in job.table_windows)
 
     def flush():
         if not batch:
             return
+        t0 = _time.perf_counter()
         res = {k: readers[k].read([b[2][i] for b in batch]) for i, k in enumerate(FIELDS)}
-        for j, (idx, t, _, band, alive, ult) in enumerate(batch):
+        prof["ocr"] += _time.perf_counter() - t0
+        for j, (idx, t, _, band, alive, ult, red) in enumerate(batch):
+            out["red"].append(red)
             out["idx"].append(idx)
             out["t"].append(t)
             out["band"].append(band)
@@ -119,30 +127,54 @@ def scan_chunk(job: ScanJob) -> dict:
     futs = []
     frames = (iter_keyframes(Path(job.path), job.start, job.duration) if job.keyframes
               else iter_frames(Path(job.path), job.fps, job.start, job.duration, hwaccel=job.hwaccel))
+    t_wait = _time.perf_counter()
     for t, f in frames:
+        t_got = _time.perf_counter()
+        prof["decode"] += t_got - t_wait
         idx = int(round(t * job.fps))
         crops = [field_crop(f, job.roi, k) for k in FIELDS]
         band = cv2.resize(crop(f, HUD_BAND), BAND_SIZE, interpolation=cv2.INTER_AREA)
         alive, ult = card_features(f, job.geo)
-        batch.append((idx, t, crops, band, alive, ult))
+        red = red_fraction(crop(f, job.roi["timer"]))
+        batch.append((idx, t, crops, band, alive, ult, red))
+        prof["features"] += _time.perf_counter() - t_got
         if len(batch) >= 32:
             flush()
         if not job.save:
+            t_wait = _time.perf_counter()
             continue
+        t_s = _time.perf_counter()
         if any(a <= t <= b for a, b in job.table_windows):
             futs.append(pool.submit(_save, store, idx, "table", crop(f, list(job.table_roi)), 90))
         if job.keyframes or _due(idx, job.fps, job.minimap_every):
             futs.append(pool.submit(_save, store, idx, "minimap", crop(f, job.roi["minimap"]), 80))
         kf = crop(f, job.roi["killfeed"])
-        if job.killfeed_on_change:
-            save_kf, prev_kf = _changed(prev_kf, kf)
-        else:
+        if not job.killfeed_on_change:
             save_kf = True
+        else:
+            # 白い名前の行に新しい行が出たときだけ保存。行が見つからない放送では見た目の変化＋2 秒おき
+            bands = killfeed_bands(kf)
+            kf_seen_bands = kf_seen_bands or bool(bands)
+            if bands or kf_seen_bands:
+                save_kf = _bands_changed(bands, kf_bands)
+                if save_kf:
+                    kf_bands = bands
+            else:
+                ch, prev_kf = _changed(prev_kf, kf)
+                save_kf = ch and t - kf_last >= 2.0
+            if save_kf:
+                kf_last = t
         if save_kf:
             futs.append(pool.submit(_save, store, idx, "killfeed", kf, 90))
-        if job.keyframes or _due(idx, job.fps, job.panel_every):
+        if panel_windows:
+            save_panel = any(a <= t <= b for a, b in panel_windows) or _due(idx, job.fps, 5.0)
+        else:
+            save_panel = job.keyframes or _due(idx, job.fps, job.panel_every)
+        if save_panel:
             for suffix, side, (x0, y0, x1, y1) in panel_boxes:
                 futs.append(pool.submit(_save, store, idx, f"panel{side}{suffix}", f[y0:y1, x0:x1].copy(), 90))
+        prof["save"] += _time.perf_counter() - t_s
+        t_wait = _time.perf_counter()
         if len(futs) > 400:
             for x in futs:
                 x.result()
@@ -155,7 +187,18 @@ def scan_chunk(job: ScanJob) -> dict:
     out["ocr_gpu"] = bool(getattr(ocr, "gpu", False))
     out["ocr_note"] = getattr(ocr, "note", "")
     out["dense"] = [not job.keyframes] * len(out["t"])
+    out["prof"] = prof
     return out
+
+
+def red_fraction(img) -> float:
+    """タイマー欄の赤い部分の割合。スパイク設置後は、Riot の放送では赤いスパイクのアイコン、
+    VCT CN では赤い秒数（14.51）になる。"""
+    if img is None or img.size == 0:
+        return 0.0
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    h, sat, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    return float(np.mean(((h <= 8) | (h >= 172)) & (sat >= 120) & (v >= 120)))
 
 
 def _pieces(segments: list[tuple[float, float]], n: int, min_len: float = 45.0) -> list[tuple[float, float]]:
@@ -213,7 +256,7 @@ def scan(path: Path, duration: float, fps: float, roi: dict, geo: dict | None, c
     return merged
 
 
-KEYS = ("idx", "t", "band", "timer_txt", "sl_txt", "sr_txt", "round_txt", "alive", "ult", "dense")
+KEYS = ("idx", "t", "band", "timer_txt", "sl_txt", "sr_txt", "round_txt", "alive", "ult", "dense", "red")
 
 
 def merge_obs(parts: list[dict], cfg: dict, drop_sparse_in: list[tuple[float, float]] = ()) -> dict:
@@ -237,10 +280,11 @@ def merge_obs(parts: list[dict], cfg: dict, drop_sparse_in: list[tuple[float, fl
             continue
         dedup.append(r)
     for k in KEYS:
-        merged[k] = [(p[k][j] if k in p else True) for _, _, p, j in dedup]
+        merged[k] = [(p[k][j] if k in p else (0.0 if k == "red" else True)) for _, _, p, j in dedup]
     rs = cfg["hud"]["round_timer_sec"]
     merged["timer"] = [parse_timer(x, rs) for x in merged["timer_txt"]]
-    merged["spike"] = [is_spike_text(x) for x in merged["timer_txt"]]
+    merged["spike"] = [is_spike_text(x) or (r >= 0.06 and parse_timer(x, rs) is None)
+                       for x, r in zip(merged["timer_txt"], merged["red"])]
     merged["sl"] = [parse_score(x) for x in merged["sl_txt"]]
     merged["sr"] = [parse_score(x) for x in merged["sr_txt"]]
     merged["rnd"] = [parse_round(x) for x in merged["round_txt"]]
@@ -249,6 +293,11 @@ def merge_obs(parts: list[dict], cfg: dict, drop_sparse_in: list[tuple[float, fl
     merged["ult"] = np.stack(merged["ult"]) if merged["ult"] else np.zeros((0, 10), np.float32)
     merged["dense"] = np.array(merged["dense"], bool)
     merged["ocr_calls"] = sum(p.get("ocr_calls", 0) for p in parts)
+    prof: dict = {}
+    for p in parts:
+        for k, v in (p.get("prof") or {}).items():
+            prof[k] = prof.get(k, 0.0) + v
+    merged["prof"] = prof
     return merged
 
 

@@ -119,11 +119,11 @@ def calibrate(cfg: dict, path: Path, md: vlr.MapData, roster, n: int = 30, log=p
     from .extract import _ocr, find_killfeed
     from .layout import card_geometry, choose_preset, find_cards, parse_timer, refine_scores
     from .ocr import CachedReader
-    from .video import grab, probe
+    from .video import grab_key, probe
     W, H, dur = probe(path)
     pts = np.linspace(min(120, dur * 0.1), max(dur - 60, dur * 0.9), n)
     with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 2)) as ex:
-        frames = [f for f in ex.map(lambda tt: grab(path, float(tt)), pts) if f is not None]
+        frames = [f for f in ex.map(lambda tt: grab_key(path, float(tt)), pts) if f is not None]
     reader = CachedReader(_ocr())
     roi = dict(cfg["hud"]["roi"])
     name, hud, nread = choose_preset(reader, frames, cfg["hud"]["round_timer_sec"])
@@ -348,6 +348,11 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
             f"（{scan_note}・{obs['workers']} 並列・デコード {'GPU' if hw else 'CPU'}"
             f"・OCR {obs['ocr_calls']} 回 {'GPU' if obs.get('ocr_gpu') else 'CPU'}）"
             f"｜{perf.fmt_resources(st_scan['resources'])}")
+        pf = obs.get("prof") or {}
+        if pf:
+            log("    スキャンの内訳（各プロセスの合計）：" + "・".join(
+                f"{ja} {perf.fmt_seconds(pf.get(k, 0))}" for k, ja in
+                (("decode", "デコード待ち"), ("features", "切り抜き・カード"), ("ocr", "OCR"), ("save", "画像の保存"))))
         if not obs.get("ocr_gpu") and obs.get("ocr_note") and _has_gpu():
             log(f"    OCR が CPU で動いている理由：{obs['ocr_note']}")
         t, timer = obs["t"], obs["timer"]

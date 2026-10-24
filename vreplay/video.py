@@ -361,3 +361,10 @@ def grab(path: Path, t: float):
     for _, f in iter_frames(path, fps=1, start=t, duration=1.0, hwaccel=False):
         return f
     return None
+
+
+def grab_key(path: Path, t: float, span: float = 10.0):
+    """t 秒以降で最初のキーフレームを 1 枚（ほかのフレームをデコードしないので速い）。無ければ grab と同じ。"""
+    for _, f in iter_keyframes(path, t, span):
+        return f
+    return grab(path, t)
