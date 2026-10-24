@@ -10,6 +10,9 @@ Requires-Dist: pillow
 Requires-Dist: beautifulsoup4>=4.12
 Requires-Dist: lxml>=5.0
 Provides-Extra: video
-Requires-Dist: easyocr>=1.7; extra == "video"
-Requires-Dist: yt-dlp>=2025.1; extra == "video"
+Requires-Dist: rapidocr_onnxruntime<1.5,>=1.2; extra == "video"
+Requires-Dist: yt-dlp[default]>=2025.11; extra == "video"
 Requires-Dist: imageio>=2.34; extra == "video"
+Requires-Dist: psutil>=5.9; extra == "video"
+Provides-Extra: fetch
+Requires-Dist: yt-dlp[default]>=2025.11; extra == "fetch"

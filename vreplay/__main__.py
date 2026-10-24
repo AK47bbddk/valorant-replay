@@ -134,7 +134,7 @@ def calibrate(cfg: dict, url: str, order: int, at: float, span: int = 150):
                          + "\n".join(lines or ["  （マップが見つかりません）"]))
     out = Path(cfg["output"]["dir"]) / "calibrate"
     out.mkdir(parents=True, exist_ok=True)
-    for old in ("rois.jpg", "panels.jpg", "frame.jpg"):   # 失敗時に前回の画像が残らないように
+    for old in ("rois.jpg", "panels.jpg", "frame.jpg", "table.jpg"):   # 失敗時に前回の画像が残らないように
         (out / old).unlink(missing_ok=True)
     s = int(md.vod_t + at)
     print(f"{m.title} Map {order} {md.name}：マップ開始から {int(at)}〜{int(at) + span} 秒を取得")
@@ -173,7 +173,27 @@ def calibrate(cfg: dict, url: str, order: int, at: float, span: int = 150):
         cv2.imwrite(str(out / "panels.jpg"), pimg)
         for k, v in info.items():
             print(f"  {k}: {v}")
-    print("確認画像:", out / "rois.jpg", "/", out / "panels.jpg")
+    # 購入フェーズの装備表（映っているフレームがあれば）
+    from .config import crop
+    from .loadout import find_table, read_table, table_image
+    troi = cfg["hud"]["roi"].get("table") or [0.0, 0.52, 1.0, 1.0]
+    tcrops = [crop(x, troi) for x in frames]
+    tb = find_table(ocr, tcrops, roster)
+    if tb is None:
+        print("装備表：見つかりませんでした（購入フェーズが入る時刻を --at で指定すると確認できます）")
+    else:
+        teams = tb.extra.get("teams", {})
+        best_rd, best_img = None, None
+        for img in tcrops:
+            rd = read_table(img, tb, ocr, roster, load_book(cfg), teams)
+            if rd and (best_rd is None or rd["names"] > best_rd["names"]):
+                best_rd, best_img = rd, img
+        print(f"装備表：検出（名前 {tb.found} 人・行間隔 {tb.pitch:.0f}px）")
+        if best_rd:
+            table_image(best_img, tb, out / "table.jpg", best_rd)
+            for r in sorted(best_rd["rows"], key=lambda r: (r["side"], r["row"])):
+                print(f"  {r['side']}{r['row'] + 1} {r['player']}: {r['primary'] or '-'} / {r['sidearm'] or '-'}")
+    print("確認画像:", out / "rois.jpg", "/", out / "panels.jpg", "/", out / "table.jpg")
 
 
 if __name__ == "__main__":

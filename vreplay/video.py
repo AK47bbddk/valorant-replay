@@ -182,6 +182,69 @@ def iter_frames(path: Path, fps: float, start: float = 0.0, duration: float | No
         # GPU デコードで 1 枚も出なければ CPU でやり直す
 
 
+def iter_keyframes(path: Path, start: float = 0.0, duration: float | None = None):
+    """キーフレームだけを (t秒, BGR) で返す。それ以外のフレームはデコードしないので、全フレームを
+    デコードするより 10 倍以上速い（YouTube の動画はおおむね 1〜5 秒ごとにキーフレームがある）。
+    時刻は ffmpeg の showinfo が出す pts から求める。"""
+    import queue
+    import re
+    import threading
+    w, h, _ = probe(path)
+    cmd = ["ffmpeg", "-v", "info", "-nostdin", "-skip_frame", "nokey", "-ss", f"{start:.3f}"]
+    cmd += (["-t", f"{duration:.3f}"] if duration else []) + [
+        "-i", str(path), "-an", "-vsync", "0", "-vf", "showinfo", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=w * h * 3 * 2)
+    q: queue.Queue = queue.Queue()
+    pat = re.compile(rb"pts_time:\s*(-?[\d.]+)")
+
+    def read_err():
+        for line in p.stderr:
+            m = pat.search(line)
+            if m:
+                q.put(float(m.group(1)))
+        q.put(None)
+
+    th = threading.Thread(target=read_err, daemon=True)
+    th.start()
+    size = w * h * 3
+    try:
+        while True:
+            buf = p.stdout.read(size)
+            if len(buf) < size:
+                break
+            pt = q.get(timeout=30)
+            if pt is None:
+                break
+            yield start + pt, np.frombuffer(buf, np.uint8).reshape(h, w, 3)
+    finally:
+        p.stdout.close()
+        p.kill()
+        p.wait()
+
+
+def keyframe_interval(path: Path, span: float = 180.0) -> float | None:
+    """先頭 span 秒のキーフレーム間隔（中央値・秒）。読めなければ None。"""
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-read_intervals", f"%+{span:.0f}",
+                              "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", str(path)],
+                             capture_output=True, text=True, timeout=120).stdout
+    except Exception:
+        return None
+    ts = []
+    for line in out.splitlines():
+        a, _, f = line.partition(",")
+        if "K" in f:
+            try:
+                ts.append(float(a))
+            except ValueError:
+                pass
+    ts.sort()
+    if len(ts) < 3:
+        return None
+    d = sorted(b - a for a, b in zip(ts, ts[1:]))
+    return d[len(d) // 2]
+
+
 def grab(path: Path, t: float):
     """1 枚だけ取り出す（キャリブレーション用）。"""
     for _, f in iter_frames(path, fps=1, start=t, duration=1.0, hwaccel=False):

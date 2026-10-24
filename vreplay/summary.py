@@ -74,5 +74,12 @@ def how(r: dict) -> str:
 
 
 def player_weapons(r: dict, no: str) -> str:
+    """'Life ヴァンダル＋ゴースト / Nicc スペクター'（サブ武器はメインと違うときだけ）"""
     ps = (r.get("weapons") or {}).get(no) or []
-    return " / ".join(f"{p['player']} {p.get('weapon_ja') or '?'}" for p in ps)
+    out = []
+    for p in ps:
+        s = f"{p['player']} {p.get('weapon_ja') or '?'}"
+        if p.get("sidearm") and p.get("sidearm") != p.get("weapon"):
+            s += f"＋{p.get('sidearm_ja') or p['sidearm']}"
+        out.append(s)
+    return " / ".join(out)

@@ -25,6 +25,14 @@ video:
   cache_dir: ""          # 事前に落とした動画の置き場所。空なら <output.dir>/videos（自宅 PC の vreplay fetch の保存先）
   keep_video: false
   workers: 0             # 解析の並列プロセス数。0 なら CPU 数
+  # 解析のしかた
+  #   auto   … キーフレーム間隔が fast_keyframe_interval 秒以下なら fast、max_keyframe_interval 秒以下なら rounds、それ以外は full
+  #   fast   … キーフレーム（YouTube はおおむね 2 秒ごと）だけで全体を読み、装備表が出る開始前後だけ 2fps で読む（いちばん速い）
+  #   rounds … キーフレームでラウンドを探し、ラウンドの区間（開始 9 秒前〜終了）を 2fps で読む（GIF がなめらか）
+  #   full   … 全区間を 2fps で読む（いちばん遅い）
+  scan_mode: auto
+  fast_keyframe_interval: 2.5
+  max_keyframe_interval: 6
   download_workers: 3    # 同時にダウンロードするマップ数（解析中に次のマップを先に取得する）
   download_fragments: 4  # 1 本の動画を yt-dlp が分割して並列取得する数（回線が速いなら 8 などに）
 
@@ -35,6 +43,7 @@ hud:
   roi:
     minimap:     [0.000, 0.020, 0.225, 0.400]
     killfeed:    [0.749, 0.081, 0.995, 0.325]
+    table:       [0.000, 0.520, 1.000, 1.000]   # 購入フェーズの装備表を探す範囲（画面下部）
   buy_phase_max_sec: 30
   round_timer_sec: 100
 

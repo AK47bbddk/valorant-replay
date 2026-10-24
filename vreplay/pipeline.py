@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -114,16 +115,15 @@ def calibrate(cfg: dict, path: Path, md: vlr.MapData, roster, n: int = 30, log=p
     カード位置も別々に検出する。混ざったフレームから1つの座標を作らない。
     """
     from .config import crop
-    from .extract import find_killfeed
+    from .extract import _ocr, find_killfeed
     from .layout import card_geometry, choose_preset, find_cards, parse_timer
-    from .ocr import OCR, CachedReader
+    from .ocr import CachedReader
     from .video import grab, probe
     W, H, dur = probe(path)
     pts = np.linspace(min(120, dur * 0.1), max(dur - 60, dur * 0.9), n)
     with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 2)) as ex:
         frames = [f for f in ex.map(lambda tt: grab(path, float(tt)), pts) if f is not None]
-    ocr = OCR()
-    reader = CachedReader(ocr)
+    reader = CachedReader(_ocr())
     roi = dict(cfg["hud"]["roi"])
     name, hud, nread = choose_preset(reader, frames, cfg["hud"]["round_timer_sec"])
     roi.update(hud)
@@ -200,12 +200,62 @@ def slot_names(store, idxs, geo, roster, team_left, team_right,
     return out
 
 
+# ---------------------------------------------------------------- 2 パス解析の区間
+def dense_windows(det1, obs1: dict, live1, dur: float, buy_max: float, pre: float = 9.0, post: float = 1.5,
+                  pad: float = 5.0) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """1 パス目（キーフレーム）で見つけたラウンドから、2 パス目で密に読む区間を決める。
+
+    - 各ラウンドの開始 pre 秒前（装備表）〜終了 post 秒後
+    - 1 パス目でラウンドに割り当てられなかったが、試合中（タイマーが購入フェーズより大きい）に見えるライブの
+      フレームの前後 pad 秒（ラウンドの取りこぼし対策）
+    返り値 (区間 [(開始, 長さ)], 装備表を保存する時間帯 [(開始, 終了)])
+    """
+    iv = [(max(0.0, r.t_drop - pre), min(dur, r.t_end + post)) for r in det1]
+    spans = [(r.t_first, r.t_end) for r in det1]
+    t, timer = obs1["t"], obs1["timer"]
+    for i in range(len(t)):
+        v = timer[i]
+        if not live1[i] or v is None or v <= buy_max + 2 or any(a <= t[i] <= b for a, b in spans):
+            continue
+        iv.append((max(0.0, t[i] - pad), min(dur, t[i] + pad)))
+    tables = [(r.t_drop - pre, r.t_drop + 3.5) for r in det1]
+    return _merge_iv(iv), tables
+
+
+def _merge_iv(iv: list[tuple[float, float]], gap: float = 3.0) -> list[tuple[float, float]]:
+    """[(開始, 終了)] を重なり・近接でまとめて [(開始, 長さ)] にする。"""
+    merged: list[list[float]] = []
+    for a, b in sorted(iv):
+        if merged and a <= merged[-1][1] + gap:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return [(a, b - a) for a, b in merged if b - a > 0.5]
+
+
+def save_table_crops(path: Path, det, cfg: dict, store, hw: bool, pre: float = 9.0, post: float = 3.5):
+    """全区間を密に読んだとき用：各ラウンドの開始前後だけをデコードし、装備表の切り抜きを保存する。"""
+    from .config import crop
+    from .video import iter_frames
+    fps = cfg["video"]["fps"]
+    roi = cfg["hud"]["roi"].get("table") or [0.0, 0.52, 1.0, 1.0]
+
+    def one(r):
+        for tt, f in iter_frames(path, fps, max(0.0, r.t_drop - pre), pre + post, hwaccel=hw):
+            store.put(int(round(tt * fps)), "table", crop(f, roi))
+
+    with ThreadPoolExecutor(max_workers=max(1, min(4, os.cpu_count() or 1))) as ex:
+        list(ex.map(one, det))
+    store._cache.pop("table", None)
+
+
 # ---------------------------------------------------------------- 動画解析
 def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: Path, path: Path, log=print):
     from . import extract as X
     from .rounds import agreement, assign_rounds, liveness, orientation, segment
-    from .scan import scan
-    from .video import gpu_decode_ok
+    from .loadout import add_weapons, find_table, merge_reads, read_table, table_image
+    from .scan import merge_obs, scan
+    from .video import gpu_decode_ok, keyframe_interval
     from .weapons import ja as wja
     from .weapons import load_book
 
@@ -221,21 +271,58 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
     log(f"    {msg}（{perf.fmt_seconds(t_cal)}）｜{perf.fmt_resources(st_cal['resources'])}")
     hw = gpu_decode_ok(str(path))
     store = X.FrameStore(_work_root(cfg) / f"frames_{m.id}_{md.order}")
+
+    def find_rounds(o):
+        cf = np.array([a is not None and b is not None and c is not None
+                       for a, b, c in zip(o["timer"], o["sl"], o["sr"])], bool)
+        lv, _, li = liveness(o["band"], cf)
+        ri = assign_rounds(lv, o["sl"], o["sr"], o["rnd"], md.total_rounds or None)
+        dt, sts = segment(o["t"], lv, ri, o["timer"], o["sl"], o["sr"], md.total_rounds or None,
+                          hcfg["round_timer_sec"], hcfg["buy_phase_max_sec"], alive=o["alive"], conf=cf)
+        return cf, lv, li, dt, sts
+
     try:
+        panel_geo = geo_buy if geo_buy and geo_buy != geo else None
+        mode = str(vcfg.get("scan_mode") or "auto")
+        ki = keyframe_interval(path) if mode != "full" else None
+        if mode == "auto":
+            mode = ("fast" if ki is not None and ki <= float(vcfg.get("fast_keyframe_interval") or 2.5)
+                    else "rounds" if ki is not None and ki <= float(vcfg.get("max_keyframe_interval") or 6)
+                    else "full")
+        elif mode in ("fast", "rounds") and ki is None:
+            mode = "full"
         with perf.stage("scan", tag=tag, label="HUD スキャン") as st_scan:
-            panel_geo = geo_buy if geo_buy and geo_buy != geo else None
-            obs = scan(path, dur, vcfg["fps"], roi, geo, cfg, store.root, hw, log=log,
-                       panel_geo=panel_geo)
+            if mode in ("fast", "rounds"):
+                # 1 パス目：キーフレームだけ読む（全フレームのデコードより 10 倍以上速い）。
+                #   fast   … キーフレームの画像をそのままミニマップ・キルフィード・カードに使う
+                #   rounds … ラウンドの位置をつかむだけ（画像は 2 パス目で保存）
+                obs1 = scan(path, dur, vcfg["fps"], roi, geo, cfg, store.root, hw, log=log, keyframes=True,
+                            save=(mode == "fast"), panel_geo=panel_geo)
+                _, live1, _, det1, _ = find_rounds(obs1)
+                segs, table_windows = dense_windows(det1, obs1, live1, dur, hcfg["buy_phase_max_sec"])
+                if mode == "fast":
+                    # 2 パス目：装備表が出る「開始 9 秒前〜3.5 秒後」だけを密に読む
+                    segs = _merge_iv([(max(0.0, a), min(dur, b)) for a, b in table_windows])
+                obs2 = scan(path, dur, vcfg["fps"], roi, geo, cfg, store.root, hw, log=log,
+                            panel_geo=panel_geo, segments=segs, table_windows=table_windows)
+                obs = merge_obs([obs1, obs2], cfg, drop_sparse_in=[(a, a + d) for a, d in segs])
+                obs["ocr_calls"] = obs1["ocr_calls"] + obs2["ocr_calls"]
+                obs["workers"] = obs2["workers"]
+                scan_note = (f"{'高速' if mode == 'fast' else 'ラウンド区間'}モード：キーフレーム {len(obs1['t'])} 枚"
+                             f"（間隔 {ki:.1f} 秒）＋密に {sum(d for _, d in segs) / 60:.1f}/{dur / 60:.1f} 分")
+            else:
+                obs = scan(path, dur, vcfg["fps"], roi, geo, cfg, store.root, hw, log=log, panel_geo=panel_geo)
+                table_windows = []
+                scan_note = "全区間を密に" + (f"（キーフレーム間隔 {ki:.1f} 秒）" if ki else "")
         log(f"    スキャン {len(obs['t'])} 枚 {perf.fmt_seconds(st_scan['seconds'])}"
-            f"（{obs['workers']} 並列・デコード {'GPU' if hw else 'CPU'}・OCR {obs['ocr_calls']} 回）"
+            f"（{scan_note}・{obs['workers']} 並列・デコード {'GPU' if hw else 'CPU'}・OCR {obs['ocr_calls']} 回）"
             f"｜{perf.fmt_resources(st_scan['resources'])}")
-        t, timer, sl, sr = obs["t"], obs["timer"], obs["sl"], obs["sr"]
-        conf = np.array([a is not None and b is not None and c is not None for a, b, c in zip(timer, sl, sr)])
-        live, _, linfo = liveness(obs["band"], conf)
-        rid = assign_rounds(live, sl, sr, obs["rnd"], md.total_rounds or None)
-        det, stats = segment(t, live, rid, timer, sl, sr, md.total_rounds or None,
-                             hcfg["round_timer_sec"], hcfg["buy_phase_max_sec"],
-                             alive=obs["alive"], conf=conf)
+        t, timer = obs["t"], obs["timer"]
+        conf, live, linfo, det, stats = find_rounds(obs)
+        if mode == "full":
+            # 装備表の切り抜きは 2 パス目で保存する。全区間を密に読んだときは、ラウンドの直前だけを読み直す
+            with perf.stage("table", tag=tag, label="装備表の切り抜き"):
+                save_table_crops(path, det, cfg, store, hw)
         winners = {r.n: r.winner for r in md.rounds}
         orient = orientation(det, winners)
         agree = agreement(det, winners, orient)
@@ -275,6 +362,35 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
             log("    サイト・位置の解析はスキップしました")
         by_n = {r["n"]: r for r in rep["rounds"]}
         fps = vcfg["fps"]
+        tkeys, _ = store._entries("table")
+        tw = {r.n: (r.t_drop - 9.0, r.t_drop + 3.5) for r in det}
+
+        def table_idxs(r):
+            a_, b_ = tw[r.n]
+            return [k for k in tkeys if a_ <= k / fps <= b_]
+
+        tb_state = {"done": False, "table": None}
+        tb_lock = threading.Lock()
+
+        def table_for(r):
+            with tb_lock:
+                if not tb_state["done"]:
+                    tb_state["done"] = True
+                    # 各ラウンドの開始 3 秒前・1.5 秒前・0.5 秒後に近い切り抜きを候補にする
+                    # （リプレイが開始直前まで流れているラウンドもあるので、複数ラウンド・複数時刻から探す）
+                    cands = []
+                    for rr_ in det:
+                        for dt_ in (-3.0, -1.5, 0.5):
+                            ks = sorted(tkeys, key=lambda k: abs(k / fps - (rr_.t_drop + dt_)))
+                            if ks and abs(ks[0] / fps - (rr_.t_drop + dt_)) <= 1.0 and ks[0] not in cands:
+                                cands.append(ks[0])
+                    imgs = [store.get(k, "table") for k in cands[:16]]
+                    tb_state["table"] = find_table(X._ocr(), [i for i in imgs if i is not None], roster) if imgs else None
+                    if tb_state["table"] is not None:
+                        log(f"    装備表を検出（{tb_state['table'].found} 人の名前・行間隔 {tb_state['table'].pitch:.0f}px）")
+                    elif imgs:
+                        log("    装備表は見つかりませんでした（武器は試合中のカードから読みます）")
+            return tb_state["table"]
 
         def work(r):
             rr = by_n.get(r.n)
@@ -290,32 +406,68 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                                  out_dir / f"r{r.n:02d}_start.jpg")
                 a["minimap_start"] = str(p) if p else None
             g = X.make_gif(store, fidx, labels, out_dir / f"r{r.n:02d}_minimap.gif", r.n, fps,
-                           ocfg["gif_speed"], ocfg["gif_width"], ocfg["gif_max_frames"])
+                           ocfg["gif_speed"], ocfg["gif_width"], ocfg["gif_max_frames"], times=times)
             a["minimap_gif"] = str(g) if g else None
             wi = r.buy_idx if r.buy_idx is not None else r.first_idx
             widx = obs["idx"][wi] if wi is not None else None
-            b = X.buy_image(store, widx, out_dir / f"r{r.n:02d}_buy.jpg")
-            a["buy_panels"] = str(b) if b else None
 
-            g_buy = geo_buy or geo
-            buy_prefix = "_buy" if geo_buy and geo and geo_buy != geo else ""
-            names_buy = (slot_names(store, widx, g_buy, roster, team_left, team_right, prefix=buy_prefix)
-                         if g_buy else [])
-            if g_buy and widx is not None:
-                ws = X.weapons_from_panels(book, store, widx, g_buy, prefix=buy_prefix)
-                al = X.alive_from_panels(store, widx, g_buy, prefix=buy_prefix)
+            # 武器：まずラウンド間の装備表（購入フェーズ〜開始直後）。表が映っていなければ試合中のカード
+            tb = table_for(r)
+            reads = []
+            if tb is not None:
+                for ti in sorted(table_idxs(r), reverse=True):        # 開始に近いフレームから
+                    img = store.get(ti, "table")
+                    # まず名前だけで「表が映っているか」を確かめ、映っているフレームだけ武器を読む
+                    rd = read_table(img, tb, X._ocr(), roster, book, {"L": team_left, "R": team_right},
+                                    weapons=False)
+                    if rd:
+                        reads.append((ti, add_weapons(img, rd, tb, book)))
+                        if len(reads) >= 3:
+                            break
+            if reads:
+                reads.sort(key=lambda x: x[0])
+                merged = merge_reads([rd for _, rd in reads])
                 wt = {m.team1: [], m.team2: []}
-                for (nm, tm), (w, _), ok in zip(names_buy, ws, al):
-                    if ok:
-                        wt[tm].append({"player": nm, "agent": agent.get(nm), "weapon": w, "weapon_ja": wja(w) if w else "?"})
+                for p in sorted(merged.values(), key=lambda p: (p["side"], p["row"])):
+                    w = p["primary"] or p["sidearm"]
+                    wt.setdefault(p["team"], []).append({
+                        "player": p["player"], "agent": agent.get(p["player"]), "weapon": w,
+                        "weapon_ja": wja(w) if w else "?", "sidearm": p["sidearm"],
+                        "sidearm_ja": wja(p["sidearm"]) if p["sidearm"] else None})
                 rr["weapons"] = {"1": wt[m.team1], "2": wt[m.team2]}
+                rr["weapons_source"] = "装備表"
+                ti, rd = reads[-1]
+                b = table_image(store.get(ti, "table"), tb, out_dir / f"r{r.n:02d}_buy.jpg", rd)
+                a["buy_panels"] = str(b) if b else None
+            else:
+                b = X.buy_image(store, widx, out_dir / f"r{r.n:02d}_buy.jpg")
+                a["buy_panels"] = str(b) if b else None
+                # 試合中のカード（開始直後の安定したフレーム。購入前の UI がカード型の放送では購入前のフレーム）
+                g_buy = geo_buy or geo
+                buy_prefix = "_buy" if geo_buy and geo and geo_buy != geo else ""
+                use_live = geo is not None and r.first_idx is not None
+                gi = geo if use_live else g_buy
+                pidx = obs["idx"][r.first_idx] if use_live else widx
+                prefix = "" if use_live else buy_prefix
+                names_w = slot_names(store, pidx, gi, roster, team_left, team_right, prefix=prefix) if gi else []
+                if gi and pidx is not None:
+                    ws = X.weapons_from_panels(book, store, pidx, gi, prefix=prefix)
+                    al = X.alive_from_panels(store, pidx, gi, prefix=prefix)
+                    wt = {m.team1: [], m.team2: []}
+                    for (nm, tm), (w, _), ok in zip(names_w, ws, al):
+                        if ok:
+                            wt[tm].append({"player": nm, "agent": agent.get(nm), "weapon": w,
+                                           "weapon_ja": wja(w) if w else "?"})
+                    rr["weapons"] = {"1": wt[m.team1], "2": wt[m.team2]}
+                    rr["weapons_source"] = "試合中のカード"
+                    rr["notes"].append("装備表が映っていなかったため、武器は試合中のカードから読みました")
 
             # ラウンド開始直後の安定したフレームから名前を多数決（購入前UIの名前は使わない）
             name_idxs = [r.first_idx] if r.first_idx is not None else []
             name_idxs += [i for i in r.live if t[i] >= r.t_drop + 1.5][:3]
             name_idxs = list(dict.fromkeys(i for i in name_idxs if i is not None))
             names_live = slot_names(store, name_idxs, geo, roster, team_left, team_right) if geo else []
-            names = names_live or names_buy
+            names = names_live
             kills, strip = X.kills_in_round(store, fidx, times, labels, roster, book, out_dir / f"r{r.n:02d}_kills.jpg")
             for k in kills:
                 k["weapon_ja"] = wja(k["weapon"]) if k.get("weapon") else None

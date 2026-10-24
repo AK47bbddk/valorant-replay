@@ -8,9 +8,13 @@ import pytest
 
 from vreplay import config, pipeline, vlr
 
-from .fx import FX, full_frame_from_panels, tile_to_frame, topband
+from .fx import FX, full_frame_from_panels, table_frame, tile_to_frame, topband
 
 T0 = 27940.0
+EXPECT = {1: 27959.2, 2: 28088.4, 3: 28207.7, 4: 28324.6, 5: 28403.3}
+# 購入フェーズの装備表（実データの武器シルエット）。第 3 ラウンドは開始 1 秒前までリプレイが流れている想定
+TABLE = {1: "t27955", 2: "t28085", 3: "t28400", 4: "t28400", 5: "t28400"}
+REPLAY_UNTIL = {3: -1.0}
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg が必要")
@@ -21,13 +25,20 @@ def test_analyze_video_on_real_hud(tmp_path):
     dur = int(times[-1] - T0) + 6
     p = subprocess.Popen(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", "1920x1080",
                           "-r", "1", "-i", "-", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
-                          "-pix_fmt", "yuv420p", str(vid)], stdin=subprocess.PIPE)
+                          "-g", "2", "-pix_fmt", "yuv420p", str(vid)], stdin=subprocess.PIPE)
     k = 0
+    drops = {n: t - T0 for n, t in EXPECT.items()}
     for s in range(dur):
         while k + 1 < len(times) and times[k + 1] - T0 <= s:
             k += 1
         f = tile_to_frame(tiles[k])
-        f[480:1080] = np.maximum(f[480:1080], panels[480:1080])
+        n = next((n for n, d in drops.items() if d - 8 <= s <= d + 1), None)
+        if n is not None and s < drops[n] + REPLAY_UNTIL.get(n, -99):
+            f = np.full_like(f, 70)                                   # リプレイ・選手カメラ（HUD なし）
+        elif n is not None:
+            f = table_frame(TABLE[n], frame=f)                        # 購入フェーズ〜開始直後：装備表
+        else:
+            f[480:1080] = np.maximum(f[480:1080], panels[480:1080])   # 試合中：プレイヤーカード
         p.stdin.write(f.tobytes())
     p.stdin.close()
     p.wait()
@@ -53,15 +64,21 @@ def test_analyze_video_on_real_hud(tmp_path):
 
     assert rep["video_ok"], rep["analysis_note"]
     rs = {r["n"]: r for r in rep["rounds"]}
-    expect = {1: 27959.2, 2: 28088.4, 3: 28207.7, 4: 28324.6, 5: 28403.3}
-    for n, t in expect.items():
+    for n, t in EXPECT.items():
         assert "yt_url" in rs[n], (n, rs[n]["notes"])
         got = int(rs[n]["yt_url"].split("t=")[1]) + 5          # yt の秒 = 開始 - 5
         # 合成動画は 5〜8 秒ごとの静止画なので、実際の動画より開始時刻の推定が粗い
         assert abs(got - (t - T0)) <= 4, (n, got, t - T0)
         assert rs[n]["assets"].get("minimap_gif")
-    # 静止させたカード（第 1 ラウンドの画面）：DRG の生存 3 人はゴースト
-    w = rs[1]["weapons"]["1"]
-    assert [x["weapon"] for x in w] == ["Ghost", "Ghost", "Ghost"]
-    assert {x["player"] for x in w} == {"vo0kashu", "Life", "Nicc"}
+    # 武器は装備表から（第 3 ラウンドは開始直前までリプレイでも、残りの 1〜2 秒で読む）
+    def weapons(n, no):
+        return {x["player"]: (x["weapon"], x.get("sidearm")) for x in rs[n]["weapons"][no]}
+    for n in (1, 2, 3):
+        assert rs[n].get("weapons_source") == "装備表", (n, rs[n].get("notes"))
+    assert weapons(1, "1") == {"Life": ("Ghost", "Ghost"), "Nicc": ("Ghost", "Ghost"), "vo0kashu": ("Ghost", "Ghost"),
+                               "Flex1n": ("Sheriff", "Sheriff"), "SpiritZ1": ("Ghost", "Ghost")}
+    assert weapons(2, "1")["vo0kashu"] == ("Outlaw", "Ghost") and weapons(2, "1")["Nicc"] == ("Spectre", None)
+    assert {w for w, _ in weapons(2, "2").values()} == {"Classic"}
+    assert weapons(3, "2")["kklin"] == ("Operator", "Classic") and weapons(3, "1")["Nicc"] == ("Vandal", "Shorty")
+    assert rs[3]["assets"].get("buy_panels")
     assert "VLR との勝敗一致 100%" in rep["analysis_note"], rep["analysis_note"]

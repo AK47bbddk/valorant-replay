@@ -184,3 +184,32 @@ def test_pipeline_upsert_only(tmp_path, monkeypatch):
     cfg["output"]["dir"] = str(tmp_path)
     reps = pipeline.run(cfg, day=date(2026, 10, 21), match_urls=[m.url], upsert_only=True, log=lambda *a: None)
     assert calls == ["8"] and reps == []
+
+
+def test_player_weapons_with_sidearm():
+    r = {"weapons": {"1": [{"player": "Life", "weapon": "Vandal", "weapon_ja": "ヴァンダル",
+                            "sidearm": "Ghost", "sidearm_ja": "ゴースト"},
+                           {"player": "Nicc", "weapon": "Ghost", "weapon_ja": "ゴースト", "sidearm": "Ghost"}]}}
+    assert summary.player_weapons(r, "1") == "Life ヴァンダル＋ゴースト / Nicc ゴースト"
+
+
+def test_gif_uses_real_intervals(tmp_path):
+    """キーフレームだけ（2 秒おき）でも、表示時間は実際の間隔 ÷ 倍速になる。"""
+    from PIL import Image
+    st = _store(tmp_path, n=6)
+    idxs = [0, 1, 2, 3]
+    gif = X.make_gif(st, idxs, ["1:40", "1:38", "1:36", "1:34"], tmp_path / "k.gif", 1, fps=2, speed=4,
+                     width=120, max_frames=50, times=[0.0, 2.0, 4.0, 6.0])
+    im = Image.open(gif)
+    assert im.n_frames == 4 and im.info["duration"] == 500
+
+
+def test_dense_windows():
+    from vreplay.rounds import DetRound
+    det = [DetRound(n=1, t_first=0, t_drop=40, t_end=120), DetRound(n=2, t_first=125, t_drop=170, t_end=240)]
+    obs = {"t": [10, 130, 300], "timer": [20, 25, 80]}
+    live = [True, True, True]
+    segs, tables = pipeline.dense_windows(det, obs, live, 400, 30)
+    # 開始 9 秒前〜終了 1.5 秒後、取りこぼしたライブ（300 秒・残り 80 秒）の前後 5 秒
+    assert segs == [(31, 90.5), (161, 80.5), (295, 10)]
+    assert tables == [(31, 43.5), (161, 173.5)]

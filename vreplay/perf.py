@@ -131,7 +131,7 @@ def sample() -> dict:
 
 def start(interval: float = 1.0):
     """1 秒ごとのサンプリングを裏で始める（二重起動はしない）。"""
-    global _RUNNING, _THREAD
+    global _RUNNING, _THREAD, _PROC
     if _RUNNING:
         return
     reset()

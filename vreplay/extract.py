@@ -47,19 +47,22 @@ class FrameStore:
             self._cache[name] = ([r[0] for r in rows], [r[1] for r in rows])
         return self._cache[name]
 
-    def get_nearest(self, i: int, name: str):
-        """保存頻度を落としても、最も近いフレームの画像を返す。"""
-        keys, paths = self._entries(name)
+    def nearest_key(self, i: int, name: str) -> int | None:
+        """保存してある中で i に最も近いフレーム番号。"""
+        keys, _ = self._entries(name)
         if not keys:
             return None
         j = bisect.bisect_left(keys, i)
         if j == 0:
-            p = paths[0]
-        elif j >= len(keys):
-            p = paths[-1]
-        else:
-            p = paths[j] if keys[j] - i < i - keys[j - 1] else paths[j - 1]
-        return cv2.imread(str(p))
+            return keys[0]
+        if j >= len(keys):
+            return keys[-1]
+        return keys[j] if keys[j] - i < i - keys[j - 1] else keys[j - 1]
+
+    def get_nearest(self, i: int, name: str):
+        """保存頻度を落としても、最も近いフレームの画像を返す。"""
+        k = self.nearest_key(i, name)
+        return None if k is None else self.get(k, name)
 
 
 def clock(sec) -> str:
@@ -79,16 +82,38 @@ def save_still(img, path: Path, width: int = 480) -> Path | None:
 
 
 def make_gif(store: FrameStore, idxs: list[int], labels: list[str], path: Path, n: int, fps: float,
-             speed: int, width: int, max_frames: int, limit_bytes: int = 4_500_000) -> Path | None:
-    """ライブ区間のミニマップを GIF に。labels は各フレームの残り時間表示。"""
+             speed: int, width: int, max_frames: int, limit_bytes: int = 4_500_000,
+             times: list[float] | None = None) -> Path | None:
+    """ライブ区間のミニマップを GIF に。labels は各フレームの残り時間表示。
+
+    times（各フレームの秒）があれば、フレームの間隔どおりに表示時間を決める（キーフレームだけのときなど、
+    間隔がそろっていなくても実際の speed 倍速になる）。同じ保存画像に当たるフレームは 1 枚にまとめる。
+    """
     if not idxs:
         return None
-    step = max(1, int(np.ceil(len(idxs) / max_frames)))
-    pick = list(range(0, len(idxs), step))
+    if times is None:
+        times = [i / fps for i in idxs]
+    # 保存してある画像ごとに 1 枚
+    sel, last = [], None
+    for j, i in enumerate(idxs):
+        k = store.nearest_key(i, "minimap")
+        if k is None or k == last:
+            continue
+        sel.append((j, k))
+        last = k
+    if not sel:
+        return None
+    step = max(1, int(np.ceil(len(sel) / max_frames)))
+    sel = sel[::step]
+    durs = []
+    for a in range(len(sel)):
+        t0 = times[sel[a][0]]
+        t1 = times[sel[a + 1][0]] if a + 1 < len(sel) else t0 + step / fps
+        durs.append(int(min(2000, max(20, 1000 * (t1 - t0) / speed))))
     for w in (width, int(width * 0.8), int(width * 0.65)):
         frames = []
-        for j in pick:
-            img = store.get_nearest(idxs[j], "minimap")
+        for j, k in sel:
+            img = store.get(k, "minimap")
             if img is None:
                 continue
             h0, w0 = img.shape[:2]
@@ -101,8 +126,7 @@ def make_gif(store: FrameStore, idxs: list[int], labels: list[str], path: Path, 
             frames.append(pil.quantize(colors=96, method=Image.Quantize.FASTOCTREE))   # 速い減色
         if not frames:
             return None
-        dur = int(1000 * step / (fps * speed))
-        frames[0].save(path, save_all=True, append_images=frames[1:], duration=max(20, dur), loop=0)
+        frames[0].save(path, save_all=True, append_images=frames[1:], duration=durs[:len(frames)], loop=0)
         if path.stat().st_size <= limit_bytes:
             return path
     return path
@@ -337,14 +361,21 @@ def parse_killfeed(dets, img, roster: Roster, book=None) -> list[dict]:
     return rows
 
 
-_local = threading.local()
+
+
+_OCR_LOCK = threading.Lock()
+_OCR_SHARED = None
 
 
 def _ocr():
-    if not hasattr(_local, "ocr"):
-        from .ocr import OCR
-        _local.ocr = OCR()
-    return _local.ocr
+    """プロセスで 1 つの OCR を共有する（スレッドごとに読むとモデルの読み込みとスレッドの取り合いで遅くなる）。
+    OCR 側でロックしているので、複数スレッドから呼んでも安全。"""
+    global _OCR_SHARED
+    with _OCR_LOCK:
+        if _OCR_SHARED is None:
+            from .ocr import OCR
+            _OCR_SHARED = OCR()
+    return _OCR_SHARED
 
 
 def kills_in_round(store: FrameStore, idxs: list[int], times: list[float], labels: list[str], roster: Roster,

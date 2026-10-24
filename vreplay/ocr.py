@@ -28,6 +28,10 @@ class OCR:
         if gpu is None:
             gpu = os.environ.get("VREPLAY_OCR_GPU", "") == "1" and _gpu_ok()
         kw = dict(use_angle_cls=False, print_verbose=False)
+        # 並列スキャンでは 1 プロセスに 1〜数スレッドだけ使わせる（プロセス数 × 全コアのスレッドで取り合わない）
+        threads = int(os.environ.get("VREPLAY_OCR_THREADS") or 0)
+        if threads > 0:
+            kw.update(intra_op_num_threads=threads, inter_op_num_threads=1)
         if gpu:
             kw.update(det_use_cuda=True, det_model_path="", rec_use_cuda=True, rec_model_path="")
         self.engine = RapidOCR(**kw)

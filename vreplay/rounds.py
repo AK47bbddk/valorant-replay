@@ -100,14 +100,20 @@ def assign_rounds(live: np.ndarray, sl: list, sr: list, rnd: list, n_rounds: int
 
 # ---------------------------------------------------------------- 分割
 def _estimate_drop(pairs: list[tuple[float, float]], round_sec: int) -> tuple[float | None, float]:
+    """残り時間の表示から開始時刻を逆算する。返り値 (開始時刻, ばらつき)。
+
+    表示は残り秒の切り上げなので、各フレームの「時刻 −（制限時間 − 表示）」は真の開始時刻以上で、
+    その 1 秒以内に入る。表示が止まって見えるフレーム（遅い更新・静止画・映像の遅れ）は後ろにずれるだけなので、
+    下側の値を使う。OCR の読み違い 1 つに引っぱられないよう、近くに 2 つ以上そろう最小の値を採る。
+    """
     if not pairs:
         return None, 9.0
-    est = [t - (round_sec - v) for t, v in pairs]
-    med = median(est)
-    keep = [x for x in est if abs(x - med) <= 2.0]
-    use = keep or est
-    spread = median([abs(x - med) for x in est]) if len(est) > 1 else 9.0
-    return float(mean(use)), float(spread)
+    est = sorted(t - (round_sec - v) for t, v in pairs)
+    need = min(2, len(est))
+    lo = next((x for x in est if sum(x <= e <= x + 1.2 for e in est) >= need), est[0])
+    near = [e for e in est if lo <= e <= lo + 1.5]
+    spread = 9.0 if len(est) < 2 else (1.0 - len(near) / len(est)) * 3.0 + (near[-1] - lo) * 0.5
+    return float(lo + 0.3), float(spread)
 
 
 def _drop_time(ts: list[float], timers: list, round_sec: int, buy_max: int
@@ -128,12 +134,15 @@ def _drop_time(ts: list[float], timers: list, round_sec: int, buy_max: int
         if v >= round_sec - 15 and (a == 0 or prev <= buy_max + 2 or prev < v - 20):
             jump_a = a
             break
-    buy = [(j, t, v) for j, t, v in vals if v <= buy_max + 2]
+    # 購入タイマーはジャンプより前だけを見る（ラウンド終盤の残り秒やスパイクの秒数を購入フェーズと取り違えない）
+    pre = vals[:jump_a] if jump_a is not None else vals
+    buy = [(j, t, v) for j, t, v in pre if v <= buy_max + 2]
     buy_j = buy[-1][0] if buy else None
     buy_est = buy[-1][1] + buy[-1][2] if buy else None
 
     if jump_a is not None:
-        nxt = [(t, v) for _, t, v in vals[jump_a:jump_a + 14] if buy_max * 0.3 < v <= round_sec + 2]
+        # ジャンプ直後の数フレームだけを使う（後ろのフレームほど遅れや読み違いが混ざりやすい）
+        nxt = [(t, v) for _, t, v in vals[jump_a:jump_a + 5] if buy_max * 0.3 < v <= round_sec + 2]
         jump_est, spread = _estimate_drop(nxt, round_sec)
         if jump_est is not None:
             drop, conf, source = jump_est, quality(spread, len(nxt)), "round-timer"
@@ -154,7 +163,7 @@ def _drop_time(ts: list[float], timers: list, round_sec: int, buy_max: int
         return t + v, v > 0.6, j, 0.82 if v <= 0.6 else 0.68, "buy-timer"
     if first_v > buy_max:
         # 途中から映った：残り時間から逆算（複数フレームの中央値）
-        nxt = [(t, v) for _, t, v in vals[:14] if buy_max * 0.3 < v <= round_sec + 2]
+        nxt = [(t, v) for _, t, v in vals[:6] if buy_max * 0.3 < v <= round_sec + 2]
         est, spread = _estimate_drop(nxt, round_sec)
         if est is not None:
             return est, True, buy_j, quality(spread, len(nxt)), "countdown"

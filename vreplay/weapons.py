@@ -54,13 +54,27 @@ HUD_TEMPLATES = Path(__file__).parent / "data" / "hud_weapons.npz"
 BUNDLED_TEMPLATES = Path(__file__).parent / "data" / "api_weapons.npz"
 
 
+_RESIZED: dict = {}
+
+
+def _resized(t: np.ndarray, wt: int, H: int) -> np.ndarray:
+    """見本を (wt, H) に縮めたもの。同じ大きさは何度も出るのでキャッシュする。"""
+    key = (id(t), wt, H)
+    r = _RESIZED.get(key)
+    if r is None:
+        r = cv2.resize(t.astype(np.float32), (wt, H), interpolation=cv2.INTER_AREA) > 0.5
+        if len(_RESIZED) < 20000:
+            _RESIZED[key] = r
+    return r
+
+
 def _iou_fit(m: np.ndarray, t: np.ndarray) -> float:
     """縦横比を保ったまま高さをそろえて重ね、左右どちらかの端を合わせたときの最大 IoU。"""
     H = m.shape[0]
     wt = max(1, int(round(t.shape[1] * H / t.shape[0])))
     if not (0.6 <= wt / max(1, m.shape[1]) <= 1.6):            # 長さが大きく違うものは別物
         return 0.0
-    tr = cv2.resize(t.astype(np.float32), (wt, H), interpolation=cv2.INTER_AREA) > 0.5
+    tr = _resized(t, wt, H)
     W = max(wt, m.shape[1]) + 4
     a = np.zeros((H, W), bool)
     a[:, 2:2 + m.shape[1]] = m.astype(bool)
@@ -123,14 +137,51 @@ class WeaponBook:
         m = silhouette(img)
         if m is None or m.shape[1] < 8 or m.shape[0] < 4:
             return None, 0.0
-        if mirror:
-            m = m[:, ::-1]
+        return self.classify_mask(m, mirror, min_score)
+
+    def classify_mask(self, m: np.ndarray, mirror: bool | None = False, min_score: float = 0.5
+                      ) -> tuple[str | None, float]:
+        """切り出し済みの 2 値マスクを判別。mirror=None なら左右どちらの向きでも試す。"""
+        if m is None or m.shape[1] < 8 or m.shape[0] < 4:
+            return None, 0.0
+        cands = [m[:, ::-1], m] if mirror is None else [m[:, ::-1] if mirror else m]
         best, score = None, 0.0
-        for name, t in self.items:
-            s = _iou_fit(m, t)
-            if s > score:
-                best, score = name, s
+        for mm in cands:
+            for name, t in self.items:
+                s = _iou_fit(mm, t)
+                if s > score:
+                    best, score = name, s
         return (best if score >= min_score else None), score
+
+
+def white_mask(img, white_v: int = 185, white_s: int = 80) -> np.ndarray:
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    return ((hsv[..., 2] >= white_v) & (hsv[..., 1] <= white_s)).astype(np.uint8)
+
+
+def blobs(mask: np.ndarray, min_h: int = 6, min_w: int = 10, max_gap: int = 2) -> list[tuple[int, int, np.ndarray]]:
+    """横に並んだ白いアイコンを 1 つずつに分ける。返り値 [(x0, y0, 切り出しマスク)]（左から順）。
+
+    スコープや銃身の切れ目で分かれた部品は、横方向に重なるか max_gap px 以内なら同じアイコンにまとめる。
+    隣の武器（ゴーストの消音器の先とライフルの間など）は 4〜6px 空いているので別になる。
+    """
+    n, lab, st, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), 8)
+    parts = sorted((st[i, 0], st[i, 0] + st[i, 2], i) for i in range(1, n) if st[i, cv2.CC_STAT_AREA] >= 3)
+    groups: list[list] = []
+    for x0, x1, i in parts:
+        if groups and x0 <= groups[-1][1] + max_gap:
+            groups[-1][1] = max(groups[-1][1], x1)
+            groups[-1][2].append(i)
+        else:
+            groups.append([x0, x1, [i]])
+    out = []
+    for x0, x1, ids in groups:
+        sel = np.isin(lab, ids)
+        ys, xs = np.nonzero(sel)
+        if ys.max() - ys.min() + 1 < min_h or xs.max() - xs.min() + 1 < min_w:
+            continue
+        out.append((int(xs.min()), int(ys.min()), sel[ys.min():ys.max() + 1, xs.min():xs.max() + 1]))
+    return out
 
 
 def ja(name: str | None) -> str:

@@ -39,6 +39,27 @@ class ScanJob:
     minimap_every: float = 0.0
     panel_every: float = 0.0
     killfeed_on_change: bool = True
+    keyframes: bool = False                 # True: キーフレームだけを読む
+    save: bool = True                       # 切り抜き画像（ミニマップ・キルフィード・カード）を保存する
+    table_windows: tuple = ()               # この時間帯（秒）は装備表の切り抜きも保存する
+    table_roi: tuple = (0.0, 0.52, 1.0, 1.0)
+
+
+_PROC_OCR = None
+
+
+def _proc_ocr():
+    """プロセスごとに 1 回だけ OCR のモデルを読む（ジョブごとに読み直すと 1 秒ほどかかる）。"""
+    global _PROC_OCR
+    if _PROC_OCR is None:
+        from .ocr import OCR
+        _PROC_OCR = OCR()
+    return _PROC_OCR
+
+
+def _init_worker(ocr_threads: int):
+    os.environ["VREPLAY_OCR_THREADS"] = str(ocr_threads)
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 
 def _save(store: Path, idx: int, name: str, img, q: int = 85):
@@ -62,9 +83,10 @@ def scan_chunk(job: ScanJob) -> dict:
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     from .extract import card_features
     from .layout import panel_bbox
-    from .ocr import OCR, CachedReader
-    from .video import iter_frames
-    ocr = OCR()
+    from .ocr import CachedReader
+    from .video import iter_frames, iter_keyframes
+    ocr = _proc_ocr()
+    calls0 = ocr.calls
     readers = {k: CachedReader(ocr) for k in FIELDS}
     store = Path(job.store)
     store.mkdir(parents=True, exist_ok=True)
@@ -95,13 +117,21 @@ def scan_chunk(job: ScanJob) -> dict:
         batch.clear()
 
     futs = []
-    for t, f in iter_frames(Path(job.path), job.fps, job.start, job.duration, hwaccel=job.hwaccel):
+    frames = (iter_keyframes(Path(job.path), job.start, job.duration) if job.keyframes
+              else iter_frames(Path(job.path), job.fps, job.start, job.duration, hwaccel=job.hwaccel))
+    for t, f in frames:
         idx = int(round(t * job.fps))
         crops = [crop(f, job.roi[k]) for k in FIELDS]
         band = cv2.resize(crop(f, HUD_BAND), BAND_SIZE, interpolation=cv2.INTER_AREA)
         alive, ult = card_features(f, job.geo)
         batch.append((idx, t, crops, band, alive, ult))
-        if _due(idx, job.fps, job.minimap_every):
+        if len(batch) >= 32:
+            flush()
+        if not job.save:
+            continue
+        if any(a <= t <= b for a, b in job.table_windows):
+            futs.append(pool.submit(_save, store, idx, "table", crop(f, list(job.table_roi)), 90))
+        if job.keyframes or _due(idx, job.fps, job.minimap_every):
             futs.append(pool.submit(_save, store, idx, "minimap", crop(f, job.roi["minimap"]), 80))
         kf = crop(f, job.roi["killfeed"])
         if job.killfeed_on_change:
@@ -110,11 +140,9 @@ def scan_chunk(job: ScanJob) -> dict:
             save_kf = True
         if save_kf:
             futs.append(pool.submit(_save, store, idx, "killfeed", kf, 90))
-        if _due(idx, job.fps, job.panel_every):
+        if job.keyframes or _due(idx, job.fps, job.panel_every):
             for suffix, side, (x0, y0, x1, y1) in panel_boxes:
                 futs.append(pool.submit(_save, store, idx, f"panel{side}{suffix}", f[y0:y1, x0:x1].copy(), 90))
-        if len(batch) >= 32:
-            flush()
         if len(futs) > 400:
             for x in futs:
                 x.result()
@@ -123,43 +151,89 @@ def scan_chunk(job: ScanJob) -> dict:
     for x in futs:
         x.result()
     pool.shutdown()
-    out["ocr_calls"] = ocr.calls
+    out["ocr_calls"] = ocr.calls - calls0
+    out["dense"] = [not job.keyframes] * len(out["t"])
+    return out
+
+
+def _pieces(segments: list[tuple[float, float]], n: int, min_len: float = 45.0) -> list[tuple[float, float]]:
+    """区間のリストを、n プロセスにほぼ均等に配れる長さに切る。"""
+    total = sum(d for _, d in segments)
+    target = max(min_len, total / max(1, n))
+    out = []
+    for a, d in segments:
+        k = max(1, int(round(d / target)))
+        step = d / k
+        out += [(a + i * step, step) for i in range(k)]
     return out
 
 
 def scan(path: Path, duration: float, fps: float, roi: dict, geo: dict | None, cfg: dict,
          store: Path, hwaccel: bool, workers: int | None = None, log=print,
-         panel_geo: dict | None = None) -> dict:
-    """区間全体を並列スキャン。返り値は時刻順にそろえた観測値（numpy 配列）。"""
+         panel_geo: dict | None = None, segments: list[tuple[float, float]] | None = None,
+         keyframes: bool = False, table_windows=(), save: bool = True) -> dict:
+    """並列スキャン。返り値は時刻順にそろえた観測値（numpy 配列）。
+
+    segments: 解析する区間 [(開始秒, 長さ)]。None なら全体。
+    keyframes: True ならキーフレームだけを読む（全フレームのデコードより 10 倍以上速い）。
+    save: False なら切り抜き画像を保存しない（ラウンドの切れ目を探すだけのとき）。
+    """
     workers = workers or int(cfg["video"].get("workers") or 0) or (os.cpu_count() or 1)
-    n = max(1, min(workers, int(duration // 120) or 1))
-    step = duration / n
+    segments = segments or [(0.0, duration)]
+    pieces = _pieces(segments, workers, 120.0 if keyframes else 45.0)
+    n = max(1, min(workers, len(pieces)))
     me = float(cfg["video"].get("minimap_every") or 0)
     pe = float(cfg["video"].get("panel_every") or 0)
     kc = bool(cfg["video"].get("killfeed_on_change", True))
-    jobs = [ScanJob(str(path), i * step, step + (0.5 / fps if i < n - 1 else 5), fps, roi, geo,
+    troi = tuple(cfg["hud"]["roi"].get("table") or (0.0, 0.52, 1.0, 1.0))
+    tw = tuple((float(a), float(b)) for a, b in table_windows)
+    jobs = [ScanJob(str(path), a, d + (0.5 / fps), fps, roi, geo,
                     str(store), cfg["output"]["gif_width"], cfg["hud"]["round_timer_sec"], hwaccel,
-                    panel_geo=panel_geo, minimap_every=me, panel_every=pe, killfeed_on_change=kc)
-            for i in range(n)]
+                    panel_geo=panel_geo, minimap_every=me, panel_every=pe, killfeed_on_change=kc,
+                    keyframes=keyframes, save=save, table_windows=tuple(w for w in tw if w[1] >= a and w[0] <= a + d + 1),
+                    table_roi=troi)
+            for a, d in pieces]
+    threads = max(1, (os.cpu_count() or 1) // n)
     if n == 1:
-        parts = [scan_chunk(jobs[0])]
+        os.environ.setdefault("VREPLAY_OCR_THREADS", str(threads))
+        parts = [scan_chunk(j) for j in jobs]
     else:
         # 親プロセスはダウンロード等のスレッドを持つので fork ではなく forkserver で子を作る
         ctx = mp.get_context("forkserver" if "forkserver" in mp.get_all_start_methods() else "spawn")
-        with ProcessPoolExecutor(max_workers=n, mp_context=ctx) as ex:
+        with ProcessPoolExecutor(max_workers=n, mp_context=ctx, initializer=_init_worker,
+                                 initargs=(threads,)) as ex:
             parts = list(ex.map(scan_chunk, jobs))
-    merged: dict = {}
-    seen = set()
-    order = []
+    merged = merge_obs(parts, cfg)
+    merged["ocr_calls"] = sum(p["ocr_calls"] for p in parts)
+    merged["workers"] = n
+    return merged
+
+
+KEYS = ("idx", "t", "band", "timer_txt", "sl_txt", "sr_txt", "round_txt", "alive", "ult", "dense")
+
+
+def merge_obs(parts: list[dict], cfg: dict, drop_sparse_in: list[tuple[float, float]] = ()) -> dict:
+    """観測値を時刻順にまとめ、文字列から数値を作り直す。
+
+    drop_sparse_in: この区間にあるキーフレームだけの観測（1 パス目）は捨てる（2 パス目の密な観測で置き換え）。
+    """
+    rows = []
     for p in parts:
-        for j, idx in enumerate(p["idx"]):
-            if idx in seen:
+        for j in range(len(p["t"])):
+            t = p["t"][j]
+            dense = p["dense"][j] if "dense" in p else True
+            if not dense and any(a <= t <= b for a, b in drop_sparse_in):
                 continue
-            seen.add(idx)
-            order.append((p, j))
-    order.sort(key=lambda pj: pj[0]["t"][pj[1]])
-    for k in ("idx", "t", "band", "timer_txt", "sl_txt", "sr_txt", "round_txt", "alive", "ult"):
-        merged[k] = [p[k][j] for p, j in order]
+            rows.append((t, 0 if dense else 1, p, j))
+    rows.sort(key=lambda r: (r[0], r[1]))
+    merged: dict = {}
+    dedup = []
+    for r in rows:                            # 同じ時刻（チャンクの継ぎ目）の重複を除く
+        if dedup and abs(dedup[-1][0] - r[0]) < 1e-3:
+            continue
+        dedup.append(r)
+    for k in KEYS:
+        merged[k] = [(p[k][j] if k in p else True) for _, _, p, j in dedup]
     rs = cfg["hud"]["round_timer_sec"]
     merged["timer"] = [parse_timer(x, rs) for x in merged["timer_txt"]]
     merged["spike"] = [is_spike_text(x) for x in merged["timer_txt"]]
@@ -169,8 +243,8 @@ def scan(path: Path, duration: float, fps: float, roi: dict, geo: dict | None, c
     merged["band"] = np.stack(merged["band"]) if merged["band"] else np.zeros((0, BAND_SIZE[1], BAND_SIZE[0], 3), np.uint8)
     merged["alive"] = np.stack(merged["alive"]) if merged["alive"] else np.zeros((0, 10), bool)
     merged["ult"] = np.stack(merged["ult"]) if merged["ult"] else np.zeros((0, 10), np.float32)
-    merged["ocr_calls"] = sum(p["ocr_calls"] for p in parts)
-    merged["workers"] = n
+    merged["dense"] = np.array(merged["dense"], bool)
+    merged["ocr_calls"] = sum(p.get("ocr_calls", 0) for p in parts)
     return merged
 
 

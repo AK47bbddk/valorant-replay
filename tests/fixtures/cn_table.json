@@ -1,0 +1,161 @@
+{
+ "source": "VCT CN 2026 Threshold W1D1 DRG vs RA, Summit（YouTube yJbW1DqEJ7c）。購入フェーズの装備表から白いシルエット部分だけを2値で切り出し",
+ "region_L": [
+  425,
+  "y-17",
+  "600",
+  "y+17"
+ ],
+ "region_R": [
+  1320,
+  "y-17",
+  1495,
+  "y+17"
+ ],
+ "rows_y": [
+  748,
+  816,
+  884,
+  952,
+  1020
+ ],
+ "names": {
+  "L": [
+   "Life",
+   "Nicc",
+   "vo0kashu",
+   "Flex1n",
+   "SpiritZ1"
+  ],
+  "R": [
+   "kklin",
+   "Z1Yan",
+   "nnono",
+   "potter",
+   "midnight"
+  ]
+ },
+ "labels": {
+  "t27955": {
+   "L": [
+    [
+     "Ghost"
+    ],
+    [
+     "Ghost"
+    ],
+    [
+     "Ghost"
+    ],
+    [
+     "Sheriff"
+    ],
+    [
+     "Ghost"
+    ]
+   ],
+   "R": [
+    [
+     "Classic"
+    ],
+    [
+     "Classic"
+    ],
+    [
+     "Ghost"
+    ],
+    [
+     "Ghost"
+    ],
+    [
+     "Ghost"
+    ]
+   ]
+  },
+  "t28085": {
+   "L": [
+    [
+     "Ghost",
+     "Guardian"
+    ],
+    [
+     "Spectre"
+    ],
+    [
+     "Ghost",
+     "Outlaw"
+    ],
+    [
+     "Classic",
+     "Spectre"
+    ],
+    [
+     "Ghost"
+    ]
+   ],
+   "R": [
+    [
+     "Classic"
+    ],
+    [
+     "Classic"
+    ],
+    [
+     "Classic"
+    ],
+    [
+     "Classic"
+    ],
+    [
+     "Classic"
+    ]
+   ]
+  },
+  "t28400": {
+   "L": [
+    [
+     "Classic",
+     "Operator"
+    ],
+    [
+     "Shorty",
+     "Vandal"
+    ],
+    [
+     "Ghost",
+     "Phantom"
+    ],
+    [
+     "Classic",
+     "Phantom"
+    ],
+    [
+     "Classic",
+     "Phantom"
+    ]
+   ],
+   "R": [
+    [
+     "Operator",
+     "Classic"
+    ],
+    [
+     "Vandal",
+     "Classic"
+    ],
+    [
+     "Vandal",
+     "Classic"
+    ],
+    [
+     "Phantom",
+     "Classic"
+    ],
+    [
+     "Phantom",
+     "Classic"
+    ]
+   ]
+  }
+ }
+}

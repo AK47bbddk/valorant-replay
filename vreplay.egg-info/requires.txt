@@ -5,7 +5,11 @@ pillow
 beautifulsoup4>=4.12
 lxml>=5.0
 
+[fetch]
+yt-dlp[default]>=2025.11
+
 [video]
-easyocr>=1.7
-yt-dlp>=2025.1
+rapidocr_onnxruntime<1.5,>=1.2
+yt-dlp[default]>=2025.11
 imageio>=2.34
+psutil>=5.9
