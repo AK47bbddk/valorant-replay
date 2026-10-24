@@ -37,6 +37,26 @@ def _gpu_ok() -> bool:
     return gpu_status()[0]
 
 
+def _enable_cuda(engine, RapidOCR, kw: dict):
+    """検出・認識のモデルを CUDA で動かす。
+
+    1.3 系以降は det_use_cuda などの引数で切り替えられる。1.2 系（Python 3.13 の Colab に入る版）は
+    認識側の引数が設定に反映されない作りなので、設定ファイルを読み直して検出器・認識器を作り直す。
+    """
+    if hasattr(engine, "text_rec"):                                   # 1.3 系以降
+        new = RapidOCR(**kw, det_use_cuda=True, rec_use_cuda=True, cls_use_cuda=True)
+        engine.__dict__.update(new.__dict__)
+        return
+    import rapidocr_onnxruntime.rapid_ocr_api as api                  # 1.2 系
+    cfg = api.concat_model_path(api.read_yaml(str(api.root_dir / "config.yaml")))
+    for key, attr in (("Det", "text_detector"), ("Rec", "text_recognizer")):
+        c = dict(cfg[key])
+        c["use_cuda"] = True
+        if key == "Rec":
+            c["rec_batch_num"] = 32                                    # GPU はまとめて流す方が速い
+        setattr(engine, attr, engine.init_module(c["module_name"], c["class_name"])(c))
+
+
 def _providers(engine) -> list[str]:
     """実際にセッションが使っている実行プロバイダ（CUDA のライブラリが読めず CPU に落ちた場合も分かる）。"""
     rec = getattr(engine, "text_rec", None) or getattr(engine, "text_recognizer", None)
@@ -58,18 +78,14 @@ class OCR:
         threads = int(os.environ.get("VREPLAY_OCR_THREADS") or 0)
         if threads > 0:
             kw.update(intra_op_num_threads=threads, inter_op_num_threads=1)
+        self.engine = RapidOCR(**kw)
         if gpu:
-            kw.update(det_use_cuda=True, rec_use_cuda=True, cls_use_cuda=True)
-        try:
-            self.engine = RapidOCR(**kw)
-        except Exception:
-            if not gpu:
-                raise
-            for k in ("det_use_cuda", "rec_use_cuda", "cls_use_cuda"):
-                kw.pop(k, None)
-            gpu = False
-            self.engine = RapidOCR(**kw)
-        self.note = "" if gpu else gpu_status()[1]
+            try:
+                _enable_cuda(self.engine, RapidOCR, kw)
+            except Exception as e:                 # GPU の準備に失敗したら CPU のまま続ける
+                gpu = False
+                self._cuda_error = f"{type(e).__name__}: {e}"
+        self.note = "" if gpu else (getattr(self, "_cuda_error", "") or gpu_status()[1])
         if gpu and "CUDAExecutionProvider" not in _providers(self.engine):
             gpu = False                                # CUDA のライブラリが無く CPU で動いている
             self.note = "onnxruntime-gpu はあるが CUDA / cuDNN のライブラリを読めず CPU で動作"
