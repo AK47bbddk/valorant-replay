@@ -1,9 +1,11 @@
 """ラウンドごとの素材づくり：開始ミニマップ、ミニマップ GIF、購入パネル・武器、キルログ、ULT。"""
 from __future__ import annotations
 
+import bisect
 import difflib
 import re
 import threading
+from functools import lru_cache
 from pathlib import Path
 
 import cv2
@@ -21,6 +23,7 @@ class FrameStore:
     def __init__(self, root: Path):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        self._cache: dict[str, tuple[list[int], list[Path]]] = {}
 
     def path(self, i: int, name: str) -> Path:
         return self.root / f"{i:06d}_{name}.jpg"
@@ -31,6 +34,32 @@ class FrameStore:
     def get(self, i: int, name: str):
         p = self.path(i, name)
         return cv2.imread(str(p)) if p.exists() else None
+
+    def _entries(self, name: str) -> tuple[list[int], list[Path]]:
+        if name not in self._cache:
+            rows = []
+            for p in self.root.glob(f"*_{name}.jpg"):
+                try:
+                    rows.append((int(p.name.split("_", 1)[0]), p))
+                except ValueError:
+                    continue
+            rows.sort(key=lambda r: r[0])
+            self._cache[name] = ([r[0] for r in rows], [r[1] for r in rows])
+        return self._cache[name]
+
+    def get_nearest(self, i: int, name: str):
+        """保存頻度を落としても、最も近いフレームの画像を返す。"""
+        keys, paths = self._entries(name)
+        if not keys:
+            return None
+        j = bisect.bisect_left(keys, i)
+        if j == 0:
+            p = paths[0]
+        elif j >= len(keys):
+            p = paths[-1]
+        else:
+            p = paths[j] if keys[j] - i < i - keys[j - 1] else paths[j - 1]
+        return cv2.imread(str(p))
 
 
 def clock(sec) -> str:
@@ -59,7 +88,7 @@ def make_gif(store: FrameStore, idxs: list[int], labels: list[str], path: Path, 
     for w in (width, int(width * 0.8), int(width * 0.65)):
         frames = []
         for j in pick:
-            img = store.get(idxs[j], "minimap")
+            img = store.get_nearest(idxs[j], "minimap")
             if img is None:
                 continue
             h0, w0 = img.shape[:2]
@@ -106,26 +135,31 @@ def is_alive(hp_crop) -> bool:
     return float(np.mean((hsv[..., 1] > 120) & (hsv[..., 2] > 120))) > 0.06
 
 
+@lru_cache(maxsize=64)
+def _ring_index(h: int, w: int) -> np.ndarray:
+    """ULT リングの探索座標を円ごとの2次元インデックスで返す（形ごとにキャッシュ）。"""
+    cy, cx = h / 2, w / 2
+    r = min(h, w) / 2 / 1.1
+    ang = np.linspace(0, 2 * np.pi, 120, endpoint=False)
+    cos, sin = np.cos(ang), np.sin(ang)
+    out = []
+    for oy, ox in ((0, 0), (-0.06, 0), (0.06, 0), (0, -0.06), (0, 0.06)):
+        ccx, ccy = cx + ox * r, cy + oy * r
+        for rad in np.linspace(0.82, 1.10, 5):
+            xs = np.clip((ccx + rad * r * cos).astype(int), 0, w - 1)
+            ys = np.clip((ccy + rad * r * sin).astype(int), 0, h - 1)
+            out.append(ys * w + xs)
+    return np.stack(out)
+
+
 def ult_ring(ult_crop) -> float:
     """ULT アイコン外周の点灯部（溜まると途切れなくなり≒1.0、未完成は点線（ポイント数に比例）。"""
     if ult_crop is None or ult_crop.size == 0:
         return 0.0
     h, w = ult_crop.shape[:2]
-    cy, cx = h / 2, w / 2
-    r = min(h, w) / 2 / 1.1                     # ult 枠は半径の 1.1 倍で切ってある
-    hsv = cv2.cvtColor(ult_crop, cv2.COLOR_BGR2HSV)
-    ang = np.linspace(0, 2 * np.pi, 180, endpoint=False)
-    best = 0.0
-    # HUD の丸は数 px ずれる。中心を少しずらして最も点灯している円を採る
-    for oy, ox in ((0, 0), (-0.06, 0), (0.06, 0), (0, -0.06), (0, 0.06)):
-        ccx, ccy = cx + ox * r, cy + oy * r
-        for rad in np.linspace(0.80, 1.10, 8):
-            xs = np.clip((ccx + rad * r * np.cos(ang)).astype(int), 0, w - 1)
-            ys = np.clip((ccy + rad * r * np.sin(ang)).astype(int), 0, h - 1)
-            px = hsv[ys, xs]
-            score = float(np.mean((px[:, 2] >= 150) & (px[:, 1] <= 110)))
-            best = max(best, score)
-    return best
+    px = cv2.cvtColor(ult_crop, cv2.COLOR_BGR2HSV).reshape(-1, 3)[_ring_index(h, w)]
+    scores = np.mean((px[..., 2] >= 150) & (px[..., 1] <= 110), axis=1)
+    return float(scores.max())
 
 
 def card_features(frame, geo: dict | None):
@@ -143,11 +177,12 @@ def card_features(frame, geo: dict | None):
     return alive, ult
 
 
-def weapons_from_panels(book, store: FrameStore, idx: int, geo: dict) -> list[tuple[str | None, float]]:
+def weapons_from_panels(book, store: FrameStore, idx: int, geo: dict,
+                        prefix: str = "") -> list[tuple[str | None, float]]:
     """保存したパネル画像から 10 人ぶんの武器を判別。"""
     out = []
     for side in ("L", "R"):
-        panel = store.get(idx, f"panel{side}")
+        panel = store.get_nearest(idx, f"panel{side}{prefix}")
         bx = panel_bbox(geo, side)
         for g in geo[side]:
             if panel is None or book is None:
@@ -158,10 +193,10 @@ def weapons_from_panels(book, store: FrameStore, idx: int, geo: dict) -> list[tu
     return out
 
 
-def alive_from_panels(store: FrameStore, idx: int, geo: dict) -> list[bool]:
+def alive_from_panels(store: FrameStore, idx: int, geo: dict, prefix: str = "") -> list[bool]:
     out = []
     for side in ("L", "R"):
-        panel = store.get(idx, f"panel{side}")
+        panel = store.get_nearest(idx, f"panel{side}{prefix}")
         bx = panel_bbox(geo, side)
         for g in geo[side]:
             if panel is None:
@@ -175,7 +210,10 @@ def alive_from_panels(store: FrameStore, idx: int, geo: dict) -> list[bool]:
 def buy_image(store: FrameStore, idx: int | None, path: Path) -> Path | None:
     if idx is None:
         return None
-    img = hstack([store.get(idx, "panelL"), store.get(idx, "panelR")], gap=16)
+    ls, rs = store.get_nearest(idx, "panelL_buy"), store.get_nearest(idx, "panelR_buy")
+    if ls is None or rs is None:
+        ls, rs = store.get_nearest(idx, "panelL"), store.get_nearest(idx, "panelR")
+    img = hstack([ls, rs], gap=16)
     if img is None:
         return None
     cv2.imwrite(str(path), img, [cv2.IMWRITE_JPEG_QUALITY, 90])

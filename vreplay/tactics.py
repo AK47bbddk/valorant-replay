@@ -277,12 +277,13 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
     def scan_source():
         """スキャン時に保存したミニマップを使い、動画の二度デコードを避ける。"""
         if store is not None and obs is not None and len(obs.get("t") or []) and obs.get("idx"):
+            getter = getattr(store, "get_nearest", None) or store.get
             last = -1e9
             for t, idx in zip(obs["t"], obs["idx"]):
                 t = float(t)
                 if t < start or t > end or t - last < every - 1e-6:
                     continue
-                mm = store.get(int(idx), "minimap")
+                mm = getter(int(idx), "minimap")
                 if mm is None or mm.size == 0:
                     continue
                 last = t

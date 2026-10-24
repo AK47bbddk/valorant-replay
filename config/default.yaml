@@ -15,7 +15,10 @@ filters:
 
 video:
   max_height: 1080
-  fps: 2                 # 解析に使うフレームレート
+  fps: 2
+  minimap_every: 1.0     # ミニマップ保存の秒間隔（0で毎フレーム）
+  panel_every: 1.0       # プレイヤーパネル保存の秒間隔（0で毎フレーム）
+  killfeed_on_change: true  # キルフィードは見た目が変わったフレームだけ保存
   per_round_sec: 140     # 次マップの開始秒が分からないときの見積もり
   tail_buffer_sec: 900
   cookies: ""            # cookies.txt のパス。空なら 環境変数 YT_COOKIES → <output.dir>/cookies.txt の順に探す

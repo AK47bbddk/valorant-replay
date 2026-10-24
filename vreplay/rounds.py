@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from statistics import median
+from statistics import median, mean
 
 import numpy as np
 
@@ -22,6 +22,8 @@ class DetRound:
     t_drop: float                # ラウンド開始（バリア解除）
     t_end: float                 # スコアが更新された時刻（≒ラウンド終了）
     drop_estimated: bool = False
+    start_conf: float = 0.0
+    start_source: str = ""
     winner_side: str | None = None
     live: list[int] = field(default_factory=list)      # 開始〜終了のライブフレーム（ポーズ除く）
     buy_idx: int | None = None                        # 購入フェーズ終了直前のフレーム
@@ -97,32 +99,73 @@ def assign_rounds(live: np.ndarray, sl: list, sr: list, rnd: list, n_rounds: int
 
 
 # ---------------------------------------------------------------- 分割
-def _drop_time(ts: list[float], timers: list, round_sec: int, buy_max: int) -> tuple[float | None, bool, int | None]:
-    """(開始時刻, 推定かどうか, 購入フェーズ最後のフレームの位置)"""
+def _estimate_drop(pairs: list[tuple[float, float]], round_sec: int) -> tuple[float | None, float]:
+    if not pairs:
+        return None, 9.0
+    est = [t - (round_sec - v) for t, v in pairs]
+    med = median(est)
+    keep = [x for x in est if abs(x - med) <= 2.0]
+    use = keep or est
+    spread = median([abs(x - med) for x in est]) if len(est) > 1 else 9.0
+    return float(mean(use)), float(spread)
+
+
+def _drop_time(ts: list[float], timers: list, round_sec: int, buy_max: int
+               ) -> tuple[float | None, bool, int | None, float, str]:
+    """(開始時刻, 推定か, 購入フェーズ最後の位置, 信頼度, 根拠)"""
     vals = [(j, t, v) for j, (t, v) in enumerate(zip(ts, timers)) if v is not None]
     if not vals:
-        return None, True, None
-    # 1:40 付近への跳ね上がりを探す
-    for a, (j, t, v) in enumerate(vals):
-        if v >= round_sec - 15 and (a == 0 or vals[a - 1][2] <= buy_max + 2 or vals[a - 1][2] < v - 20):
-            play = [(tt, vv) for _, tt, vv in vals[a:a + 6] if vv > buy_max * 0.3]
-            est = [tt - (round_sec - vv) for tt, vv in play]
-            buy = [jj for jj, _, vv in vals[:a] if vv <= buy_max + 2]
-            return float(median(est)) if est else t, False, (buy[-1] if buy else None)
+        return None, True, None, 0.0, "none"
+
+    def quality(spread: float, n: int) -> float:
+        q = 0.95 if spread <= 0.35 else 0.85 if spread <= 0.8 else 0.7 if spread <= 1.5 else 0.5
+        return q * min(1.0, 0.65 + n * 0.05)
+
+    # 1:40 付近への跳ね上がり（購入タイマー -> ラウンドタイマー）
+    jump_a = None
+    for a, (_, _, v) in enumerate(vals):
+        prev = vals[a - 1][2] if a else None
+        if v >= round_sec - 15 and (a == 0 or prev <= buy_max + 2 or prev < v - 20):
+            jump_a = a
+            break
+    buy = [(j, t, v) for j, t, v in vals if v <= buy_max + 2]
+    buy_j = buy[-1][0] if buy else None
+    buy_est = buy[-1][1] + buy[-1][2] if buy else None
+
+    if jump_a is not None:
+        nxt = [(t, v) for _, t, v in vals[jump_a:jump_a + 14] if buy_max * 0.3 < v <= round_sec + 2]
+        jump_est, spread = _estimate_drop(nxt, round_sec)
+        if jump_est is not None:
+            drop, conf, source = jump_est, quality(spread, len(nxt)), "round-timer"
+            if buy_est is not None:
+                gap = abs(drop - buy_est)
+                if gap <= 2.5:                   # 2つの根拠が一致 -> さらに正確
+                    drop = (drop * 2 + buy_est) / 3
+                    conf = min(0.98, conf + 0.08)
+                    source = "round-timer+buy-timer"
+                elif gap > 4.0:                  # 購入タイマーが別画面の可能性
+                    conf *= 0.8
+            return drop, conf < 0.72, buy_j, conf, source
+
     first_v = vals[0][2]
-    if first_v <= buy_max + 2:
-        # 購入フェーズだけ見えている（直後にリプレイ等で切れた）：0:00 になる時刻を開始とする
-        buy = [(j, t, v) for j, t, v in vals if v <= buy_max + 2]
+    if first_v <= buy_max + 2 and buy:
+        # 購入フェーズだけ見えている：0:00 になる時刻を開始とする
         j, t, v = buy[-1]
-        return t + v, True, j
-    # 途中から映った：残り時間から逆算
-    est = [t - (round_sec - v) for _, t, v in vals[:5]]
-    return float(median(est)), True, None
+        return t + v, v > 0.6, j, 0.82 if v <= 0.6 else 0.68, "buy-timer"
+    if first_v > buy_max:
+        # 途中から映った：残り時間から逆算（複数フレームの中央値）
+        nxt = [(t, v) for _, t, v in vals[:14] if buy_max * 0.3 < v <= round_sec + 2]
+        est, spread = _estimate_drop(nxt, round_sec)
+        if est is not None:
+            return est, True, buy_j, quality(spread, len(nxt)), "countdown"
+    if buy_est is not None:
+        return buy_est, True, buy_j, 0.45, "buy-timer-only"
+    return ts[0], True, buy_j, 0.0, "fallback"
 
 
 def segment(t: list[float], live: np.ndarray, rid: list, timer: list, sl: list, sr: list,
-            n_rounds: int | None, round_sec: int = 100, buy_max: int = 30, pause_sec: float = 3.0
-            ) -> tuple[list[DetRound], dict]:
+            n_rounds: int | None, round_sec: int = 100, buy_max: int = 30, pause_sec: float = 3.0,
+            alive=None, conf=None) -> tuple[list[DetRound], dict]:
     N = len(t)
     stats = {"frames": N, "live": int(np.sum(live)),
              "timer_ok": sum(v is not None for v in timer) / max(1, N),
@@ -136,12 +179,29 @@ def segment(t: list[float], live: np.ndarray, rid: list, timer: list, sl: list, 
         nxt = [i for i in range(N) if rid[i] is not None and rid[i] > n]
         t_end = t[nxt[0]] if nxt else t[idx[-1]] + 1.0
         ts = [t[i] for i in idx]
-        drop, est, buy_j = _drop_time(ts, [timer[i] for i in idx], round_sec, buy_max)
+        drop, est, buy_j, start_conf, source = _drop_time(ts, [timer[i] for i in idx], round_sec, buy_max)
         if drop is None:
-            drop, est = ts[0], True
+            drop, est, start_conf, source = ts[0], True, 0.0, "fallback"
         drop = max(ts[0] - 60.0, min(drop, t_end))
-        r = DetRound(n=n, t_first=ts[0], t_drop=drop, t_end=t_end, drop_estimated=est)
-        r.buy_idx = idx[buy_j] if buy_j is not None else None
+        r = DetRound(n=n, t_first=ts[0], t_drop=drop, t_end=t_end, drop_estimated=est,
+                     start_conf=start_conf, start_source=source)
+
+        def alive_n(i: int) -> int:
+            try:
+                return int(np.sum(alive[i]))
+            except Exception:
+                return 0
+
+        def usable(i: int) -> bool:
+            return conf is None or bool(conf[i])
+
+        # 購入フェーズの最後ではなく、少し手前の安定したフレームを使う。
+        # CN 放送の購入UI -> 試合UI の切り替えアニメーションを避ける。
+        buys = [i for i in idx if drop - 12.0 <= t[i] <= drop - 1.2 and usable(i)]
+        if buys:
+            r.buy_idx = max(buys, key=lambda i: (alive_n(i), -abs(t[i] - (drop - 3.0)), t[i]))
+        else:
+            r.buy_idx = idx[buy_j] if buy_j is not None else None
         # ライブ区間（ポーズを除く）
         last_v, stall = None, None
         for i in idx:
@@ -157,8 +217,12 @@ def segment(t: list[float], live: np.ndarray, rid: list, timer: list, sl: list, 
             if v is not None:
                 last_v = v
             r.live.append(i)
-        after = [i for i in r.live if t[i] >= drop + 1.0]
-        r.first_idx = after[0] if after else (r.live[0] if r.live else None)
+        after = [i for i in r.live if drop + 1.5 <= t[i] <= drop + 8.0 and usable(i)]
+        if after:
+            r.first_idx = max(after, key=lambda i: (alive_n(i), -abs(t[i] - (drop + 2.5)), -t[i]))
+        else:
+            after = [i for i in r.live if t[i] >= drop + 1.0]
+            r.first_idx = after[0] if after else (r.live[0] if r.live else None)
         # 勝った側：このラウンドと次のラウンドのスコア表示を比べる
         a = [(sl[i], sr[i]) for i in idx if sl[i] is not None and sr[i] is not None]
         b = [(sl[i], sr[i]) for i in nxt[:8] if sl[i] is not None and sr[i] is not None and rid[i] == n + 1]
@@ -167,6 +231,8 @@ def segment(t: list[float], live: np.ndarray, rid: list, timer: list, sl: list, 
             dr = median(y for _, y in b) - median(y for _, y in a)
             r.winner_side = "L" if dl > dr else "R" if dr > dl else None
         rounds.append(r)
+    stats["drop_estimated"] = sum(1 for r in rounds if r.drop_estimated)
+    stats["drop_avg_conf"] = round(mean([r.start_conf for r in rounds]), 2) if rounds else 0.0
     return rounds, stats
 
 

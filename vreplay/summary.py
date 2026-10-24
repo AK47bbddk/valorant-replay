@@ -47,9 +47,16 @@ def kill_count(rep: dict, r: dict) -> str:
     return f"{a}-{b}"
 
 
-def ult_used(r: dict) -> str:
+def ult_used(r: dict, rep: dict | None = None) -> str:
     us = r.get("ults") or []
-    return "、".join(f"{u.get('player')}" + (f"（{u['agent']}）" if u.get("agent") else "") for u in us) or "-"
+    out = []
+    for u in us:
+        who = u.get("player") or (f"枠{u['slot']}" if u.get("slot") else "?")
+        s = who + (f"（{u['agent']}）" if u.get("agent") else "")
+        if rep and u.get("team"):
+            s += f"［{u['team']}］"
+        out.append(s)
+    return "、".join(out) or "-"
 
 
 def buy_cell(r: dict, no: str) -> str:

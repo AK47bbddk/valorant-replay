@@ -116,7 +116,7 @@ def _map_section(rep: dict, base: Path) -> str:
                     f'<td class="{cls}">{_e(S.tag(rep, r.get("winner")))}</td><td>{_e(S.how(r))}</td>'
                     f'<td>{br(S.buy_cell(r, "1"))}</td><td>{br(S.buy_cell(r, "2"))}</td>'
                     f'<td>{_e(S.first_kill(rep, r))}</td><td>{_e(S.kill_count(rep, r))}</td>'
-                    f'<td>{_e(S.ult_used(r))}</td><td>{_e(r.get("duration") or "-")}</td></tr>')
+                    f'<td>{_e(S.ult_used(r, rep))}</td><td>{_e(r.get("duration") or "-")}</td></tr>')
     out.append(f'<div class="tbl"><table><thead><tr><th>R</th><th>スコア</th><th>勝者</th><th>勝ち方</th>'
                f'<th>{_e(t1)} 購入・武器</th><th>{_e(t2)} 購入・武器</th><th>先制キル</th><th>キル</th>'
                f'<th>ULT 使用</th><th>時間</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>')

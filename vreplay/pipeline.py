@@ -101,10 +101,21 @@ def download(cfg: dict, m: vlr.Match, md: vlr.MapData, log=print) -> Path:
 
 
 # ---------------------------------------------------------------- キャリブレーション
+def _even(frames: list, n: int = 14) -> list:
+    if len(frames) <= n:
+        return frames
+    return [frames[i] for i in np.linspace(0, len(frames) - 1, n).astype(int)]
+
+
 def calibrate(cfg: dict, path: Path, md: vlr.MapData, roster, n: int = 30, log=print):
-    """放送レイアウトの選択・カード位置・キルフィード位置を、区間全体から抜いた n 枚で決める。"""
+    """放送レイアウト・カード位置・キルフィード位置を決める。
+
+    購入フェーズとラウンド中で CN 放送の UI が切り替わるため、タイマーで2群に分け、
+    カード位置も別々に検出する。混ざったフレームから1つの座標を作らない。
+    """
+    from .config import crop
     from .extract import find_killfeed
-    from .layout import card_geometry, choose_preset, find_cards
+    from .layout import card_geometry, choose_preset, find_cards, parse_timer
     from .ocr import OCR, CachedReader
     from .video import grab, probe
     W, H, dur = probe(path)
@@ -112,42 +123,80 @@ def calibrate(cfg: dict, path: Path, md: vlr.MapData, roster, n: int = 30, log=p
     with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 2)) as ex:
         frames = [f for f in ex.map(lambda tt: grab(path, float(tt)), pts) if f is not None]
     ocr = OCR()
+    reader = CachedReader(ocr)
     roi = dict(cfg["hud"]["roi"])
-    name, hud, nread = choose_preset(CachedReader(ocr), frames, cfg["hud"]["round_timer_sec"])
+    name, hud, nread = choose_preset(reader, frames, cfg["hud"]["round_timer_sec"])
     roi.update(hud)
     msg = [f"レイアウト {name}（タイマー {nread}/{len(frames)} 枚）"]
-    cards = find_cards(frames)
+
+    # 同じ OCR 結果から購入前（0:30 以下）とラウンド中（1:40 付近）を分ける
+    tvals = [parse_timer(t, cfg["hud"]["round_timer_sec"])
+             for t, _ in reader.read([crop(f, roi["timer"]) for f in frames])]
+    buy_max = cfg["hud"]["buy_phase_max_sec"]
+    live_frames = [f for f, v in zip(frames, tvals) if v is not None and v > buy_max]
+    buy_frames = [f for f, v in zip(frames, tvals) if v is not None and v <= buy_max + 2]
+
+    cards = find_cards(_even(live_frames) or _even(frames))
     geo = card_geometry(cards, W, H) if cards else None
+    cards_buy = find_cards(_even(buy_frames)) if len(buy_frames) >= 4 else None
+    geo_buy = card_geometry(cards_buy, W, H) if cards_buy else geo
     msg.append("カード位置 自動検出" if geo else "カード位置 見つからず（武器・ULT は無効）")
+    if geo and geo_buy and geo != geo_buy:
+        msg.append("購入前UIと試合中UIを分離")
     if md.players:
-        kf, hits = find_killfeed(None, frames, roster)
+        kf, hits = find_killfeed(None, _even(live_frames) or _even(frames), roster)
         if kf:
             roi["killfeed"] = kf
             msg.append(f"キルフィード 自動検出（{len(hits)} 行）")
-    return roi, geo, frames, "／".join(msg), (W, H, dur)
+    return roi, geo, geo_buy, frames, "／".join(msg), (W, H, dur)
 
 
 # ---------------------------------------------------------------- 名前（カードの選手）
-def slot_names(store, idx, geo, roster, team_left, team_right) -> list[tuple[str, str]]:
-    """カード 10 枚の (選手名, チーム)。名前の位置を直接読む（検出なし・まとめて認識）。読めなければ「左1」など。"""
+def slot_names(store, idxs, geo, roster, team_left, team_right,
+               prefix: str = "") -> list[tuple[str, str]]:
+    """カード 10 枚の (選手名, チーム)。複数フレームを OCR して多数決する。読めなければ「左1」など。"""
+    from collections import Counter
+
     from .extract import _ocr
     from .layout import panel_bbox, shift
-    crops, meta = [], []
-    for side, team in (("L", team_left), ("R", team_right)):
-        panel = store.get(idx, f"panel{side}") if idx is not None else None
-        bx = panel_bbox(geo, side) if geo else None
-        for k in range(5):
-            img = None
-            if panel is not None and bx:
-                x0, y0, x1, y1 = shift(geo[side][k]["name"], bx[0], bx[1])
-                img = panel[max(0, y0):y1, max(0, x0):x1]
-            crops.append(img)
-            meta.append((side, k, team))
-    res = _ocr().rec(crops)
+    if idxs is None:
+        idxs = []
+    elif isinstance(idxs, int):
+        idxs = [idxs]
+    idxs = [i for i in idxs if i is not None][:5]
+    votes = [Counter() for _ in range(10)]
+    first: list[tuple[str, str] | None] = [None] * 10
+    if idxs:
+        crops, meta = [], []
+        for idx in idxs:
+            for si, (side, team) in enumerate((("L", team_left), ("R", team_right))):
+                panel = store.get_nearest(idx, f"panel{side}{prefix}")
+                bx = panel_bbox(geo, side) if geo else None
+                for k in range(5):
+                    img = None
+                    if panel is not None and bx:
+                        x0, y0, x1, y1 = shift(geo[side][k]["name"], bx[0], bx[1])
+                        img = panel[max(0, y0):y1, max(0, x0):x1]
+                    crops.append(img)
+                    meta.append((si * 5 + k, side, k, team))
+        res = _ocr().rec(crops)
+        for (slot, side, k, team), (text, _) in zip(meta, res):
+            nm, tm = roster.snap(text, team) if text else (None, None)
+            if nm and tm == team:
+                votes[slot][nm] += 1
+                if first[slot] is None:
+                    first[slot] = (nm, team)
     out = []
-    for (side, k, team), (text, _) in zip(meta, res):
-        nm, tm = roster.snap(text, team) if text else (None, None)
-        out.append((nm if tm == team else f"{'左' if side == 'L' else '右'}{k + 1}", team))
+    for si, (side, team) in enumerate((("L", team_left), ("R", team_right))):
+        for k in range(5):
+            slot = si * 5 + k
+            if votes[slot]:
+                name = votes[slot].most_common(1)[0][0]
+                out.append((name, team))
+            elif first[slot]:
+                out.append(first[slot])
+            else:
+                out.append((f"{'左' if side == 'L' else '右'}{k + 1}", team))
     return out
 
 
@@ -167,14 +216,16 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
     roster = X.Roster([(p.name, m.team1 if p.team == 1 else m.team2) for p in md.players])
     agent = {p.name: p.agent for p in md.players}
     with perf.stage("calibrate", tag=tag, label="キャリブレーション") as st_cal:
-        roi, geo, _, msg, (W, H, dur) = calibrate(cfg, path, md, roster, log=log)
+        roi, geo, geo_buy, _, msg, (W, H, dur) = calibrate(cfg, path, md, roster, log=log)
     t_cal = st_cal["seconds"]
     log(f"    {msg}（{perf.fmt_seconds(t_cal)}）｜{perf.fmt_resources(st_cal['resources'])}")
     hw = gpu_decode_ok(str(path))
     store = X.FrameStore(_work_root(cfg) / f"frames_{m.id}_{md.order}")
     try:
         with perf.stage("scan", tag=tag, label="HUD スキャン") as st_scan:
-            obs = scan(path, dur, vcfg["fps"], roi, geo, cfg, store.root, hw, log=log)
+            panel_geo = geo_buy if geo_buy and geo_buy != geo else None
+            obs = scan(path, dur, vcfg["fps"], roi, geo, cfg, store.root, hw, log=log,
+                       panel_geo=panel_geo)
         log(f"    スキャン {len(obs['t'])} 枚 {perf.fmt_seconds(st_scan['seconds'])}"
             f"（{obs['workers']} 並列・デコード {'GPU' if hw else 'CPU'}・OCR {obs['ocr_calls']} 回）"
             f"｜{perf.fmt_resources(st_scan['resources'])}")
@@ -183,7 +234,8 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
         live, _, linfo = liveness(obs["band"], conf)
         rid = assign_rounds(live, sl, sr, obs["rnd"], md.total_rounds or None)
         det, stats = segment(t, live, rid, timer, sl, sr, md.total_rounds or None,
-                             hcfg["round_timer_sec"], hcfg["buy_phase_max_sec"])
+                             hcfg["round_timer_sec"], hcfg["buy_phase_max_sec"],
+                             alive=obs["alive"], conf=conf)
         winners = {r.n: r.winner for r in md.rounds}
         orient = orientation(det, winners)
         agree = agreement(det, winners, orient)
@@ -234,7 +286,8 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
             labels = [X.clock(timer[i]) for i in r.live]
             a = rr["assets"]
             if r.first_idx is not None:
-                p = X.save_still(store.get(obs["idx"][r.first_idx], "minimap"), out_dir / f"r{r.n:02d}_start.jpg")
+                p = X.save_still(store.get_nearest(obs["idx"][r.first_idx], "minimap"),
+                                 out_dir / f"r{r.n:02d}_start.jpg")
                 a["minimap_start"] = str(p) if p else None
             g = X.make_gif(store, fidx, labels, out_dir / f"r{r.n:02d}_minimap.gif", r.n, fps,
                            ocfg["gif_speed"], ocfg["gif_width"], ocfg["gif_max_frames"])
@@ -243,15 +296,26 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
             widx = obs["idx"][wi] if wi is not None else None
             b = X.buy_image(store, widx, out_dir / f"r{r.n:02d}_buy.jpg")
             a["buy_panels"] = str(b) if b else None
-            names = slot_names(store, widx, geo, roster, team_left, team_right) if geo else []
-            if geo and widx is not None:
-                ws = X.weapons_from_panels(book, store, widx, geo)
-                al = X.alive_from_panels(store, widx, geo)
+
+            g_buy = geo_buy or geo
+            buy_prefix = "_buy" if geo_buy and geo and geo_buy != geo else ""
+            names_buy = (slot_names(store, widx, g_buy, roster, team_left, team_right, prefix=buy_prefix)
+                         if g_buy else [])
+            if g_buy and widx is not None:
+                ws = X.weapons_from_panels(book, store, widx, g_buy, prefix=buy_prefix)
+                al = X.alive_from_panels(store, widx, g_buy, prefix=buy_prefix)
                 wt = {m.team1: [], m.team2: []}
-                for s_, ((nm, tm), (w, _), ok) in enumerate(zip(names, ws, al)):
+                for (nm, tm), (w, _), ok in zip(names_buy, ws, al):
                     if ok:
                         wt[tm].append({"player": nm, "agent": agent.get(nm), "weapon": w, "weapon_ja": wja(w) if w else "?"})
                 rr["weapons"] = {"1": wt[m.team1], "2": wt[m.team2]}
+
+            # ラウンド開始直後の安定したフレームから名前を多数決（購入前UIの名前は使わない）
+            name_idxs = [r.first_idx] if r.first_idx is not None else []
+            name_idxs += [i for i in r.live if t[i] >= r.t_drop + 1.5][:3]
+            name_idxs = list(dict.fromkeys(i for i in name_idxs if i is not None))
+            names_live = slot_names(store, name_idxs, geo, roster, team_left, team_right) if geo else []
+            names = names_live or names_buy
             kills, strip = X.kills_in_round(store, fidx, times, labels, roster, book, out_dir / f"r{r.n:02d}_kills.jpg")
             for k in kills:
                 k["weapon_ja"] = wja(k["weapon"]) if k.get("weapon") else None
@@ -259,7 +323,9 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
             if geo and r.live:
                 evs, ready0 = X.ult_events(obs["ult"], obs["alive"], r.live)
                 rr["ults"] = [{"t": round(t[r.live[j]], 1), "timer": labels[j], "player": names[s_][0],
-                               "team": names[s_][1], "agent": agent.get(names[s_][0])} for s_, j in evs if s_ < len(names)]
+                               "slot": f"{'L' if s_ < 5 else 'R'}{s_ % 5 + 1}",
+                               "team": names[s_][1], "agent": agent.get(names[s_][0])}
+                              for s_, j in evs if s_ < len(names)]
                 rr["ult_ready"] = [names[s_][0] for s_ in ready0 if s_ < len(names)]
             rr.update({
                 "kills": kills,
@@ -267,7 +333,7 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                 "duration": X.clock(r.t_end - r.t_drop),
             })
             if r.drop_estimated:
-                rr["notes"].append("ラウンド開始時刻は推定値です（開始の瞬間が放送に映っていない）")
+                rr["notes"].append(f"ラウンド開始時刻は推定値です（信頼度 {r.start_conf:.0%}）")
 
         with perf.stage("assets", tag=tag, label="ラウンド素材") as st_assets:
             with ThreadPoolExecutor(max_workers=max(2, min(8, os.cpu_count() or 2))) as ex:
@@ -283,8 +349,11 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
             if rr["n"] not in found:
                 rr["notes"].append("動画からこのラウンドを特定できませんでした（放送が別画面だった可能性）")
         rep["video_ok"] = True
+        drop_note = (f"開始推定 {stats.get('drop_estimated', 0)}R・平均信頼度 {stats.get('drop_avg_conf', 0):.0%}"
+                     if det else "")
         rep["analysis_note"] = (f"{msg}／{linfo}／タイマー読取 {stats['timer_ok']:.0%}・スコア読取 {stats['score_ok']:.0%}"
                                 f"／検出ラウンド {len(det)}/{md.total_rounds or '?'}／VLR との勝敗一致 {agree:.0%}"
+                                + (f"／{drop_note}" if drop_note else "")
                                 + (f"／{tac_note}" if tac_note else "")
                                 + f"／解析 {perf.fmt_seconds(time.time() - t_start)}")
         log(f"    {rep['analysis_note']}")

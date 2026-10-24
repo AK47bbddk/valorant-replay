@@ -197,7 +197,7 @@ def build_blocks(rep: dict, uploads: dict[str, str | None]) -> list[dict]:
         win = S.tag(rep, r.get("winner"))
         rows.append([rcell, r.get("score") or "-", [_rt(win, bold=True, color="blue" if r.get("winner_no") == 1 else "red")],
                      S.how(r), S.buy_cell(r, "1"), S.buy_cell(r, "2"), S.first_kill(rep, r),
-                     S.kill_count(rep, r), S.ult_used(r), r.get("duration") or "-"])
+                     S.kill_count(rep, r), S.ult_used(r, rep), r.get("duration") or "-"])
     blocks += [_h(2, "ラウンド一覧"), _table(rows), _h(2, "ラウンド詳細")]
 
     for r in rep["rounds"]:

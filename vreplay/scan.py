@@ -35,10 +35,27 @@ class ScanJob:
     gif_width: int
     round_sec: int
     hwaccel: bool
+    panel_geo: dict | None = None
+    minimap_every: float = 0.0
+    panel_every: float = 0.0
+    killfeed_on_change: bool = True
 
 
 def _save(store: Path, idx: int, name: str, img, q: int = 85):
     cv2.imwrite(str(store / f"{idx:06d}_{name}.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, q])
+
+
+def _due(idx: int, fps: float, every: float) -> bool:
+    """保存頻度。0 以下なら毎フレーム、それ以外は秒間隔。"""
+    if not every or every <= 0:
+        return True
+    return idx % max(1, int(round(fps * every))) == 0
+
+
+def _changed(prev, img, size=(96, 64), threshold: float = 1.5):
+    gray = cv2.resize(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), size, interpolation=cv2.INTER_AREA)
+    diff = 999.0 if prev is None else float(np.mean(cv2.absdiff(gray, prev)))
+    return diff >= threshold, gray
 
 
 def scan_chunk(job: ScanJob) -> dict:
@@ -52,8 +69,14 @@ def scan_chunk(job: ScanJob) -> dict:
     store = Path(job.store)
     store.mkdir(parents=True, exist_ok=True)
     pool = ThreadPoolExecutor(max_workers=2)
+    panel_boxes = []
+    if job.geo:
+        panel_boxes += [("", side, panel_bbox(job.geo, side)) for side in ("L", "R")]
+    if job.panel_geo and job.panel_geo != job.geo:
+        panel_boxes += [("_buy", side, panel_bbox(job.panel_geo, side)) for side in ("L", "R")]
     out = {k: [] for k in ("idx", "t", "band", "timer_txt", "sl_txt", "sr_txt", "round_txt", "alive", "ult")}
     batch = []
+    prev_kf = None
 
     def flush():
         if not batch:
@@ -78,13 +101,18 @@ def scan_chunk(job: ScanJob) -> dict:
         band = cv2.resize(crop(f, HUD_BAND), BAND_SIZE, interpolation=cv2.INTER_AREA)
         alive, ult = card_features(f, job.geo)
         batch.append((idx, t, crops, band, alive, ult))
-        mm = crop(f, job.roi["minimap"])
-        futs.append(pool.submit(_save, store, idx, "minimap", mm, 80))
-        futs.append(pool.submit(_save, store, idx, "killfeed", crop(f, job.roi["killfeed"]), 90))
-        if job.geo:
-            for side in ("L", "R"):
-                x0, y0, x1, y1 = panel_bbox(job.geo, side)
-                futs.append(pool.submit(_save, store, idx, f"panel{side}", f[y0:y1, x0:x1].copy(), 90))
+        if _due(idx, job.fps, job.minimap_every):
+            futs.append(pool.submit(_save, store, idx, "minimap", crop(f, job.roi["minimap"]), 80))
+        kf = crop(f, job.roi["killfeed"])
+        if job.killfeed_on_change:
+            save_kf, prev_kf = _changed(prev_kf, kf)
+        else:
+            save_kf = True
+        if save_kf:
+            futs.append(pool.submit(_save, store, idx, "killfeed", kf, 90))
+        if _due(idx, job.fps, job.panel_every):
+            for suffix, side, (x0, y0, x1, y1) in panel_boxes:
+                futs.append(pool.submit(_save, store, idx, f"panel{side}{suffix}", f[y0:y1, x0:x1].copy(), 90))
         if len(batch) >= 32:
             flush()
         if len(futs) > 400:
@@ -100,13 +128,18 @@ def scan_chunk(job: ScanJob) -> dict:
 
 
 def scan(path: Path, duration: float, fps: float, roi: dict, geo: dict | None, cfg: dict,
-         store: Path, hwaccel: bool, workers: int | None = None, log=print) -> dict:
+         store: Path, hwaccel: bool, workers: int | None = None, log=print,
+         panel_geo: dict | None = None) -> dict:
     """区間全体を並列スキャン。返り値は時刻順にそろえた観測値（numpy 配列）。"""
     workers = workers or int(cfg["video"].get("workers") or 0) or (os.cpu_count() or 1)
     n = max(1, min(workers, int(duration // 120) or 1))
     step = duration / n
+    me = float(cfg["video"].get("minimap_every") or 0)
+    pe = float(cfg["video"].get("panel_every") or 0)
+    kc = bool(cfg["video"].get("killfeed_on_change", True))
     jobs = [ScanJob(str(path), i * step, step + (0.5 / fps if i < n - 1 else 5), fps, roi, geo,
-                    str(store), cfg["output"]["gif_width"], cfg["hud"]["round_timer_sec"], hwaccel)
+                    str(store), cfg["output"]["gif_width"], cfg["hud"]["round_timer_sec"], hwaccel,
+                    panel_geo=panel_geo, minimap_every=me, panel_every=pe, killfeed_on_change=kc)
             for i in range(n)]
     if n == 1:
         parts = [scan_chunk(jobs[0])]

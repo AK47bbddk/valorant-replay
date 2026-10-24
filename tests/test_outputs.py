@@ -30,6 +30,15 @@ def _store(tmp_path, n=6):
     return st
 
 
+def test_frame_store_nearest(tmp_path):
+    st = X.FrameStore(tmp_path / "frames")
+    for i, v in ((0, 10), (4, 40)):
+        st.put(i, "minimap", np.full((8, 8, 3), v, np.uint8))
+    assert int(st.get_nearest(1, "minimap").mean()) == 10
+    assert int(st.get_nearest(3, "minimap").mean()) == 40
+    assert st.get_nearest(1, "panelL") is None
+
+
 def test_gif_kills_ults(tmp_path, monkeypatch):
     st = _store(tmp_path)
     out = tmp_path / "out"
