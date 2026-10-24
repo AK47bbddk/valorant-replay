@@ -85,15 +85,16 @@ def _segment_bounds(m: vlr.Match, md: vlr.MapData, cfg: dict) -> tuple[int, int]
 
 
 def download(cfg: dict, m: vlr.Match, md: vlr.MapData, log=print) -> Path:
-    from .video import download_segment, resolve_cookies
+    from .video import download_segment, resolve_cookies, video_size
     start, end = _segment_bounds(m, md, cfg)
     tag = f"{m.id}:{md.order}"
     with perf.stage("download", tag=tag, label="動画の取得") as st:
         p = download_segment(md.vod_id, start, end, _work_root(cfg), cfg["video"]["max_height"],
                              resolve_cookies(cfg), cache_dirs=[video_cache_dir(cfg)], log=log,
-                             fragments=int(cfg["video"].get("download_fragments") or 4))
-        st["bytes"] = p.stat().st_size
-    size = p.stat().st_size
+                             fragments=int(cfg["video"].get("download_fragments") or 4),
+                             parts=int(cfg["video"].get("download_parts") or 1))
+        st["bytes"] = video_size(p)
+    size = video_size(p)
     mbps = size / 1e6 / st["seconds"] if st["seconds"] > 0.05 else 0
     speed = f", {mbps:.1f} MB/s" if mbps else ""
     log(f"    動画を取得：{md.name}（{size / 1e6:.0f} MB, {perf.fmt_seconds(st['seconds'])}{speed}）"
@@ -202,17 +203,31 @@ def slot_names(store, idxs, geo, roster, team_left, team_right,
 
 # ---------------------------------------------------------------- 2 パス解析の区間
 def dense_windows(det1, obs1: dict, live1, dur: float, buy_max: float, pre: float = 9.0, post: float = 1.5,
-                  pad: float = 5.0) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+                  pad: float = 5.0, step: float = 2.0, round_sec: float = 100.0
+                  ) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
     """1 パス目（キーフレーム）で見つけたラウンドから、2 パス目で密に読む区間を決める。
 
-    - 各ラウンドの開始 pre 秒前（装備表）〜終了 post 秒後
+    - 各ラウンドの開始 pre 秒前（装備表）〜ラウンドの実際の終わり
+      終わりは「残り時間が開始からの経過と合うフレーム（またはスパイク設置後の表示）」の最後＋キーフレーム間隔。
+      スコアの更新（次ラウンドの始まり）まで待つと、ラウンド後のリプレイや購入フェーズまで含んでしまう。
     - 1 パス目でラウンドに割り当てられなかったが、試合中（タイマーが購入フェーズより大きい）に見えるライブの
       フレームの前後 pad 秒（ラウンドの取りこぼし対策）
     返り値 (区間 [(開始, 長さ)], 装備表を保存する時間帯 [(開始, 終了)])
     """
-    iv = [(max(0.0, r.t_drop - pre), min(dur, r.t_end + post)) for r in det1]
-    spans = [(r.t_first, r.t_end) for r in det1]
     t, timer = obs1["t"], obs1["timer"]
+    spike = obs1.get("spike") or [False] * len(t)
+    iv = []
+    for r in det1:
+        last = None
+        for i in range(len(t)):
+            if not live1[i] or not (r.t_drop <= t[i] < r.t_end):
+                continue
+            v = timer[i]
+            if spike[i] or (v is not None and abs(v - (round_sec - (t[i] - r.t_drop))) <= 6):
+                last = t[i]
+        end = r.t_end + post if last is None else min(r.t_end + post, last + step + post)
+        iv.append((max(0.0, r.t_drop - pre), min(dur, end)))
+    spans = [(r.t_first, r.t_end) for r in det1]
     for i in range(len(t)):
         v = timer[i]
         if not live1[i] or v is None or v <= buy_max + 2 or any(a <= t[i] <= b for a, b in spans):
@@ -299,7 +314,8 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                 obs1 = scan(path, dur, vcfg["fps"], roi, geo, cfg, store.root, hw, log=log, keyframes=True,
                             save=(mode == "fast"), panel_geo=panel_geo)
                 _, live1, _, det1, _ = find_rounds(obs1)
-                segs, table_windows = dense_windows(det1, obs1, live1, dur, hcfg["buy_phase_max_sec"])
+                segs, table_windows = dense_windows(det1, obs1, live1, dur, hcfg["buy_phase_max_sec"],
+                                                    step=ki, round_sec=hcfg["round_timer_sec"])
                 if mode == "fast":
                     # 2 パス目：装備表が出る「開始 9 秒前〜3.5 秒後」だけを密に読む
                     segs = _merge_iv([(max(0.0, a), min(dur, b)) for a, b in table_windows])
@@ -561,7 +577,7 @@ def fetch(cfg: dict, day: date | None = None, match_urls: list[str] | None = Non
 
 
 def _fetch_body(cfg: dict, day, match_urls, log, t0) -> list[Path]:
-    from .video import download_segment, resolve_cookies
+    from .video import download_segment, resolve_cookies, video_size
     day = day or (datetime.now(JST).date() - timedelta(days=1))
     cache = video_cache_dir(cfg)
     cookies = resolve_cookies(cfg)
@@ -577,11 +593,12 @@ def _fetch_body(cfg: dict, day, match_urls, log, t0) -> list[Path]:
             try:
                 with perf.stage("download", tag=f"{m.id}:{md.order}", label="動画の取得") as st:
                     p = download_segment(md.vod_id, start, end, cache, cfg["video"]["max_height"],
-                                         cookies, log=log, fragments=fragments)
-                    st["bytes"] = p.stat().st_size
-                mbps = p.stat().st_size / 1e6 / st["seconds"] if st["seconds"] > 0.05 else 0
+                                         cookies, log=log, fragments=fragments,
+                                         parts=int(cfg["video"].get("download_parts") or 1))
+                    st["bytes"] = video_size(p)
+                mbps = video_size(p) / 1e6 / st["seconds"] if st["seconds"] > 0.05 else 0
                 speed = f", {mbps:.1f} MB/s" if mbps else ""
-                log(f"  {md.order}. {md.name}: {p.name}（{p.stat().st_size / 1e6:.0f} MB, "
+                log(f"  {md.order}. {md.name}: {p.name}（{video_size(p) / 1e6:.0f} MB, "
                     f"{perf.fmt_seconds(st['seconds'])}{speed}）｜{perf.fmt_resources(st['resources'])}")
                 got.append(p)
             except RuntimeError as e:
@@ -670,7 +687,8 @@ def _run_body(cfg: dict, day, match_urls, no_video, force, upsert_only, log, t0)
                 path = fut.result()
                 analyze_video(cfg, m, md, rep, map_dir, path, log)
                 if not cfg["video"].get("keep_video") and path.parent == _work_root(cfg):
-                    path.unlink(missing_ok=True)
+                    from .video import remove_video
+                    remove_video(path)
             except Exception as e:
                 if "ボット判定" in str(e):
                     blocked = True

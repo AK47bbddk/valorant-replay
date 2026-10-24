@@ -378,22 +378,71 @@ def _ocr():
     return _OCR_SHARED
 
 
+def killfeed_bands(img, right: float = 0.55, white_v: int = 190, white_s: int = 60, frac: float = 0.04):
+    """キルフィードの各行（白い名前の帯）の位置と、右側（倒された側の名前）の見た目。
+
+    行の背景は半透明で、後ろのゲーム画面が動くと画像全体の差分は毎フレーム出てしまう。白い文字だけを見ると、
+    新しいキルが出たときだけ変わる。返り値 [(y0, y1, 32x6 の 2 値特徴)]（上から順）。
+    """
+    if img is None or img.size == 0:
+        return []
+    H, W = img.shape[:2]
+    hsv = cv2.cvtColor(img[:, int(W * right):], cv2.COLOR_BGR2HSV)
+    wm = (hsv[..., 2] >= white_v) & (hsv[..., 1] <= white_s)
+    rows = wm.mean(axis=1) > frac
+    bands, y = [], 0
+    while y < H:
+        if rows[y]:
+            y0 = y
+            while y < H and (rows[y] or (y + 2 < H and (rows[y + 1] or rows[y + 2]))):
+                y += 1
+            if 4 <= y - y0 <= max(40, 0.25 * H):         # 文字 1 行ぶんの高さだけ（明るい背景の塊は除く）
+                feat = cv2.resize(wm[y0:y].astype(np.uint8) * 255, (32, 6), interpolation=cv2.INTER_AREA) > 96
+                bands.append((y0, y, feat))
+        y += 1
+    return bands
+
+
+def _bands_changed(cur, prev, tol: float = 0.2) -> bool:
+    """新しい行（以前のどの行とも見た目が違う行）があれば True。行が消えただけなら False。"""
+    if not cur:
+        return False
+    for _, _, f in cur:
+        if not any(float(np.mean(f != g)) <= tol for _, _, g in prev):
+            return True
+    return False
+
+
 def kills_in_round(store: FrameStore, idxs: list[int], times: list[float], labels: list[str], roster: Roster,
-                   book, out_path: Path) -> tuple[list[dict], Path | None]:
-    """ライブ区間のキルフィードを変化があったフレームだけ OCR し、新しく出た行をキルとして記録する。"""
+                   book, out_path: Path, min_gap: float = 0.9) -> tuple[list[dict], Path | None]:
+    """ライブ区間のキルフィードから、新しく出た行をキルとして記録する。
+
+    OCR（文字の検出＋認識）は重いので、白い名前の帯に「新しい行」が出たフレームだけで行う（同じ行が続く間や、
+    行が消えただけのときは読まない）。帯が 1 つも見つからない放送では、見た目の変化＋2 秒おきに読む。
+    """
     events, crops, seen, victims = [], [], {}, set()
-    prev = None
+    frames = []
     for j, i in enumerate(idxs):
         img = store.get(i, "killfeed")
-        if img is None:
-            continue
-        small = cv2.resize(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), (96, 64))
-        if prev is not None and float(np.mean(cv2.absdiff(small, prev))) < 1.5:
-            continue
-        prev = small
+        if img is not None:
+            frames.append((j, img, killfeed_bands(img)))
+    use_bands = any(b for _, _, b in frames)
+    prev_bands, prev_small, last_t, pending = [], None, -1e9, False
+    for j, img, bands in frames:
+        t = times[j]
+        if use_bands:
+            if _bands_changed(bands, prev_bands):
+                pending = True
+            if not pending or t - last_t < min_gap:
+                continue
+        else:
+            small = cv2.resize(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), (96, 64))
+            if prev_small is not None and (float(np.mean(cv2.absdiff(small, prev_small))) < 1.5 or t - last_t < 2.0):
+                continue
+            prev_small = small
+        pending, last_t, prev_bands = False, t, bands
         for row in parse_killfeed(_ocr().detect(img, min_score=0.3), img, roster, book):
             key = (norm_name(row["killer"]), norm_name(row["victim"]))
-            t = times[j]
             if (key in seen and t - seen[key] < 12) or norm_name(row["victim"]) in victims:
                 seen[key] = t
                 continue

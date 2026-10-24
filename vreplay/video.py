@@ -46,14 +46,46 @@ def _ytdlp_env() -> dict:
     return env
 
 
+PARTS = ".parts.json"
+
+
+def parts_of(path) -> list[tuple[Path, float, float]] | None:
+    """分割ダウンロードした動画（*.parts.json）なら [(ファイル, 区間の先頭からの秒, 長さ)]。普通の動画なら None。"""
+    p = Path(path)
+    if not p.name.endswith(PARTS):
+        return None
+    j = json.loads(p.read_text(encoding="utf-8"))
+    return [(p.parent / x["file"], float(x["offset"]), float(x["length"])) for x in j["parts"]]
+
+
+def video_size(path) -> int:
+    ps = parts_of(path)
+    return sum(f.stat().st_size for f, _, _ in ps if f.exists()) if ps else Path(path).stat().st_size
+
+
+def remove_video(path):
+    ps = parts_of(path)
+    for f, _, _ in ps or []:
+        f.unlink(missing_ok=True)
+    Path(path).unlink(missing_ok=True)
+
+
 def find_cached(video_id: str, start: int, end: int, dirs) -> Path | None:
     stem = f"{video_id}_{start}_{end}"
     for d in dirs or []:
         d = Path(d)
-        if d.exists():
-            hit = [p for p in d.glob(stem + ".*") if p.suffix in (".mp4", ".webm", ".mkv") and p.stat().st_size > 0]
-            if hit:
-                return hit[0]
+        if not d.exists():
+            continue
+        man = d / (stem + PARTS)
+        if man.exists():
+            try:
+                if all(f.exists() and f.stat().st_size > 0 for f, _, _ in parts_of(man)):
+                    return man
+            except Exception:
+                pass
+        hit = [p for p in d.glob(stem + ".*") if p.suffix in (".mp4", ".webm", ".mkv") and p.stat().st_size > 0]
+        if hit:
+            return hit[0]
     return None
 
 
@@ -69,7 +101,14 @@ def _err_lines(stderr: str, n: int = 6) -> str:
 
 
 def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_height: int = 1080,
-                     cookies: str = "", cache_dirs=(), log=None, fragments: int = 4) -> Path:
+                     cookies: str = "", cache_dirs=(), log=None, fragments: int = 4, parts: int = 1,
+                     overlap: int = 12) -> Path:
+    """[start, end] 秒の区間をダウンロードする。
+
+    YouTube は 1 本の接続を実時間程度の速さ（1 MB/s 前後）に絞るので、parts > 1 なら区間を parts 個に分けて
+    同時にダウンロードする（それぞれ overlap 秒だけ次の部分と重ねる）。そのときは各部分のファイルと、
+    つなぎ方を書いた {video_id}_{start}_{end}.parts.json を返す。デコードは parts.json をそのまま渡せばよい。
+    """
     hit = find_cached(video_id, start, end, [out_dir, *cache_dirs])
     if hit:
         if log:
@@ -77,6 +116,35 @@ def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_hei
         return hit
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    parts = max(1, int(parts or 1))
+    if parts == 1 or end - start < 300 * parts:
+        return _download_one(video_id, start, end, out_dir, max_height, cookies, cache_dirs, log, fragments)
+    from concurrent.futures import ThreadPoolExecutor
+    bounds = [int(round(start + (end - start) * k / parts)) for k in range(parts + 1)]
+    pieces = [(bounds[k], min(end, bounds[k + 1] + overlap)) for k in range(parts)]
+    with ThreadPoolExecutor(max_workers=parts) as ex:
+        files = list(ex.map(lambda se: _download_one(video_id, se[0], se[1], out_dir, max_height, cookies,
+                                                     cache_dirs, None, fragments), pieces))
+    man = out_dir / f"{video_id}_{start}_{end}{PARTS}"
+    entries = []
+    for k, (f, (a, _)) in enumerate(zip(files, pieces)):
+        if Path(f).parent != out_dir:                  # キャッシュ側にあった部分はこちらへコピー
+            dst = out_dir / Path(f).name
+            shutil.copy(f, dst)
+            f = dst
+        entries.append({"file": Path(f).name, "offset": a - start, "length": bounds[k + 1] - bounds[k]})
+    man.write_text(json.dumps({"video_id": video_id, "start": start, "end": end, "parts": entries},
+                              ensure_ascii=False, indent=1), encoding="utf-8")
+    if log:
+        log(f"    {parts} 分割で同時に取得しました")
+    return man
+
+
+def _download_one(video_id: str, start: int, end: int, out_dir: Path, max_height: int, cookies: str,
+                  cache_dirs, log, fragments: int) -> Path:
+    hit = find_cached(video_id, start, end, [out_dir, *cache_dirs])
+    if hit and not hit.name.endswith(PARTS):
+        return hit
     stem = f"{video_id}_{start}_{end}"
     env = _ytdlp_env()
     # いったんローカルの一時フォルダに落としてから移す（Drive などに ffmpeg が直接書くと失敗することがある）
@@ -124,6 +192,10 @@ def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_hei
 
 
 def probe(path: Path) -> tuple[int, int, float]:
+    ps = parts_of(path)
+    if ps:
+        w, h, _ = probe(ps[0][0])
+        return w, h, ps[-1][1] + ps[-1][2]
     out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
                           "stream=width,height:format=duration", "-of", "json", str(path)],
                          capture_output=True, text=True, check=True).stdout
@@ -145,6 +217,9 @@ def gpu_decode_ok(path: str) -> bool:
     """GPU（NVDEC）でデコードできるか 1 秒だけ試す。"""
     if not _has_cuda():
         return False
+    ps = parts_of(path)
+    if ps:
+        path = str(ps[0][0])
     for _ in iter_frames(Path(path), fps=1, start=0, duration=1.0, hwaccel=True, fallback=False):
         return True
     return False
@@ -156,6 +231,21 @@ def iter_frames(path: Path, fps: float, start: float = 0.0, duration: float | No
 
     非参照フレーム（B フレーム）はデコードしない（-skip_frame noref）。2fps で間引くので影響はなく、デコードが速くなる。
     """
+    ps = parts_of(path)
+    if ps:
+        # 分割した動画：各部分の受け持ち（重なりを除いた範囲）だけを順に読む。時刻は start からの fps の格子にそろえる
+        import math
+        end = start + duration if duration else ps[-1][1] + ps[-1][2]
+        for f, off, ln in ps:
+            a, b = max(start, off), min(end, off + ln)
+            if b - a <= 1e-6:
+                continue
+            a = start + math.ceil((a - start) * fps - 1e-6) / fps
+            if a >= b:
+                continue
+            for t, fr in iter_frames(f, fps, a - off, b - a, hwaccel=hwaccel, fallback=fallback):
+                yield t + off, fr
+        return
     w, h, _ = probe(path)
     if hwaccel is None:
         hwaccel = gpu_decode_ok(str(path))
@@ -189,6 +279,16 @@ def iter_keyframes(path: Path, start: float = 0.0, duration: float | None = None
     import queue
     import re
     import threading
+    ps = parts_of(path)
+    if ps:
+        end = start + duration if duration else ps[-1][1] + ps[-1][2]
+        for f, off, ln in ps:
+            a, b = max(start, off), min(end, off + ln)
+            if b - a > 1e-6:
+                for t, fr in iter_keyframes(f, a - off, b - a):
+                    if t + off < b:
+                        yield t + off, fr
+        return
     w, h, _ = probe(path)
     cmd = ["ffmpeg", "-v", "info", "-nostdin", "-skip_frame", "nokey", "-ss", f"{start:.3f}"]
     cmd += (["-t", f"{duration:.3f}"] if duration else []) + [
@@ -224,6 +324,9 @@ def iter_keyframes(path: Path, start: float = 0.0, duration: float | None = None
 
 def keyframe_interval(path: Path, span: float = 180.0) -> float | None:
     """先頭 span 秒のキーフレーム間隔（中央値・秒）。読めなければ None。"""
+    ps = parts_of(path)
+    if ps:
+        path = ps[0][0]
     try:
         out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-read_intervals", f"%+{span:.0f}",
                               "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", str(path)],

@@ -206,10 +206,46 @@ def test_gif_uses_real_intervals(tmp_path):
 
 def test_dense_windows():
     from vreplay.rounds import DetRound
-    det = [DetRound(n=1, t_first=0, t_drop=40, t_end=120), DetRound(n=2, t_first=125, t_drop=170, t_end=240)]
-    obs = {"t": [10, 130, 300], "timer": [20, 25, 80]}
-    live = [True, True, True]
-    segs, tables = pipeline.dense_windows(det, obs, live, 400, 30)
-    # 開始 9 秒前〜終了 1.5 秒後、取りこぼしたライブ（300 秒・残り 80 秒）の前後 5 秒
-    assert segs == [(31, 90.5), (161, 80.5), (295, 10)]
-    assert tables == [(31, 43.5), (161, 173.5)]
+    det = [DetRound(n=1, t_first=0, t_drop=40, t_end=150), DetRound(n=2, t_first=155, t_drop=200, t_end=300)]
+    # 1R：開始 40 秒・残り時間が合う最後のキーフレームは 104 秒（残り 36）→ 終わりは 104+2+1.5。
+    #     130 秒の「0:20」は次の購入フェーズ（経過と合わない）なので含めない
+    # 2R：スパイク設置後の表示が 270 秒まで → 273.5。330 秒は取りこぼしたライブ（残り 80）→ 前後 5 秒
+    obs = {"t": [10, 60, 104, 130, 230, 270, 330], "timer": [20, 80, 36, 20, 70, None, 80],
+           "spike": [False, False, False, False, False, True, False]}
+    live = [True] * 7
+    segs, tables = pipeline.dense_windows(det, obs, live, 400, 30, step=2.0)
+    assert segs == [(31, 76.5), (191, 82.5), (325, 10)]
+    assert tables == [(31, 43.5), (191, 203.5)]
+
+
+def test_killfeed_ocr_only_when_new_row(tmp_path, monkeypatch):
+    """背景が毎フレーム変わっても、白い名前の行が増えたときだけ OCR する。"""
+    import cv2
+    st = X.FrameStore(tmp_path / "kf")
+    rng = np.random.default_rng(1)
+
+    def feed(rows):
+        img = (rng.random((200, 400, 3)) * 90).astype(np.uint8)          # 動く背景（暗め）
+        for k, (a, b) in enumerate(rows):
+            y = 30 + 40 * k
+            cv2.rectangle(img, (40, y - 22), (399, y + 8), (40, 40, 40), -1)
+            cv2.putText(img, a, (50, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(img, b, (260, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        return img
+
+    seq = [[], [("Derke", "tkzin")], [("Derke", "tkzin")], [("Derke", "tkzin")],
+           [("Derke", "tkzin"), ("Darker", "Chronicle")], [("Darker", "Chronicle")], [("Darker", "Chronicle")]]
+    for i, rows in enumerate(seq):
+        st.put(i, "killfeed", feed(rows))
+
+    class OCR:
+        calls = 0
+
+        def detect(self, img, min_score=0.5):
+            OCR.calls += 1
+            return []
+
+    monkeypatch.setattr(X, "_ocr", lambda: OCR())
+    X.kills_in_round(st, list(range(len(seq))), [i * 1.0 for i in range(len(seq))], ["-"] * len(seq),
+                     X.Roster([("Derke", "A")]), None, tmp_path / "k.jpg")
+    assert OCR.calls == 2

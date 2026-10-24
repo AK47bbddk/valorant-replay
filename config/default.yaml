@@ -33,7 +33,8 @@ video:
   scan_mode: auto
   fast_keyframe_interval: 2.5
   max_keyframe_interval: 6
-  download_workers: 3    # 同時にダウンロードするマップ数（解析中に次のマップを先に取得する）
+  download_workers: 2    # 同時にダウンロードするマップ数（解析中に次のマップを先に取得する）
+  download_parts: 4      # 1 マップの区間をいくつに分けて同時に取るか（YouTube は 1 本の接続を 1 MB/s 前後に絞るため）
   download_fragments: 4  # 1 本の動画を yt-dlp が分割して並列取得する数（回線が速いなら 8 などに）
 
 hud:
