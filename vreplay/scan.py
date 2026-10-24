@@ -153,6 +153,7 @@ def scan_chunk(job: ScanJob) -> dict:
     pool.shutdown()
     out["ocr_calls"] = ocr.calls - calls0
     out["ocr_gpu"] = bool(getattr(ocr, "gpu", False))
+    out["ocr_note"] = getattr(ocr, "note", "")
     out["dense"] = [not job.keyframes] * len(out["t"])
     return out
 
@@ -207,6 +208,7 @@ def scan(path: Path, duration: float, fps: float, roi: dict, geo: dict | None, c
     merged = merge_obs(parts, cfg)
     merged["ocr_calls"] = sum(p["ocr_calls"] for p in parts)
     merged["ocr_gpu"] = any(p.get("ocr_gpu") for p in parts)
+    merged["ocr_note"] = next((p.get("ocr_note") for p in parts if p.get("ocr_note")), "")
     merged["workers"] = n
     return merged
 

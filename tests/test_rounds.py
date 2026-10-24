@@ -86,3 +86,22 @@ def test_repair_missing_round_from_timer_jumps():
     assert added == [3]
     assert sorted(set(fixed)) == [1, 2, 3, 4, 5]
     assert fixed[t.index(300 + 40)] == 3 and fixed[t.index(450 + 40)] == 4
+
+
+def test_assign_rounds_ignores_previous_map_and_next_map():
+    """区間の頭に前のマップの最終スコア（13-8）、終わりに次のマップの 0-0 が映っていても、1R から数える。"""
+    sl, sr = [], []
+    sl += [13] * 10
+    sr += [8] * 10                                   # 前のマップの終わり
+    for n in range(1, 8):                            # 7 ラウンド（スコア合計 = n-1）
+        a = (n - 1) // 2
+        sl += [a] * 20
+        sr += [n - 1 - a] * 20
+    sl[45] = 9                                       # 単発の読み違い
+    sl += [0] * 12
+    sr += [0] * 12                                   # 次のマップの始まり
+    N = len(sl)
+    rid = assign_rounds(np.ones(N, bool), sl, sr, [None] * N, 7)
+    assert rid[:10] == [None] * 10
+    assert rid[10] == 1 and rid[30] == 2 and rid[45] == 2 and rid[10 + 20 * 6 + 5] == 7
+    assert all(r is None for r in rid[-12:])

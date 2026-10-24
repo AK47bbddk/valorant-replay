@@ -14,17 +14,27 @@ import cv2
 import numpy as np
 
 
-def _gpu_ok() -> bool:
+def gpu_status() -> tuple[bool, str]:
+    """OCR を GPU で動かせるか と その理由（ログ用）。"""
     try:
         import onnxruntime as ort
-        if hasattr(ort, "preload_dlls"):          # pip で入っている CUDA / cuDNN（Colab の torch が入れたもの）を使う
-            try:
-                ort.preload_dlls()
-            except Exception:
-                pass
-        return "CUDAExecutionProvider" in ort.get_available_providers() and ort.get_device() == "GPU"
-    except Exception:
-        return False
+    except Exception as e:
+        return False, f"onnxruntime を読めません（{e}）"
+    if hasattr(ort, "preload_dlls"):          # pip で入っている CUDA / cuDNN（Colab の torch が入れたもの）を使う
+        try:
+            ort.preload_dlls()
+        except Exception:
+            pass
+    provs = ort.get_available_providers()
+    if "CUDAExecutionProvider" not in provs:
+        return False, f"onnxruntime {ort.__version__} は CPU 版です（セル1の onnxruntime-gpu の行が未実行か失敗）"
+    if os.environ.get("VREPLAY_OCR_GPU", "auto") == "0":
+        return False, "VREPLAY_OCR_GPU=0 で CPU に固定"
+    return True, f"onnxruntime-gpu {ort.__version__}"
+
+
+def _gpu_ok() -> bool:
+    return gpu_status()[0]
 
 
 def _providers(engine) -> list[str]:
@@ -59,8 +69,10 @@ class OCR:
                 kw.pop(k, None)
             gpu = False
             self.engine = RapidOCR(**kw)
+        self.note = "" if gpu else gpu_status()[1]
         if gpu and "CUDAExecutionProvider" not in _providers(self.engine):
             gpu = False                                # CUDA のライブラリが無く CPU で動いている
+            self.note = "onnxruntime-gpu はあるが CUDA / cuDNN のライブラリを読めず CPU で動作"
         # 1.2 系は text_recognizer、1.3 系以降（Python 3.12 の Colab に入る版）は text_rec
         self.recognizer = getattr(self.engine, "text_rec", None) or self.engine.text_recognizer
         self.gpu = gpu

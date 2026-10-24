@@ -201,6 +201,10 @@ def slot_names(store, idxs, geo, roster, team_left, team_right,
     return out
 
 
+def _has_gpu() -> bool:
+    return bool(shutil.which("nvidia-smi"))
+
+
 # ---------------------------------------------------------------- 2 パス解析の区間
 def dense_windows(det1, obs1: dict, live1, dur: float, buy_max: float, pre: float = 9.0, post: float = 1.5,
                   pad: float = 5.0, step: float = 2.0, round_sec: float = 100.0
@@ -328,6 +332,7 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                 obs["ocr_calls"] = obs1["ocr_calls"] + obs2["ocr_calls"]
                 obs["workers"] = obs2["workers"]
                 obs["ocr_gpu"] = obs1.get("ocr_gpu") or obs2.get("ocr_gpu")
+                obs["ocr_note"] = obs1.get("ocr_note") or obs2.get("ocr_note")
                 scan_note = (f"{'高速' if mode == 'fast' else 'ラウンド区間'}モード：キーフレーム {len(obs1['t'])} 枚"
                              f"（間隔 {ki:.1f} 秒）＋密に {sum(d for _, d in segs) / 60:.1f}/{dur / 60:.1f} 分")
             else:
@@ -338,6 +343,8 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
             f"（{scan_note}・{obs['workers']} 並列・デコード {'GPU' if hw else 'CPU'}"
             f"・OCR {obs['ocr_calls']} 回 {'GPU' if obs.get('ocr_gpu') else 'CPU'}）"
             f"｜{perf.fmt_resources(st_scan['resources'])}")
+        if not obs.get("ocr_gpu") and obs.get("ocr_note") and _has_gpu():
+            log(f"    OCR が CPU で動いている理由：{obs['ocr_note']}")
         t, timer = obs["t"], obs["timer"]
         conf, live, linfo, det, stats = find_rounds(obs)
         if mode == "full":

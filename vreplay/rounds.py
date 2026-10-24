@@ -66,35 +66,67 @@ def liveness(band: np.ndarray, conf: np.ndarray) -> tuple[np.ndarray, np.ndarray
 
 # ---------------------------------------------------------------- ラウンド番号
 def assign_rounds(live: np.ndarray, sl: list, sr: list, rnd: list, n_rounds: int | None = None,
-                  need: int = 2, look: int = 4) -> list[int | None]:
-    """ライブフレームごとのラウンド番号（スコア合計＋1、減らない・確定した増加だけ採用）。"""
+                  bad_run: int = 5) -> list[int | None]:
+    """ライブフレームごとのラウンド番号（スコア合計＋1）。
+
+    スコアは減らないので、読めた番号の列から「減らない最長の部分列」を選び、それに乗る値だけを信じる。
+    - 区間の頭に前のマップの終わり（13-8 などの大きなスコア）が映っていても、そこから始めてしまわない
+    - 読み違い（OCR の見た目キャッシュで同じ間違いが何度も出る場合も）は、後の多数の正しい値に負けて外れる
+    - 列から外れた値が 5 回以上続く区間（次のマップの始まりなど）は、どのラウンドにも入れない
+    """
+    import bisect
     N = len(live)
+    maxn = (n_rounds or 99) + 1
     raw: list[int | None] = [None] * N
     for i in range(N):
         if not live[i]:
             continue
+        v = None
         if sl[i] is not None and sr[i] is not None:
-            raw[i] = sl[i] + sr[i] + 1
+            v = sl[i] + sr[i] + 1
         elif rnd[i] is not None:
-            raw[i] = rnd[i]
-    vals = [(i, v) for i, v in enumerate(raw) if v is not None]
-    if not vals:
+            v = rnd[i]
+        if v is not None and 1 <= v <= maxn:
+            raw[i] = v
+    idx = [i for i in range(N) if raw[i] is not None]
+    if not idx:
         return [None] * N
-    maxn = (n_rounds or 99) + 1
-    first = [v for _, v in vals[:7]]
-    cur = int(median(first))
+    seq = [raw[i] for i in idx]
+    tails: list[int] = []
+    tail_k: list[int] = []
+    parent = [-1] * len(seq)
+    for k, v in enumerate(seq):
+        pos = bisect.bisect_right(tails, v)
+        if pos == len(tails):
+            tails.append(v)
+            tail_k.append(k)
+        else:
+            tails[pos] = v
+            tail_k[pos] = k
+        parent[k] = tail_k[pos - 1] if pos > 0 else -1
+    chain, k = [], tail_k[-1]
+    while k != -1:
+        chain.append(idx[k])
+        k = parent[k]
+    chain.reverse()
+    keep = set(chain)
     out: list[int | None] = [None] * N
-    k = 0
-    for i in range(N):
+    cur, bad, bad_from = None, 0, None
+    for i in range(chain[0], N):
         if not live[i]:
             continue
-        while k < len(vals) and vals[k][0] < i:
-            k += 1
-        if raw[i] is not None and cur < raw[i] <= min(cur + 3, maxn):
-            ahead = [v for _, v in vals[k:k + look]]
-            if sum(v >= raw[i] for v in ahead) >= min(need, len(ahead)):
-                cur = raw[i]
-        out[i] = cur
+        if i in keep:
+            cur, bad, bad_from = raw[i], 0, None
+        elif raw[i] is not None and raw[i] < cur - 1:
+            bad += 1
+            if bad_from is None:
+                bad_from = i
+            if bad == bad_run:                       # 食い違いが続く：ここから列に戻るまでは入れない
+                for j in range(bad_from, i):
+                    out[j] = None
+        elif raw[i] is not None and bad < bad_run:
+            bad, bad_from = 0, None                  # 単発の読み違いだった
+        out[i] = cur if bad < bad_run else None
     return out
 
 
