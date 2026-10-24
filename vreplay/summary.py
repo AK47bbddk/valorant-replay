@@ -83,3 +83,22 @@ def player_weapons(r: dict, no: str) -> str:
             s += f"＋{p.get('sidearm_ja') or p['sidearm']}"
         out.append(s)
     return " / ".join(out)
+
+
+REASON_ICON = {"エース": "🔥", "クラッチ": "🧊", "リテイク": "🔁", "ポストプラント成功": "💣", "ラッシュ": "⚡",
+               "カウンター": "🛡️", "数的不利から逆転": "↩️", "エコ勝ち": "💰", "1ピック": "🎯", "先制されて逆転": "↩️",
+               "時間切れまで守り切り": "⏱", "設置前に全滅": "💀", "設置させずに守り勝ち": "🛡️", "アンチエコ": "💰",
+               "ピストル": "🔫"}
+
+
+def reason_cell(r: dict) -> str:
+    """表の「勝因」欄：主な勝因＋次の 1 つ（'💣ポストプラント成功・1ピック'）。"""
+    tags = (r.get("reason") or {}).get("tags") or []
+    if not tags:
+        return "-"
+    return REASON_ICON.get(tags[0], "") + "・".join(tags[:2])
+
+
+def reason_icon(r: dict) -> str:
+    main = (r.get("reason") or {}).get("main")
+    return REASON_ICON.get(main or "", "🏁")

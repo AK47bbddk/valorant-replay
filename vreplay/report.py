@@ -38,6 +38,7 @@ figure{margin:0}figure img{width:100%;height:auto;border-radius:4px;background:v
 figcaption{font-size:13px;color:var(--text-sub);margin-top:2px}
 ul.kills{padding-left:20px;margin:4px 0}
 .chip{display:inline-block;font-size:12px;padding:0 8px;border-radius:999px;background:var(--key-weak);color:var(--text)}
+.reason{border-left:4px solid var(--key);background:var(--key-weak);padding:8px 12px;margin:8px 0;border-radius:4px;line-height:1.7}
 """
 
 
@@ -114,10 +115,11 @@ def _map_section(rep: dict, base: Path) -> str:
         cls = "w1" if r.get("winner_no") == 1 else "w2"
         rows.append(f'<tr><th scope="row">{rlink}</th><td>{_e(r.get("score"))}</td>'
                     f'<td class="{cls}">{_e(S.tag(rep, r.get("winner")))}</td><td>{_e(S.how(r))}</td>'
+                    f'<td>{_e(S.reason_cell(r))}</td>'
                     f'<td>{br(S.buy_cell(r, "1"))}</td><td>{br(S.buy_cell(r, "2"))}</td>'
                     f'<td>{_e(S.first_kill(rep, r))}</td><td>{_e(S.kill_count(rep, r))}</td>'
                     f'<td>{_e(S.ult_used(r, rep))}</td><td>{_e(r.get("duration") or "-")}</td></tr>')
-    out.append(f'<div class="tbl"><table><thead><tr><th>R</th><th>スコア</th><th>勝者</th><th>勝ち方</th>'
+    out.append(f'<div class="tbl"><table><thead><tr><th>R</th><th>スコア</th><th>勝者</th><th>勝ち方</th><th>勝因</th>'
                f'<th>{_e(t1)} 購入・武器</th><th>{_e(t2)} 購入・武器</th><th>先制キル</th><th>キル</th>'
                f'<th>ULT 使用</th><th>時間</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>')
     gif_cap = "ラウンド中のミニマップ（%s倍速・リプレイ除外）" % rep.get("gif_speed", 4)
@@ -136,12 +138,19 @@ def _map_section(rep: dict, base: Path) -> str:
                        + (f'　{_e(S.player_weapons(r, no))}' if S.player_weapons(r, no) else "") + '</li>'
                        for no, tg in (("1", t1), ("2", t2)))
         notes = "".join(f'<p class="note">{_e(n)}</p>' for n in r.get("notes") or [])
+        rs = r.get("reason") or {}
+        reason = ""
+        if rs.get("tags"):
+            reason = (f'<div class="reason"><b>{_e(S.reason_icon(r))} 勝因：{_e("・".join(rs["tags"][:3]))}</b>'
+                      + "".join(f'<br>{_e(x)}' for x in rs.get("lines") or [])
+                      + (f'<br><span class="sub">{_e(rs["caveat"])}</span>' if rs.get("caveat") else "") + '</div>')
         rt = r.get("tactics") or {}
         site = (f'　推定サイト <b>{_e(rt["site"])}</b>'
                 f'（{float(rt.get("site_conf") or 0):.0%}）') if rt.get("site") else ""
         out.append(
             f'<details><summary>R{r["n"]}　{_e(S.tag(rep, r.get("winner")))} 勝利　<span class="chip">{_e(S.how(r))}</span> '
-            f'<span class="chip">{_e(r.get("score"))}</span></summary><div class="body">'
+            f'<span class="chip">{_e(r.get("score"))}</span> <span class="chip">{_e(S.reason_cell(r))}</span>'
+            f'</summary><div class="body">{reason}'
             f'<p>{yt}ラウンド時間 {_e(r.get("duration") or "-")}{site}</p><ul class="kills">{buys}</ul>{ready}'
             f'<div class="grid">{_img(a.get("minimap_start"), base, "ラウンド開始時のミニマップ")}'
             f'{_img(a.get("minimap_gif"), base, gif_cap)}</div>'

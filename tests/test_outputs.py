@@ -130,20 +130,35 @@ def test_summary_cells(tmp_path):
 
 
 def test_notion_blocks(tmp_path):
+    from vreplay.reasons import analyze
     rep = _rep(tmp_path)
-    blocks = notion.build_blocks(rep, {rep["rounds"][0]["assets"]["minimap_start"]: "fu_1"})
+    for r in rep["rounds"]:
+        r["reason"] = analyze(r, rep)
+    p = rep["rounds"][0]["assets"]["minimap_start"]
+    gif = tmp_path / "g.gif"
+    gif.write_bytes(b"x")
+    rep["rounds"][0]["assets"]["minimap_gif"] = str(gif)
+    blocks = notion.build_blocks(rep, {p: "fu_1", str(gif): "fu_2"})
     assert blocks[0]["type"] == "callout"
     table = next(b for b in blocks if b["type"] == "table")
     rows = table["table"]["children"]
-    assert all(len(r["table_row"]["cells"]) == table["table"]["table_width"] == 10 for r in rows)
+    assert all(len(r["table_row"]["cells"]) == table["table"]["table_width"] == 11 for r in rows)
     first = rows[1]["table_row"]["cells"]
     assert first[0][0]["text"]["link"]["url"] == "https://youtu.be/a?t=30"
-    assert "オペレーター" in first[4][0]["text"]["content"]
-    toggle = blocks[-1]
-    assert toggle["type"] == "heading_3" and toggle["heading_3"]["is_toggleable"]
-    kids = toggle["heading_3"]["children"]
-    assert any(k["type"] == "image" and k["image"]["file_upload"]["id"] == "fu_1" for k in kids)
-    assert all("children" not in k.get(k["type"], {}) for k in kids)   # 2 階層まで
+    assert "1ピック" in first[4][0]["text"]["content"] or "先制" in first[4][0]["text"]["content"]
+    assert "オペレーター" in first[5][0]["text"]["content"]
+    # 1 ラウンドぶん：見出し → 勝因の囲み → 開始時ミニマップと GIF の横並び
+    i = next(k for k, b in enumerate(blocks) if b["type"] == "heading_3")
+    assert blocks[i + 1]["type"] == "callout" and "勝因" in blocks[i + 1]["callout"]["rich_text"][0]["text"]["content"]
+    cl = blocks[i + 2]
+    assert cl["type"] == "column_list"
+    ids = [c["column"]["children"][0]["image"]["file_upload"]["id"] for c in cl["column_list"]["children"]]
+    assert ids == ["fu_1", "fu_2"]
+    # 入れ子は 2 段まで（column_list → column → image）
+    for b in blocks:
+        for c in (b.get(b["type"], {}).get("children") or []):
+            for g in (c.get(c["type"], {}).get("children") or []):
+                assert "children" not in g.get(g["type"], {})
     json.dumps(blocks, ensure_ascii=False)
 
 

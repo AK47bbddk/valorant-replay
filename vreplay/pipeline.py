@@ -61,6 +61,7 @@ def base_report(m: vlr.Match, md: vlr.MapData, cfg: dict) -> dict:
             "how": r.how, "how_ja": how_ja(r.how), "side": r.side,
             "buy1": _buy(e.buy1, e.loadout1) if e else None, "buy2": _buy(e.buy2, e.loadout2) if e else None,
             "bank1": e.bank1 if e else None, "bank2": e.bank2 if e else None,
+            "eco1": e.buy1 if e else None, "eco2": e.buy2 if e else None,
             "kills": [], "ults": [], "ult_ready": [], "weapons": {}, "assets": {}, "notes": [],
         })
     return {
@@ -72,6 +73,17 @@ def base_report(m: vlr.Match, md: vlr.MapData, cfg: dict) -> dict:
         "generated_at": datetime.now(JST).strftime("%Y-%m-%d %H:%M"),
         "gif_speed": cfg["output"]["gif_speed"], "rounds": rounds, "analysis_note": None,
     }
+
+
+def add_reasons(rep: dict):
+    """各ラウンドの勝因（vreplay.reasons）。動画が無いラウンドも VLR の情報だけで分かる範囲を出す。"""
+    from .reasons import analyze
+    for rr in rep["rounds"]:
+        try:
+            rr["reason"] = analyze(rr, rep)
+        except Exception as e:                     # 勝因の判定に失敗してもページは作る
+            rr["reason"] = {}
+            rr["notes"].append(f"勝因の判定に失敗：{e}")
 
 
 def _segment_bounds(m: vlr.Match, md: vlr.MapData, cfg: dict) -> tuple[int, int]:
@@ -517,10 +529,15 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                                "team": names[s_][1], "agent": agent.get(names[s_][0])}
                               for s_, j in evs if s_ < len(names)]
                 rr["ult_ready"] = [names[s_][0] for s_ in ready0 if s_ < len(names)]
+            # スパイクの設置：開始 5 秒以降で、タイマー欄が設置後の表示（赤いアイコン・赤い秒数）になった最初のフレーム
+            plant = next((float(t[i]) for i in r.live if obs["spike"][i] and t[i] > r.t_drop + 5), None)
             rr.update({
                 "kills": kills,
                 "yt_url": f"https://youtu.be/{md.vod_id}?t={int(start + max(0, r.t_drop - 5))}",
                 "duration": X.clock(r.t_end - r.t_drop),
+                "t_drop": round(float(r.t_drop), 1),
+                "plant_t": round(plant, 1) if plant else None,
+                "plant_clock": X.clock(plant - r.t_drop) if plant else None,
             })
             if r.drop_estimated:
                 rr["notes"].append(f"ラウンド開始時刻は推定値です（信頼度 {r.start_conf:.0%}）")
@@ -535,6 +552,7 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
         log(f"    ラウンドごとの素材 {len(det)} ラウンド {perf.fmt_seconds(st_assets['seconds'])}"
             f"｜{perf.fmt_resources(st_assets['resources'])}")
         found = {r.n for r in det}
+        add_reasons(rep)
         for rr in rep["rounds"]:
             if rr["n"] not in found:
                 rr["notes"].append("動画からこのラウンドを特定できませんでした（放送が別画面だった可能性）")
@@ -725,6 +743,8 @@ def _run_body(cfg: dict, day, match_urls, no_video, force, upsert_only, log, t0)
                 else:
                     traceback.print_exc()
                 rep["analysis_note"] = f"動画解析に失敗：{e}"
+        if any("reason" not in rr for rr in rep["rounds"]):
+            add_reasons(rep)
         rep["timings"] = perf.for_tag(tag)
         rep["perf_note"] = perf.note(rep["timings"])
         map_dir.mkdir(parents=True, exist_ok=True)
