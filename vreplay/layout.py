@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from statistics import median
 
 import cv2
@@ -15,12 +16,13 @@ from .config import crop
 
 # 実際の放送フレームで測った位置
 PRESETS = {
-    # Riot の国際大会・各リーグ共通 HUD（Champions 2026 Shanghai で確認）
+    # Riot の国際大会・各リーグ共通 HUD（Champions 2026 Shanghai の公式配信で測定）
+    # スコアのすぐ外側に「AMER #4」などのシード表記があるので、スコアの枠はそれに掛からないよう狭くする
     "riot": {
-        "timer": [0.476, 0.016, 0.524, 0.068],
-        "round": [0.474, 0.004, 0.526, 0.027],
-        "score_left": [0.405, 0.004, 0.448, 0.054],
-        "score_right": [0.552, 0.004, 0.595, 0.054],
+        "timer": [0.477, 0.025, 0.523, 0.060],
+        "round": [0.479, 0.008, 0.521, 0.024],
+        "score_left": [0.411, 0.010, 0.449, 0.050],
+        "score_right": [0.551, 0.010, 0.590, 0.050],
     },
     # VCT CN の HUD（VCT China 2026 Threshold で確認。ラウンド表記は「回合N」）
     "cn": {
@@ -34,12 +36,17 @@ HUD_BAND = [0.30, 0.0, 0.70, 0.075]      # ライブ判定に使う上部バン�
 
 
 # 数字だけの欄で、OCR が数字を形の似た文字に読み違えるもの（RapidOCR 1.3 以降は 0 を「口」と読むことがある）
+def _nfkc(text: str) -> str:
+    """全角の数字・コロン（中国語モデルは 1 桁の数字を「５」のように全角で返すことがある）を半角に。"""
+    return unicodedata.normalize("NFKC", text or "")
+
+
 _DIGIT_FIX = str.maketrans({"O": "0", "o": "0", "D": "0", "Q": "0", "口": "0", "〇": "0", "I": "1", "l": "1", "|": "1"})
 
 
 def parse_timer(text: str, round_sec: int = 100) -> float | None:
     """'1:23' / '0:07' / '9.4' / コロン落ち '123' → 秒。"""
-    t = (text or "").replace(" ", "").replace(";", ":").replace("：", ":").translate(_DIGIT_FIX)
+    t = _nfkc(text).replace(" ", "").replace(";", ":").replace("：", ":").translate(_DIGIT_FIX)
     m = re.fullmatch(r"(\d):(\d{2})", t)
     if m:
         s = int(m.group(1)) * 60 + int(m.group(2))
@@ -55,14 +62,14 @@ def parse_timer(text: str, round_sec: int = 100) -> float | None:
 
 
 def parse_score(text: str) -> int | None:
-    t = re.sub(r"[^0-9]", "", (text or "").strip().translate(_DIGIT_FIX))
-    return int(t) if re.fullmatch(r"\d{1,2}", t) and int(t) <= 40 else None
+    t = re.sub(r"[^0-9]", "", _nfkc(text).strip().translate(_DIGIT_FIX))
+    return int(t) if re.fullmatch(r"\d{1,2}", t) and int(t) <= 30 else None
 
 
 def parse_round(text: str) -> int | None:
     """'ROUND 6' / '回合12' → 6 / 12。先頭の漢字が数字に誤読されることがある（'回合1' → '81'）ので、
     末尾 2 桁が 40 を超えるときは末尾 1 桁を使う。"""
-    m = re.search(r"(\d+)\s*$", (text or "").strip())
+    m = re.search(r"(\d+)\s*$", _nfkc(text).strip())
     if not m:
         return None
     d = m.group(1)
@@ -72,8 +79,28 @@ def parse_round(text: str) -> int | None:
     return n if 1 <= n <= 40 else None
 
 
+def tight(img, pad: float = 0.25):
+    """白い文字のある範囲だけに切り詰める（1 桁のスコアが広い枠の中にあると、OCR が読まずに空を返すことがある）。"""
+    if img is None or img.size == 0:
+        return img
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    m = (hsv[..., 2] >= 150) & (hsv[..., 1] <= 100)
+    ys, xs = np.nonzero(m)
+    if len(xs) < 8:
+        return img
+    x0, x1, y0, y1 = xs.min(), xs.max() + 1, ys.min(), ys.max() + 1
+    p = int(pad * max(y1 - y0, 4)) + 2
+    return img[max(0, y0 - p):y1 + p, max(0, x0 - p):x1 + p]
+
+
+def field_crop(frame, roi: dict, key: str):
+    """HUD の欄の切り抜き。スコアは文字の範囲に切り詰める。"""
+    c = crop(frame, roi[key])
+    return tight(c) if key.startswith("score") else c
+
+
 def hud_crops(frame, roi: dict) -> list:
-    return [crop(frame, roi[k]) for k in ("timer", "score_left", "score_right", "round")]
+    return [field_crop(frame, roi, k) for k in ("timer", "score_left", "score_right", "round")]
 
 
 def choose_preset(reader, frames: list, round_sec: int = 100) -> tuple[str, dict, int]:
@@ -82,8 +109,8 @@ def choose_preset(reader, frames: list, round_sec: int = 100) -> tuple[str, dict
     best = ("riot", PRESETS["riot"], -1, -1)
     for name, roi in PRESETS.items():
         tm = reader.read([crop(f, roi["timer"]) for f in frames])
-        sl = reader.read([crop(f, roi["score_left"]) for f in frames])
-        sr = reader.read([crop(f, roi["score_right"]) for f in frames])
+        sl = reader.read([field_crop(f, roi, "score_left") for f in frames])
+        sr = reader.read([field_crop(f, roi, "score_right") for f in frames])
         rd = reader.read([crop(f, roi["round"]) for f in frames])
         nt = sum(parse_timer(t, round_sec) is not None for t, _ in tm)
         ns = sum(parse_score(a) is not None and parse_score(b) is not None for (a, _), (b, _) in zip(sl, sr))
@@ -92,6 +119,69 @@ def choose_preset(reader, frames: list, round_sec: int = 100) -> tuple[str, dict
         if total > best[3]:
             best = (name, roi, nt, total)
     return best[:3]
+
+
+def _white_blobs(img, v: int = 170, sat: int = 90):
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    m = ((hsv[..., 2] >= v) & (hsv[..., 1] <= sat)).astype(np.uint8)
+    n, _, st, _ = cv2.connectedComponentsWithStats(m, 8)
+    return [(int(st[i, 0]), int(st[i, 1]), int(st[i, 0] + st[i, 2]), int(st[i, 1] + st[i, 3]))
+            for i in range(1, n) if st[i, cv2.CC_STAT_AREA] >= 6]
+
+
+def _group(boxes, gap):
+    out = []
+    for b in sorted(boxes):
+        if out and b[0] - out[-1][2] <= gap and min(b[3], out[-1][3]) - max(b[1], out[-1][1]) > 0:
+            o = out[-1]
+            out[-1] = (o[0], min(o[1], b[1]), max(o[2], b[2]), max(o[3], b[3]))
+        else:
+            out.append(b)
+    return out
+
+
+def refine_scores(ocr, frames: list, roi: dict, round_sec: int = 100, need: int = 3) -> tuple[dict, int]:
+    """スコアの枠を、実際の画面で数字が出ている位置に合わせ直す。
+
+    上部バンドの白い文字の塊のうち、タイマーの数字と同じくらい大きいものを集め、タイマーの左右でいちばん近い塊を
+    スコアとする（小さい「#4」などのシード表記や、ふつうは小さめのチーム名は高さで外れる）。
+    その位置を OCR してスコアとして読めたフレームが need 枚以上あれば採用。返り値 (新しい roi, そろった枚数)。
+    """
+    lefts, rights = [], []
+    for f in frames:
+        H, W = f.shape[:2]
+        bx0, bx1, by1 = int(HUD_BAND[0] * W), int(HUD_BAND[2] * W), int(0.085 * H)
+        blobs = [(x0 + bx0, y0, x1 + bx0, y1) for x0, y0, x1, y1 in _white_blobs(f[0:by1, bx0:bx1])]
+        tx0, ty0, tx1, ty1 = (roi["timer"][0] * W, roi["timer"][1] * H, roi["timer"][2] * W, roi["timer"][3] * H)
+        tim = [b for b in blobs if b[0] >= tx0 - 2 and b[2] <= tx1 + 2 and b[1] >= ty0 - 4 and b[3] <= ty1 + 4]
+        if not tim:
+            continue
+        th = max(b[3] - b[1] for b in tim)
+        big = [b for b in blobs if 0.75 * th <= b[3] - b[1] <= 1.6 * th]
+        toks = _group(big, 0.5 * th)
+        L = [b for b in toks if b[2] < tx0]
+        R = [b for b in toks if b[0] > tx1]
+        for side, cand, pick in (("L", L, max(L, key=lambda b: b[2]) if L else None),
+                                 ("R", R, min(R, key=lambda b: b[0]) if R else None)):
+            if pick is None:
+                continue
+            x0, y0, x1, y1 = pick
+            pad = int(0.2 * (y1 - y0))
+            txt = ocr.rec([f[max(0, y0 - pad):y1 + pad, max(0, x0 - pad):x1 + pad]])[0][0]
+            if parse_score(txt) is not None:
+                (lefts if side == "L" else rights).append((pick, W, H))
+    out = dict(roi)
+    n = min(len(lefts), len(rights))
+    if n < need:
+        return out, n
+    for key, boxes in (("score_left", lefts), ("score_right", rights)):
+        W, H = boxes[0][1], boxes[0][2]
+        cx = median((b[0] + b[2]) / 2 for b, _, _ in boxes)
+        cy = median((b[1] + b[3]) / 2 for b, _, _ in boxes)
+        h = median(b[3] - b[1] for b, _, _ in boxes)
+        out[key] = [round(max(0.0, (cx - 0.95 * h) / W), 4), round(max(0.0, (cy - 0.72 * h) / H), 4),
+                    round(min(1.0, (cx + 0.95 * h) / W), 4), round(min(1.0, (cy + 0.72 * h) / H), 4)]
+    return out, n
 
 
 # ---------------------------------------------------------------- プレイヤーカード

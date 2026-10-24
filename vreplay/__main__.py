@@ -146,6 +146,9 @@ def calibrate(cfg: dict, url: str, order: int, at: float, span: int = 150):
     roi = dict(cfg["hud"]["roi"])
     roi.update(hud)
     print(f"レイアウト: {name}（タイマーが読めたフレーム {nread}/{len(frames)}）")
+    from .layout import refine_scores
+    roi, nsc = refine_scores(ocr, frames, roi, cfg["hud"]["round_timer_sec"])
+    print(f"スコアの位置：{'自動補正（' + str(nsc) + ' 枚）' if nsc >= 3 else 'プリセットのまま'} 左 {roi['score_left']} 右 {roi['score_right']}")
     cards = find_cards(frames)
     H, W = frames[0].shape[:2]
     geo = card_geometry(cards, W, H) if cards else None

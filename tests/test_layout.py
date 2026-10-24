@@ -80,3 +80,36 @@ def test_alive_and_weapons_cn():
     assert w[:3] == ["Ghost", "Ghost", "Ghost"]
     assert w[6] == "Classic"                  # 右パネルは武器アイコンが少し下にずれる
     assert w[3] is None and w[4] is None
+
+
+def _riot_band(left, right, timer="0:36"):
+    """Champions 2026 の上部バンドを描く（スコアのすぐ外にシード表記「AMER #4」がある）。"""
+    import cv2
+    f = np.zeros((1080, 1920, 3), np.uint8)
+    f[0:75, 640:1280] = (60, 50, 30)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    cv2.putText(f, "G2", (735, 33), font, 0.8, (255, 255, 255), 2)
+    cv2.putText(f, "AMER #4", (705, 52), font, 0.5, (255, 255, 255), 1)
+    (w, _), _ = cv2.getTextSize(left, font, 1.4, 4)
+    cv2.putText(f, left, (826 - w // 2, 48), font, 1.4, (255, 255, 255), 4)
+    cv2.putText(f, "ROUND 9", (926, 22), font, 0.45, (220, 220, 220), 1)
+    cv2.putText(f, timer, (928, 58), font, 1.1, (255, 255, 255), 3)
+    (w, _), _ = cv2.getTextSize(right, font, 1.4, 4)
+    cv2.putText(f, right, (1094 - w // 2, 48), font, 1.4, (255, 255, 255), 4)
+    cv2.putText(f, "100T", (1145, 33), font, 0.8, (255, 255, 255), 2)
+    cv2.putText(f, "AMER #1", (1140, 52), font, 0.5, (255, 255, 255), 1)
+    return f
+
+
+def test_riot_scores_not_mixed_with_seed():
+    """スコアの枠にシード表記（#4）やチーム名（100T の 1）が入らず、2 桁のスコアも読める。"""
+    from vreplay.layout import PRESETS, field_crop, parse_score, refine_scores
+    from vreplay.ocr import OCR
+    ocr = OCR()
+    frames = [_riot_band(a, b) for a, b in (("5", "3"), ("12", "11"), ("0", "1"), ("7", "10"))]
+    roi, n = refine_scores(ocr, frames, dict(PRESETS["riot"]))
+    assert n >= 3
+    for r in (PRESETS["riot"], roi):
+        got = [(parse_score(ocr.rec([field_crop(f, r, "score_left")])[0][0]),
+                parse_score(ocr.rec([field_crop(f, r, "score_right")])[0][0])) for f in frames]
+        assert got == [(5, 3), (12, 11), (0, 1), (7, 10)], (r, got)

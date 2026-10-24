@@ -117,7 +117,7 @@ def calibrate(cfg: dict, path: Path, md: vlr.MapData, roster, n: int = 30, log=p
     """
     from .config import crop
     from .extract import _ocr, find_killfeed
-    from .layout import card_geometry, choose_preset, find_cards, parse_timer
+    from .layout import card_geometry, choose_preset, find_cards, parse_timer, refine_scores
     from .ocr import CachedReader
     from .video import grab, probe
     W, H, dur = probe(path)
@@ -134,6 +134,11 @@ def calibrate(cfg: dict, path: Path, md: vlr.MapData, roster, n: int = 30, log=p
     tvals = [parse_timer(t, cfg["hud"]["round_timer_sec"])
              for t, _ in reader.read([crop(f, roi["timer"]) for f in frames])]
     buy_max = cfg["hud"]["buy_phase_max_sec"]
+    # スコアの枠を実際の数字の位置に合わせ直す（シード表記やチーム名が枠に入ると読み違える）
+    timed = [f for f, v in zip(frames, tvals) if v is not None]
+    roi, nsc = refine_scores(_ocr(), timed[:10], roi, cfg["hud"]["round_timer_sec"])
+    if nsc >= 3:
+        msg.append(f"スコア位置 自動補正（{nsc} 枚）")
     live_frames = [f for f, v in zip(frames, tvals) if v is not None and v > buy_max]
     buy_frames = [f for f, v in zip(frames, tvals) if v is not None and v <= buy_max + 2]
 

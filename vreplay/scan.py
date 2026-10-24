@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 
 from .config import crop
-from .layout import HUD_BAND, parse_round, parse_score, parse_timer
+from .layout import HUD_BAND, field_crop, parse_round, parse_score, parse_timer
 
 FIELDS = ("timer", "score_left", "score_right", "round")
 BAND_SIZE = (64, 8)
@@ -121,7 +121,7 @@ def scan_chunk(job: ScanJob) -> dict:
               else iter_frames(Path(job.path), job.fps, job.start, job.duration, hwaccel=job.hwaccel))
     for t, f in frames:
         idx = int(round(t * job.fps))
-        crops = [crop(f, job.roi[k]) for k in FIELDS]
+        crops = [field_crop(f, job.roi, k) for k in FIELDS]
         band = cv2.resize(crop(f, HUD_BAND), BAND_SIZE, interpolation=cv2.INTER_AREA)
         alive, ult = card_features(f, job.geo)
         batch.append((idx, t, crops, band, alive, ult))
