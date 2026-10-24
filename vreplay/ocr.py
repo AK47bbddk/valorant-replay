@@ -17,24 +17,50 @@ import numpy as np
 def _gpu_ok() -> bool:
     try:
         import onnxruntime as ort
+        if hasattr(ort, "preload_dlls"):          # pip で入っている CUDA / cuDNN（Colab の torch が入れたもの）を使う
+            try:
+                ort.preload_dlls()
+            except Exception:
+                pass
         return "CUDAExecutionProvider" in ort.get_available_providers() and ort.get_device() == "GPU"
     except Exception:
         return False
+
+
+def _providers(engine) -> list[str]:
+    """実際にセッションが使っている実行プロバイダ（CUDA のライブラリが読めず CPU に落ちた場合も分かる）。"""
+    rec = getattr(engine, "text_rec", None) or getattr(engine, "text_recognizer", None)
+    sess = getattr(getattr(rec, "session", None), "session", None)
+    try:
+        return list(sess.get_providers())
+    except Exception:
+        return []
 
 
 class OCR:
     def __init__(self, gpu: bool | None = None):
         from rapidocr_onnxruntime import RapidOCR
         if gpu is None:
-            gpu = os.environ.get("VREPLAY_OCR_GPU", "") == "1" and _gpu_ok()
+            # 既定は自動：onnxruntime-gpu が入っていて CUDA が使えれば GPU（VREPLAY_OCR_GPU=0 で CPU に固定）
+            gpu = os.environ.get("VREPLAY_OCR_GPU", "auto") != "0" and _gpu_ok()
         kw = dict(use_angle_cls=False, print_verbose=False)
         # 並列スキャンでは 1 プロセスに 1〜数スレッドだけ使わせる（プロセス数 × 全コアのスレッドで取り合わない）
         threads = int(os.environ.get("VREPLAY_OCR_THREADS") or 0)
         if threads > 0:
             kw.update(intra_op_num_threads=threads, inter_op_num_threads=1)
         if gpu:
-            kw.update(det_use_cuda=True, det_model_path="", rec_use_cuda=True, rec_model_path="")
-        self.engine = RapidOCR(**kw)
+            kw.update(det_use_cuda=True, rec_use_cuda=True, cls_use_cuda=True)
+        try:
+            self.engine = RapidOCR(**kw)
+        except Exception:
+            if not gpu:
+                raise
+            for k in ("det_use_cuda", "rec_use_cuda", "cls_use_cuda"):
+                kw.pop(k, None)
+            gpu = False
+            self.engine = RapidOCR(**kw)
+        if gpu and "CUDAExecutionProvider" not in _providers(self.engine):
+            gpu = False                                # CUDA のライブラリが無く CPU で動いている
         # 1.2 系は text_recognizer、1.3 系以降（Python 3.12 の Colab に入る版）は text_rec
         self.recognizer = getattr(self.engine, "text_rec", None) or self.engine.text_recognizer
         self.gpu = gpu

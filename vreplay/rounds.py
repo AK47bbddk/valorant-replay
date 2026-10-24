@@ -98,6 +98,73 @@ def assign_rounds(live: np.ndarray, sl: list, sr: list, rnd: list, n_rounds: int
     return out
 
 
+def round_jumps(t: list[float], live, timer: list, round_sec: int = 100, buy_max: int = 30,
+                max_gap: float = 25.0) -> list[int]:
+    """ライブのフレームで、購入フェーズの表示（buy_max 秒以下）から試合中の表示（1:25 以上）へ跳んだ位置。
+    各ラウンドに 1 回だけ起きるので、スコアが読めなくてもラウンドの数と区切りが分かる。"""
+    out, prev = [], None
+    for i in range(len(t)):
+        if not live[i] or timer[i] is None:
+            continue
+        v = timer[i]
+        if prev is not None and prev[1] <= buy_max + 2 and v >= round_sec - 15 and t[i] - t[prev[0]] <= max_gap:
+            out.append(i)
+        prev = (i, v)
+    return out
+
+
+def repair_rounds(t: list[float], live, rid: list, timer: list, n_rounds: int | None,
+                  round_sec: int = 100, buy_max: int = 30, lead: float = 38.0) -> tuple[list, list[int]]:
+    """スコアの読み違いで抜けたラウンドを、タイマーのジャンプから補う。
+
+    スコア合計で決めたラウンド番号が、隣り合う 2 つのジャンプ（＝別々のラウンド）で同じになっていて、
+    その前後の番号が抜けていれば、片方をその番号に付け直す。区間は「ジャンプの lead 秒前〜次のジャンプの lead 秒前」
+    （購入フェーズ 30 秒＋ラウンド後の数秒）。返り値 (直した rid, 補ったラウンド番号)。
+    """
+    rid = list(rid)
+    js = round_jumps(t, live, timer, round_sec, buy_max)
+    present = {r for r in rid if r is not None}
+    if len(js) < 2 or not present:
+        return rid, []
+    top = n_rounds or max(present)
+    fixed: list[int] = []
+    for _ in range(top):
+        present = {r for r in rid if r is not None}
+        missing = {n for n in range(1, top + 1) if n not in present}
+        if not missing:
+            break
+        segs = []
+        for k, j in enumerate(js):
+            a = t[j] - lead
+            b = t[js[k + 1]] - lead if k + 1 < len(js) else float("inf")
+            idx = [i for i in range(len(t)) if a <= t[i] < b]
+            near = [rid[i] for i in idx if live[i] and rid[i] is not None and t[j] <= t[i] < t[j] + 30]
+            lab = max(set(near), key=near.count) if near else None
+            segs.append((idx, lab))
+        changed = False
+        for k in range(len(segs)):
+            idx, lab = segs[k]
+            prev_lab = segs[k - 1][1] if k else 0
+            next_lab = segs[k + 1][1] if k + 1 < len(segs) else None
+            new = None
+            if lab is not None and next_lab == lab and lab - 1 in missing and (prev_lab or 0) < lab - 1:
+                new = lab - 1                      # 同じ番号が 2 回：前の方が 1 つ前のラウンド
+            elif lab is not None and prev_lab == lab and lab + 1 in missing and (next_lab is None or next_lab > lab + 1):
+                new = lab + 1                      # 同じ番号が 2 回：後の方が 1 つ後のラウンド
+            elif lab is None and prev_lab and prev_lab + 1 in missing and (next_lab is None or next_lab > prev_lab + 1):
+                new = prev_lab + 1                 # 番号が付かなかった区間
+            if new is not None:
+                for i in idx:
+                    if live[i]:
+                        rid[i] = new
+                fixed.append(new)
+                changed = True
+                break
+        if not changed:
+            break
+    return rid, sorted(fixed)
+
+
 # ---------------------------------------------------------------- 分割
 def _estimate_drop(pairs: list[tuple[float, float]], round_sec: int) -> tuple[float | None, float]:
     """残り時間の表示から開始時刻を逆算する。返り値 (開始時刻, ばらつき)。

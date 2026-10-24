@@ -67,3 +67,22 @@ def test_segment_rounds(obs):
     orient = orientation(rounds, {1: 1, 2: 1, 3: 1, 4: 1, 5: 1})
     assert all(orient.values())
     assert agreement(rounds, {1: 1, 2: 1, 3: 1, 4: 1}, orient) == 1.0
+
+
+def test_repair_missing_round_from_timer_jumps():
+    """スコアの読み違いで第 3 ラウンドが第 4 ラウンドと同じ番号になっても、タイマーのジャンプから補う。"""
+    from vreplay.rounds import repair_rounds, round_jumps
+    t, timer, rid = [], [], []
+    for n in range(1, 6):                       # 1 ラウンド 150 秒：購入 30 秒 → 試合 100 秒 → 余り 20 秒
+        base = (n - 1) * 150
+        for s in range(0, 150, 2):
+            t.append(base + s)
+            timer.append(30 - s if s <= 30 else (100 - (s - 30) if s <= 110 else None))
+            rid.append(n)
+    live = [True] * len(t)
+    rid = [4 if r == 3 else r for r in rid]    # 3 を読み違えて 4 と確定してしまった
+    assert len(round_jumps(t, live, timer)) == 5
+    fixed, added = repair_rounds(t, live, rid, timer, 5)
+    assert added == [3]
+    assert sorted(set(fixed)) == [1, 2, 3, 4, 5]
+    assert fixed[t.index(300 + 40)] == 3 and fixed[t.index(450 + 40)] == 4

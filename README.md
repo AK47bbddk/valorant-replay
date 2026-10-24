@@ -67,6 +67,7 @@ Notion「マップ詳細」ページ本文 ＋ Drive に HTML レポート
 !git -C /content/valorant-replay pull -q 2>/dev/null || git clone -q https://github.com/AK47bbddk/valorant-replay /content/valorant-replay
 !pip -q install -e '/content/valorant-replay[video]'
 !test -x ~/.deno/bin/deno || (curl -fsSL https://deno.land/install.sh | sh -s -- -y > /dev/null 2>&1)
+!nvidia-smi -L >/dev/null 2>&1 && ! python -c "import onnxruntime as o; assert 'CUDAExecutionProvider' in o.get_available_providers()" 2>/dev/null && (pip -q uninstall -y onnxruntime; pip -q install --force-reinstall --no-deps onnxruntime-gpu || pip -q install --force-reinstall onnxruntime)  # GPU があれば OCR も GPU で（失敗したら CPU 版に戻す）
 %cd /content/valorant-replay
 
 # セル2：実行
@@ -224,6 +225,9 @@ powershell -ExecutionPolicy Bypass -File .\valorant-replay\scripts\fetch_windows
   - 表が 1 枚も映っていないラウンドは、開始直後の試合中カード（タイマーとスコアが読める＝リプレイでない画面）から読みます。
     このときはラウンドの注記に「試合中のカードから読みました」と出ます。
   - 自信がないときは「不明」と表示します。
+- **抜けたラウンドの補い**：スコアの読み違いで 2 つのラウンドが同じ番号になったときは、タイマーが購入フェーズから
+  1:40 付近へ跳ぶ位置（各ラウンドに 1 回）で区切り直します。ページ冒頭の灰色の行に「タイマーから補ったラウンド」
+  「見つからないラウンド」を出します。
 - **ULT**：アイコン外周の点線が全部つながって光ると「溜まっている」。生存したまま光った輪が消えたら「使用」です。
   使用直後に倒されて空のフレームが 1 枚しか無い場合も拾います。倒されたカードは灰色になるので判定から外します。
   誰が使ったかは、ラウンド開始直後の試合中UIから読んだ名前・エージェント・チームで表示します。
@@ -249,7 +253,12 @@ powershell -ExecutionPolicy Bypass -File .\valorant-replay\scripts\fetch_windows
 ほかに：
 
 - **動画の取得**：YouTube は 1 本の接続を 1 MB/s 前後に絞る（2 GB のマップで 30 分以上）ので、マップの区間を
-  4 つに分けて同時に取得します（`video.download_parts`）。分けたファイルは `*.parts.json` でつなぎ、解析側は 1 本の動画として読みます。
+  8 つに分けて同時に取得します（`video.download_parts`）。分けたファイルは `*.parts.json` でつなぎ、解析側は 1 本の動画として読みます。
+  マップは 1 つずつ全力で取り、解析している間に次のマップを取ります（`video.download_workers: 1`）。
+- **GPU**：T4 などの GPU があると、デコード（NVDEC）に加えて OCR も GPU で動かします（セル1で onnxruntime-gpu を入れる）。
+  デコードしたフレームは GPU の上で 2fps に間引いてから CPU に移すので、60fps の全フレームを CPU にコピーしません。
+  ログの「スキャン」の行に「デコード GPU・OCR … 回 GPU」と出ます。
+- **Notion への書き込み**は裏で進め、次のマップの解析と同時に行います。画像は 4 本同時に送ります（リクエストの開始は 3 回/秒まで）。
 - **キルログ**：キルフィードの背景は半透明でゲーム画面が透けるため、画像の差分だと毎フレーム「変化あり」になり、
   OCR が何百回も走っていました。白い名前の行に「新しい行」が出たフレームだけ OCR するようにしています。
 - 解析は CPU 数ぶんのプロセスで同時に行い、OCR のスレッド数を「CPU 数 ÷ プロセス数」に合わせて取り合いを防ぎます。

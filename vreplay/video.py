@@ -250,11 +250,19 @@ def iter_frames(path: Path, fps: float, start: float = 0.0, duration: float | No
     if hwaccel is None:
         hwaccel = gpu_decode_ok(str(path))
     base = ["ffmpeg", "-v", "error", "-nostdin", "-skip_frame", "noref"]
-    tail = ["-ss", f"{start:.3f}"] + (["-t", f"{duration:.3f}"] if duration else []) + [
-        "-i", str(path), "-an", "-vf", f"fps={fps}", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
-    tries = ([["-hwaccel", "cuda"]] if hwaccel else []) + ([[]] if (fallback or not hwaccel) else [])
-    for hw in tries:
-        p = subprocess.Popen(base + hw + tail, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=w * h * 3 * 4)
+    seek = ["-ss", f"{start:.3f}"] + (["-t", f"{duration:.3f}"] if duration else [])
+    out = ["-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+    # GPU デコードでは、フレームを GPU 上に置いたまま fps フィルタで間引き、残った 2fps ぶんだけ CPU へ移す。
+    # （-hwaccel cuda だけだと 60fps の全フレームを毎回 CPU へコピーしていて、CPU を大きく使っていた）
+    cmds = []
+    if hwaccel:
+        cmds.append(base + ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"] + seek
+                    + ["-i", str(path), "-an", "-vf", f"fps={fps},hwdownload,format=nv12"] + out)
+        cmds.append(base + ["-hwaccel", "cuda"] + seek + ["-i", str(path), "-an", "-vf", f"fps={fps}"] + out)
+    if fallback or not hwaccel:
+        cmds.append(base + seek + ["-i", str(path), "-an", "-vf", f"fps={fps}"] + out)
+    for cmd in cmds:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=w * h * 3 * 4)
         n, size = 0, w * h * 3
         try:
             while True:

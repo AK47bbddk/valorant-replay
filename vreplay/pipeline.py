@@ -267,7 +267,7 @@ def save_table_crops(path: Path, det, cfg: dict, store, hw: bool, pre: float = 9
 # ---------------------------------------------------------------- 動画解析
 def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: Path, path: Path, log=print):
     from . import extract as X
-    from .rounds import agreement, assign_rounds, liveness, orientation, segment
+    from .rounds import agreement, assign_rounds, liveness, orientation, repair_rounds, segment
     from .loadout import add_weapons, find_table, merge_reads, read_table, table_image
     from .scan import merge_obs, scan
     from .video import gpu_decode_ok, keyframe_interval
@@ -292,8 +292,11 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                        for a, b, c in zip(o["timer"], o["sl"], o["sr"])], bool)
         lv, _, li = liveness(o["band"], cf)
         ri = assign_rounds(lv, o["sl"], o["sr"], o["rnd"], md.total_rounds or None)
+        ri, added = repair_rounds(o["t"], lv, ri, o["timer"], md.total_rounds or None,
+                                  hcfg["round_timer_sec"], hcfg["buy_phase_max_sec"])
         dt, sts = segment(o["t"], lv, ri, o["timer"], o["sl"], o["sr"], md.total_rounds or None,
                           hcfg["round_timer_sec"], hcfg["buy_phase_max_sec"], alive=o["alive"], conf=cf)
+        sts["repaired"] = added
         return cf, lv, li, dt, sts
 
     try:
@@ -324,6 +327,7 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                 obs = merge_obs([obs1, obs2], cfg, drop_sparse_in=[(a, a + d) for a, d in segs])
                 obs["ocr_calls"] = obs1["ocr_calls"] + obs2["ocr_calls"]
                 obs["workers"] = obs2["workers"]
+                obs["ocr_gpu"] = obs1.get("ocr_gpu") or obs2.get("ocr_gpu")
                 scan_note = (f"{'高速' if mode == 'fast' else 'ラウンド区間'}モード：キーフレーム {len(obs1['t'])} 枚"
                              f"（間隔 {ki:.1f} 秒）＋密に {sum(d for _, d in segs) / 60:.1f}/{dur / 60:.1f} 分")
             else:
@@ -331,7 +335,8 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                 table_windows = []
                 scan_note = "全区間を密に" + (f"（キーフレーム間隔 {ki:.1f} 秒）" if ki else "")
         log(f"    スキャン {len(obs['t'])} 枚 {perf.fmt_seconds(st_scan['seconds'])}"
-            f"（{scan_note}・{obs['workers']} 並列・デコード {'GPU' if hw else 'CPU'}・OCR {obs['ocr_calls']} 回）"
+            f"（{scan_note}・{obs['workers']} 並列・デコード {'GPU' if hw else 'CPU'}"
+            f"・OCR {obs['ocr_calls']} 回 {'GPU' if obs.get('ocr_gpu') else 'CPU'}）"
             f"｜{perf.fmt_resources(st_scan['resources'])}")
         t, timer = obs["t"], obs["timer"]
         conf, live, linfo, det, stats = find_rounds(obs)
@@ -519,6 +524,11 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
         rep["video_ok"] = True
         drop_note = (f"開始推定 {stats.get('drop_estimated', 0)}R・平均信頼度 {stats.get('drop_avg_conf', 0):.0%}"
                      if det else "")
+        lost = sorted(set(range(1, (md.total_rounds or 0) + 1)) - found)
+        if stats.get("repaired"):
+            drop_note += f"／タイマーから補ったラウンド {','.join(map(str, stats['repaired']))}"
+        if lost:
+            drop_note += f"／見つからないラウンド {','.join(map(str, lost))}"
         rep["analysis_note"] = (f"{msg}／{linfo}／タイマー読取 {stats['timer_ok']:.0%}・スコア読取 {stats['score_ok']:.0%}"
                                 f"／検出ラウンド {len(det)}/{md.total_rounds or '?'}／VLR との勝敗一致 {agree:.0%}"
                                 + (f"／{drop_note}" if drop_note else "")
@@ -661,7 +671,7 @@ def _run_body(cfg: dict, day, match_urls, no_video, force, upsert_only, log, t0)
         f"｜{perf.fmt_resources(st_match['resources'])}")
 
     # 2) 動画を裏でまとめてダウンロード開始（既定 3 本まで。解析中に次のマップを取得する）
-    dl_workers = max(1, int(cfg["video"].get("download_workers") or 3))
+    dl_workers = max(1, int(cfg["video"].get("download_workers") or 1))
     dl = ThreadPoolExecutor(max_workers=dl_workers)
     futs = {}
     if not no_video:
@@ -671,6 +681,8 @@ def _run_body(cfg: dict, day, match_urls, no_video, force, upsert_only, log, t0)
 
     # 3) 順に解析
     blocked = False
+    writer = ThreadPoolExecutor(max_workers=1)
+    writes = []
     for m, md, map_dir, page in todo:
         log(f"  {m.title} {md.order}. {md.name} {md.score1}-{md.score2}")
         tag = f"{m.id}:{md.order}"
@@ -701,15 +713,21 @@ def _run_body(cfg: dict, day, match_urls, no_video, force, upsert_only, log, t0)
         map_dir.mkdir(parents=True, exist_ok=True)
         (map_dir / "report.json").write_text(json.dumps(rep, ensure_ascii=False, indent=1), encoding="utf-8")
         if nt and page:
-            try:
-                with perf.stage("notion", tag=tag, label="Notion 書き込み") as st_nt:
-                    write_map_page(nt, page["id"], rep, force=force)
-                log(f"    → Notion に書き込みました: {page.get('url', '')}"
-                    f"（{perf.fmt_seconds(st_nt['seconds'])}）")
-            except Exception as e:
-                log(f"    Notion 書き込み失敗: {e}")
+            # Notion への書き込み（画像のアップロード）は通信待ちが中心なので、裏で進めて次のマップの解析に移る
+            def write(rep=rep, page=page, tag=tag, name=f"{m.title} {md.order}. {md.name}"):
+                try:
+                    with perf.stage("notion", tag=tag, label="Notion 書き込み") as st_nt:
+                        write_map_page(nt, page["id"], rep, force=force)
+                    log(f"    → Notion に書き込みました（{name}）: {page.get('url', '')}"
+                        f"（{perf.fmt_seconds(st_nt['seconds'])}）")
+                except Exception as e:
+                    log(f"    Notion 書き込み失敗（{name}）: {e}")
+            writes.append(writer.submit(write))
         reports.append(rep)
     dl.shutdown(wait=False, cancel_futures=True)
+    for w in writes:
+        w.result()
+    writer.shutdown()
 
     summary = perf.build_summary(total_sec=time.time() - t0)
     perf.write_json(summary, out_root / "perf.json")

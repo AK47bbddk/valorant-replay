@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import mimetypes
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
@@ -14,19 +16,52 @@ VERSION = "2025-09-03"
 
 
 class Notion:
+    """Notion API の薄いラッパー。複数スレッドから使える。
+
+    Notion の上限は平均 3 リクエスト/秒。これまでは「応答のあとに 0.34 秒待つ」だったので、画像の送信
+    （数 MB）の時間がそのまま積み上がっていた。今は「リクエストを始める間隔」を 0.34 秒以上にそろえるだけにして、
+    送信中のファイルは並行して流す。
+    """
+    MIN_INTERVAL = 0.34
+
     def __init__(self, token: str):
-        self.s = requests.Session()
-        self.s.headers.update({"Authorization": f"Bearer {token}", "Notion-Version": VERSION})
+        self.token = token
+        self._local = threading.local()
+        self._lock = threading.Lock()
+        self._next = 0.0
+
+    @property
+    def s(self) -> requests.Session:
+        s = getattr(self._local, "s", None)
+        if s is None:
+            s = requests.Session()
+            s.headers.update({"Authorization": f"Bearer {self.token}", "Notion-Version": VERSION})
+            self._local.s = s
+        return s
+
+    def _pace(self):
+        with self._lock:
+            now = time.monotonic()
+            wait = self._next - now
+            self._next = max(now, self._next) + self.MIN_INTERVAL
+        if wait > 0:
+            time.sleep(wait)
 
     def req(self, method: str, path: str, json: dict | None = None, files=None) -> dict:
         for i in range(6):
+            self._pace()
             r = self.s.request(method, API + path, json=json, files=files, timeout=120)
             if r.status_code == 429 or r.status_code >= 500:
                 time.sleep(float(r.headers.get("Retry-After", 2 * (i + 1))))
+                if files:                                   # 送り直すときはファイルを先頭から
+                    for f in files.values():
+                        try:
+                            f[1].seek(0)
+                        except Exception:
+                            pass
                 continue
             if r.status_code >= 400:
                 raise RuntimeError(f"Notion {method} {path} -> {r.status_code}: {r.text[:500]}")
-            time.sleep(0.34)  # 平均 3 req/s 制限
             return r.json()
         raise RuntimeError(f"Notion {method} {path}: retries exhausted")
 
@@ -244,15 +279,17 @@ def write_map_page(nt: Notion, page_id: str, rep: dict, force: bool = False) -> 
         if not force:
             return False
         nt.clear(page_id)
-    uploads: dict[str, str | None] = {}
-    for r in rep["rounds"]:
-        for path in (r.get("assets") or {}).values():
-            if path and path not in uploads:
-                try:
-                    uploads[path] = nt.upload(path)
-                except RuntimeError as e:  # 1 枚の失敗でページ全体を止めない
-                    print("  upload failed:", path, e)
-                    uploads[path] = None
+    paths = list(dict.fromkeys(p for r in rep["rounds"] for p in (r.get("assets") or {}).values() if p))
+
+    def up(path):
+        try:
+            return path, nt.upload(path)
+        except RuntimeError as e:  # 1 枚の失敗でページ全体を止めない
+            print("  upload failed:", path, e)
+            return path, None
+
+    with ThreadPoolExecutor(max_workers=4) as ex:      # 送信は並行、リクエストの開始は 3 回/秒に抑える
+        uploads: dict[str, str | None] = dict(ex.map(up, paths))
     nt.append(page_id, build_blocks(rep, uploads), batch=10)
     return True
 
