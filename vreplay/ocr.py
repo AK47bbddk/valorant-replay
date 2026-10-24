@@ -7,7 +7,9 @@
 """
 from __future__ import annotations
 
+import contextlib
 import os
+import sys
 import threading
 
 import cv2
@@ -20,6 +22,10 @@ def gpu_status() -> tuple[bool, str]:
         import onnxruntime as ort
     except Exception as e:
         return False, f"onnxruntime を読めません（{e}）"
+    try:
+        ort.set_default_logger_severity(3)    # 「No registered plugin EP device found」などの警告を出さない
+    except Exception:
+        pass
     if hasattr(ort, "preload_dlls"):          # pip で入っている CUDA / cuDNN（Colab の torch が入れたもの）を使う
         try:
             ort.preload_dlls()
@@ -37,34 +43,96 @@ def _gpu_ok() -> bool:
     return gpu_status()[0]
 
 
-def _enable_cuda(engine, RapidOCR, kw: dict):
-    """検出・認識のモデルを CUDA で動かす。
-
-    1.3 系以降は det_use_cuda などの引数で切り替えられる。1.2 系（Python 3.13 の Colab に入る版）は
-    認識側の引数が設定に反映されない作りなので、設定ファイルを読み直して検出器・認識器を作り直す。
-    """
-    if hasattr(engine, "text_rec"):                                   # 1.3 系以降
-        new = RapidOCR(**kw, det_use_cuda=True, rec_use_cuda=True, cls_use_cuda=True)
-        engine.__dict__.update(new.__dict__)
-        return
-    import rapidocr_onnxruntime.rapid_ocr_api as api                  # 1.2 系
-    cfg = api.concat_model_path(api.read_yaml(str(api.root_dir / "config.yaml")))
-    for key, attr in (("Det", "text_detector"), ("Rec", "text_recognizer")):
-        c = dict(cfg[key])
-        c["use_cuda"] = True
-        if key == "Rec":
-            c["rec_batch_num"] = 32                                    # GPU はまとめて流す方が速い
-        setattr(engine, attr, engine.init_module(c["module_name"], c["class_name"])(c))
-
-
-def _providers(engine) -> list[str]:
-    """実際にセッションが使っている実行プロバイダ（CUDA のライブラリが読めず CPU に落ちた場合も分かる）。"""
-    rec = getattr(engine, "text_rec", None) or getattr(engine, "text_recognizer", None)
-    sess = getattr(getattr(rec, "session", None), "session", None)
+@contextlib.contextmanager
+def _quiet_stderr():
+    """cuDNN や onnxruntime が C レベルで標準エラーに出す大量の警告を、GPU の準備中だけ黙らせる。"""
     try:
-        return list(sess.get_providers())
+        fd = sys.stderr.fileno()
     except Exception:
-        return []
+        yield
+        return
+    sys.stderr.flush()
+    saved, null = os.dup(fd), os.open(os.devnull, os.O_WRONLY)
+    os.dup2(null, fd)
+    try:
+        yield
+    finally:
+        os.dup2(saved, fd)
+        os.close(saved)
+        os.close(null)
+
+
+# CUDA の設定を順に試す。T4（Turing）と新しい cuDNN の組み合わせでは、onnxruntime の既定（RapidOCR は
+# EXHAUSTIVE を指定）だと cuDNN の探索が失敗して CPU に落ちることがある
+CUDA_TRIES = ({"cudnn_conv_algo_search": "DEFAULT"},
+              {"cudnn_conv_algo_search": "HEURISTIC"},
+              {"cudnn_conv_algo_search": "DEFAULT", "use_tf32": "0", "cudnn_conv_use_max_workspace": "0"})
+
+
+def _modules(engine) -> list:
+    """[(名前, onnxruntime のセッションを持つ包み, テスト入力の形)]。1.2 系と 1.3 系以降で属性名が違う。"""
+    det = getattr(engine, "text_det", None) or getattr(engine, "text_detector", None)
+    rec = getattr(engine, "text_rec", None) or getattr(engine, "text_recognizer", None)
+    return [("det", getattr(det, "infer", None), [(1, 3, 96, 160), (1, 3, 384, 672)]),
+            ("rec", getattr(rec, "session", None), [(8, 3, 48, 320)])]
+
+
+def _cuda_session(cpu, shapes):
+    import onnxruntime as ort
+    path = getattr(cpu, "_model_path", None)
+    if not path:
+        raise RuntimeError("モデルの場所が分かりません")
+    so = ort.SessionOptions()
+    so.log_severity_level = 4
+    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    name = cpu.get_inputs()[0].name
+    rng = np.random.default_rng(0)
+    last = ""
+    for opts in CUDA_TRIES:
+        try:
+            with _quiet_stderr():
+                s = ort.InferenceSession(path, sess_options=so,
+                                         providers=[("CUDAExecutionProvider", {"device_id": 0, **opts}),
+                                                    "CPUExecutionProvider"])
+                if "CUDAExecutionProvider" not in s.get_providers():
+                    last = "CUDA に載りませんでした"
+                    continue
+                ok = True
+                for shp in shapes:
+                    x = rng.random(shp, dtype=np.float32)
+                    a, b = s.run(None, {name: x})[0], cpu.run(None, {name: x})[0]
+                    if not np.allclose(a, b, atol=2e-2, rtol=2e-2):
+                        ok, last = False, "GPU と CPU の結果が合いません"
+                        break
+            if ok:
+                return s, opts
+        except Exception as e:
+            last = f"{type(e).__name__}: {str(e).splitlines()[0][:160]}"
+    raise RuntimeError(f"CUDA で動かせませんでした（{last}）")
+
+
+def _enable_cuda(engine) -> str:
+    """検出・認識のモデルを CUDA のセッションに差し替える。CPU のセッションは失敗時に戻すため残す。
+    返り値は使った cuDNN の設定（ログ用）。"""
+    used = ""
+    for _, wrap, shapes in _modules(engine):
+        if wrap is None or not hasattr(wrap, "session"):
+            raise RuntimeError("この版の RapidOCR には対応していません")
+        gpu, opts = _cuda_session(wrap.session, shapes)
+        wrap._cpu_session = wrap.session
+        wrap.session = gpu
+        used = opts.get("cudnn_conv_algo_search", "")
+    rec = getattr(engine, "text_rec", None) or getattr(engine, "text_recognizer", None)
+    if hasattr(rec, "rec_batch_num"):
+        rec.rec_batch_num = 32                                         # GPU はまとめて流す方が速い
+    return used
+
+
+def _disable_cuda(engine):
+    for _, wrap, _ in _modules(engine):
+        if wrap is not None and getattr(wrap, "_cpu_session", None) is not None:
+            wrap.session = wrap._cpu_session
+            wrap._cpu_session = None
 
 
 class OCR:
@@ -79,21 +147,33 @@ class OCR:
         if threads > 0:
             kw.update(intra_op_num_threads=threads, inter_op_num_threads=1)
         self.engine = RapidOCR(**kw)
+        self.note = ""
         if gpu:
             try:
-                _enable_cuda(self.engine, RapidOCR, kw)
+                self.cudnn = _enable_cuda(self.engine)
             except Exception as e:                 # GPU の準備に失敗したら CPU のまま続ける
+                _disable_cuda(self.engine)
                 gpu = False
-                self._cuda_error = f"{type(e).__name__}: {e}"
-        self.note = "" if gpu else (getattr(self, "_cuda_error", "") or gpu_status()[1])
-        if gpu and "CUDAExecutionProvider" not in _providers(self.engine):
-            gpu = False                                # CUDA のライブラリが無く CPU で動いている
-            self.note = "onnxruntime-gpu はあるが CUDA / cuDNN のライブラリを読めず CPU で動作"
+                self.note = str(e)
+        else:
+            self.note = gpu_status()[1]
         # 1.2 系は text_recognizer、1.3 系以降（Python 3.12 の Colab に入る版）は text_rec
         self.recognizer = getattr(self.engine, "text_rec", None) or self.engine.text_recognizer
         self.gpu = gpu
         self.lock = threading.Lock()
         self.calls = 0
+
+    def _run(self, fn):
+        """GPU で失敗したら（まれな入力の大きさで cuDNN が動かない等）CPU に切り替えてやり直す。"""
+        try:
+            return fn()
+        except Exception as e:
+            if not self.gpu:
+                raise
+            _disable_cuda(self.engine)
+            self.gpu = False
+            self.note = f"GPU で実行中に失敗したため CPU に切り替え（{type(e).__name__}）"
+            return fn()
 
     def rec(self, imgs: list) -> list[tuple[str, float]]:
         """切り抜きのリストをまとめて認識。返り値は [(文字列, 確信度)]（入力と同じ順）。"""
@@ -103,7 +183,7 @@ class OCR:
         if not ok:
             return out
         with self.lock:
-            res, _ = self.recognizer([imgs[k] for k in ok])
+            res, _ = self._run(lambda: self.recognizer([imgs[k] for k in ok]))
             self.calls += len(ok)
         for k, r in zip(ok, res):
             out[k] = (str(r[0]).strip(), float(r[1]))
@@ -114,7 +194,7 @@ class OCR:
         if img is None or img.size == 0:
             return []
         with self.lock:
-            res, _ = self.engine(img)
+            res, _ = self._run(lambda: self.engine(img))
             self.calls += 1
         out = []
         for box, txt, sc, *_ in res or []:
