@@ -165,7 +165,9 @@ def test_range_getter_falls_back_to_query_and_uses_ytdlp(tmp_path):
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{srv.server_port}/v?id=1"
     try:
-        for opts in (None, ytrange.ydl_options("bv*")):
+        import importlib.util
+        variants = [None] + ([ytrange.ydl_options("bv*")] if importlib.util.find_spec("yt_dlp") else [])
+        for opts in variants:
             g = ytrange.Getter(url, {}, opts)
             assert g.probe() == "query"
             assert g.get(100, 4195) == data[100:4196]

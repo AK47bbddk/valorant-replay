@@ -11,7 +11,7 @@ jobs:
           python-version: "3.12"
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg
         timeout-minutes: 8
-      - run: pip install -q requests beautifulsoup4 lxml pyyaml numpy opencv-python-headless pillow pytest rapidocr_onnxruntime
+      - run: pip install -q requests beautifulsoup4 lxml pyyaml numpy opencv-python-headless pillow pytest rapidocr_onnxruntime yt-dlp
       - run: |
           set -o pipefail
           pytest -q -rf --tb=short 2>&1 | tee pytest.txt || { grep -E "Error|assert|FAILED|^E " pytest.txt | head -20 | while IFS= read -r l; do echo "::error::$l"; done; exit 1; }
