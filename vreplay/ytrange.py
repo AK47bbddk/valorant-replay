@@ -10,10 +10,8 @@ moof/mdat の断片…」という作りなので、
 """
 from __future__ import annotations
 
-import json
 import struct
 import subprocess
-import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -90,28 +88,88 @@ def plan(head: bytes) -> dict:
     return {"init_end": init_end, "segments": segs}
 
 
-def _get(sess, url: str, a: int, b: int, headers: dict, tries: int = 4, exact: bool = True) -> bytes:
-    last = None
-    for _ in range(tries):
-        try:
-            r = sess.get(url, headers={**headers, "Range": f"bytes={a}-{b}"}, timeout=60)
-            if r.status_code in (200, 206) and (len(r.content) == b - a + 1 or (not exact and r.content)):
-                return r.content
-            last = f"HTTP {r.status_code}・{len(r.content)} バイト"
-        except requests.RequestException as e:
-            last = str(e)
-    raise RuntimeError(f"範囲 {a}-{b} を取れませんでした（{last}）")
+class Getter:
+    """1 つの動画 URL からバイト範囲を取る。スレッドごとに接続を持つ。
+
+    yt-dlp を同じ設定（cookies・クライアント・JS ランタイム・なりすまし）でプロセス内に作り、その urlopen で取る。
+    以前は requests で直接取っていたが、yt-dlp が使う接続と違うためか 403 になった（Colab のログ）。
+    取り方は 2 通り：Range ヘッダー（header）と、YouTube の再生プレーヤーと同じ &range=a-b（query）。
+    probe() で小さな範囲を取って、通る方を選ぶ。
+    """
+
+    def __init__(self, url: str, headers: dict | None = None, ydl_opts: dict | None = None, cookies=None):
+        import threading
+        self.url, self.headers, self.opts, self.cookies = url, dict(headers or {}), ydl_opts, cookies
+        self.mode = "header"
+        self._tl = threading.local()
+
+    def _client(self):
+        c = getattr(self._tl, "c", None)
+        if c is None:
+            if self.opts is not None:
+                import yt_dlp
+                c = yt_dlp.YoutubeDL({**self.opts, "quiet": True, "no_warnings": True})
+            else:
+                c = requests.Session()
+                if self.cookies is not None:
+                    c.cookies = self.cookies
+            self._tl.c = c
+        return c
+
+    def _once(self, a: int, b: int, mode: str) -> tuple[int, bytes]:
+        h = dict(self.headers)
+        url = self.url
+        if mode == "header":
+            h["Range"] = f"bytes={a}-{b}"
+        else:
+            url = url + ("&" if "?" in url else "?") + f"range={a}-{b}"
+        c = self._client()
+        if self.opts is not None:
+            from yt_dlp.networking import Request
+            try:
+                with c.urlopen(Request(url, headers=h)) as r:
+                    return int(getattr(r, "status", 200)), r.read()
+            except Exception as e:
+                st = getattr(getattr(e, "response", None), "status", None) or getattr(e, "status", None)
+                if st:
+                    return int(st), b""
+                raise
+        r = c.get(url, headers=h, timeout=60)
+        return r.status_code, r.content
+
+    def get(self, a: int, b: int, tries: int = 4, exact: bool = True) -> bytes:
+        last = None
+        for _ in range(tries):
+            try:
+                st, data = self._once(a, b, self.mode)
+                if st in (200, 206) and (len(data) == b - a + 1 or (not exact and data)):
+                    return data
+                last = f"HTTP {st}・{len(data)} バイト"
+            except Exception as e:
+                last = str(e)[:200]
+        raise RuntimeError(f"範囲 {a}-{b} を取れませんでした（{self.mode}：{last}）")
+
+    def probe(self) -> str:
+        """小さな範囲（1KB）を両方の取り方で試し、通った方を使う。どちらもだめなら理由を返して例外。"""
+        why = []
+        for mode in ("header", "query"):
+            try:
+                st, data = self._once(0, 1023, mode)
+                if st in (200, 206) and len(data) >= 1024:
+                    self.mode = mode
+                    return mode
+                why.append(f"{mode}: HTTP {st}・{len(data)} バイト")
+            except Exception as e:
+                why.append(f"{mode}: {str(e)[:120]}")
+        raise RuntimeError("範囲の取得を拒否されました（" + " / ".join(why) + "）")
 
 
-def fetch_section(url: str, headers: dict, start: float, end: float, out: Path, threads: int = 8,
-                  margin: float = 1.0, cookies=None) -> tuple[float, float]:
+def fetch_section(getter: "Getter", start: float, end: float, out: Path, threads: int = 8,
+                  margin: float = 1.0) -> tuple[float, float]:
     """[start, end] 秒を含む断片だけを取って out（mp4）に書く。返り値 (取った区間の開始秒, 終了秒)。"""
-    sess = requests.Session()
-    if cookies is not None:
-        sess.cookies = cookies
     n = 512 * 1024
     while True:
-        head = _get(sess, url, 0, n - 1, headers, exact=False)
+        head = getter.get(0, n - 1, exact=False)
         try:
             p = plan(head)
             break
@@ -123,7 +181,7 @@ def fetch_section(url: str, headers: dict, start: float, end: float, out: Path, 
     if not segs:
         raise ValueError("指定の時間帯が動画に含まれていません")
     a, b = segs[0][0], segs[-1][0] + segs[-1][1] - 1
-    init = head[:p["init_end"]] if p["init_end"] <= len(head) else _get(sess, url, 0, p["init_end"] - 1, headers)
+    init = head[:p["init_end"]] if p["init_end"] <= len(head) else getter.get(0, p["init_end"] - 1)
     tmp = out.with_suffix(".frag.mp4")
     with open(tmp, "wb") as fh:
         fh.write(init)
@@ -131,7 +189,7 @@ def fetch_section(url: str, headers: dict, start: float, end: float, out: Path, 
     ranges = [(x, min(b, x + CHUNK - 1)) for x in range(a, b + 1, CHUNK)]
 
     def one(rg):
-        data = _get(sess, url, rg[0], rg[1], headers)
+        data = getter.get(rg[0], rg[1])
         with open(tmp, "r+b") as fh:
             fh.seek(len(init) + rg[0] - a)
             fh.write(data)
@@ -147,22 +205,31 @@ def fetch_section(url: str, headers: dict, start: float, end: float, out: Path, 
     return segs[0][2], segs[-1][3]
 
 
-def format_info(video_id: str, fmt: str, cookies: str = "", client: str | None = None, env=None) -> dict:
-    """yt-dlp で、選んだ形式の直接 URL と、取得に必要なヘッダーを得る（ダウンロードはしない）。"""
-    cmd = [sys.executable, "-m", "yt_dlp", "--no-warnings", "-j", "--remote-components", "ejs:github", "-f", fmt,
-           f"https://www.youtube.com/watch?v={video_id}"]
+def ydl_options(fmt: str, cookies: str = "", client: str | None = None, deno: str | None = None) -> dict:
+    """セクション取得（yt-dlp のコマンド）と同じ設定を、プロセス内の yt-dlp 用に作る。"""
+    import yt_dlp
+    args = ["--no-warnings", "--remote-components", "ejs:github", "-f", fmt]
     if cookies and Path(cookies).exists():
-        cmd[3:3] = ["--cookies", cookies]
+        args += ["--cookies", cookies]
     if client:
-        cmd[3:3] = ["--extractor-args", f"youtube:player_client={client}"]
-    r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=180)
-    if r.returncode != 0:
-        raise RuntimeError(r.stderr.strip()[-500:])
-    info = json.loads(r.stdout.splitlines()[-1])
+        args += ["--extractor-args", f"youtube:player_client={client}"]
+    if deno:
+        args += ["--js-runtimes", f"deno:{deno}"]
+    return yt_dlp.parse_options(args).ydl_opts
+
+
+def format_info(video_id: str, fmt: str, cookies: str = "", client: str | None = None, env=None) -> dict:
+    """プロセス内の yt-dlp で、選んだ形式の直接 URL・ヘッダー・設定を得る（ダウンロードはしない）。"""
+    import shutil
+    import yt_dlp
+    deno = shutil.which("deno", path=(env or {}).get("PATH")) if env else shutil.which("deno")
+    opts = ydl_options(fmt, cookies, client, deno)
+    with yt_dlp.YoutubeDL({**opts, "quiet": True}) as ydl:
+        info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
     f = info
     if "requested_formats" in info:
         f = next((x for x in info["requested_formats"] if x.get("vcodec") not in (None, "none")), info)
     if f.get("protocol") not in ("https", "http") or not f.get("url"):
         raise RuntimeError(f"範囲取得に向かない形式です（{f.get('protocol')}）")
     return {"url": f["url"], "headers": f.get("http_headers") or {}, "format_id": f.get("format_id"),
-            "height": f.get("height"), "ext": f.get("ext")}
+            "height": f.get("height"), "ext": f.get("ext"), "opts": opts}

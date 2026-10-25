@@ -54,3 +54,21 @@ def test_counter_and_eco():
 def test_without_video_uses_vlr_only():
     out = analyze(R(n=13, winner="LOUD", side="防衛", how="time", kills=[]), REP)
     assert out["tags"] == ["時間切れまで守り切り", "ピストル"]
+
+
+def test_reason_variations_zone_operator_trade_ult():
+    from vreplay.reasons import analyze
+    rep = {"team1": "G2", "team2": "100T", "tag1": "G2", "tag2": "100T",
+           "players": [{"name": n, "team": 1} for n in ("a", "b", "c", "d", "e")]
+           + [{"name": n, "team": 2} for n in ("v", "w", "x", "y", "z")]}
+    k = lambda t, kt, kl, vc, wpn=None: {"t": t, "killer_team": kt, "killer": kl, "victim": vc,
+                                         "victim_team": "100T" if kt == "G2" else "G2", "weapon": wpn}
+    r = {"n": 5, "winner": "G2", "side": "攻撃", "how": "boom", "t_drop": 100.0, "plant_t": 150.0,
+         "kills": [k(110, "G2", "a", "v", "Operator"), k(120, "100T", "w", "b"), k(122, "G2", "c", "w"),
+                   k(130, "100T", "x", "d"), k(132, "G2", "e", "x")],
+         "ults": [{"t": 140, "team": "G2", "agent": "Yoru"}],
+         "tactics": {"first_fight": "A", "plant_site": "A"}}
+    out = analyze(r, rep)
+    assert "初動Aファイト勝ち" in out["tags"] and "オペレーターで1ピック" in out["tags"]
+    assert "Aエントリー成功" in out["tags"] and "トレード勝ち" in out["tags"] and "ULTで攻め切り" in out["tags"]
+    assert "1ピック" not in out["tags"]

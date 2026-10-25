@@ -193,3 +193,146 @@ def nearest(placed: list[dict], x: float, y: float, aspect: float) -> tuple[dict
         if d < bd:
             best, bd = c, d
     return best, bd
+
+
+# ---------------------------------------------------------------- 背景（地形）による位置合わせ
+def map_mask(bg: np.ndarray) -> np.ndarray | None:
+    """ミニマップの背景（何枚かの中央値＝点が消えた画像）から、歩ける場所（明るい灰色の床）の 2 値画像。
+    放送のミニマップは暗い半透明の地に明るい床が描かれる。サイトの四角（黄みがかった床）も床に含める。"""
+    import cv2
+    if bg is None or bg.size == 0:
+        return None
+    hsv = cv2.cvtColor(bg, cv2.COLOR_BGR2HSV)
+    v = cv2.GaussianBlur(hsv[..., 2], (3, 3), 0)
+    t, _ = cv2.threshold(v, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    m = ((v >= max(t, 95)) & (hsv[..., 1] <= 110)).astype(np.uint8)
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    # いちばん大きなまとまり（マップ本体）と、それに近い塊だけ残す（スコアや UI の明るい部分を除く）
+    n, lab, st, _ = cv2.connectedComponentsWithStats(m, 8)
+    if n <= 1:
+        return None
+    big = int(np.argmax(st[1:, 4])) + 1
+    keep = np.zeros_like(m)
+    x0, y0, w0, h0 = st[big, :4]
+    for i in range(1, n):
+        x, y, w, h, a = st[i]
+        if i == big or (a >= 30 and x + w >= x0 - 10 and x <= x0 + w0 + 10 and y + h >= y0 - 10 and y <= y0 + h0 + 10):
+            keep[lab == i] = 1
+    frac = keep.mean()
+    if not 0.05 <= frac <= 0.7:
+        return None
+    return keep.astype(bool)
+
+
+def site_squares(bg: np.ndarray, mask: np.ndarray | None = None) -> list[tuple[float, float]]:
+    """ミニマップのサイト（A/B/C の文字が入った、黄みがかった四角）の中心。高さ 1 の単位 (x, y)。"""
+    import cv2
+    if bg is None or bg.size == 0:
+        return []
+    H = bg.shape[0]
+    hsv = cv2.cvtColor(bg, cv2.COLOR_BGR2HSV)
+    m = ((hsv[..., 0] >= 10) & (hsv[..., 0] <= 35) & (hsv[..., 1] >= 35) & (hsv[..., 2] >= 100)).astype(np.uint8)
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    n, _, st, cen = cv2.connectedComponentsWithStats(m, 8)
+    out = []
+    for i in range(1, n):
+        x, y, w, h, a = st[i]
+        cx, cy = int(cen[i][0]), int(cen[i][1])
+        on_floor = mask is None or bool(mask[min(cy, mask.shape[0] - 1), min(cx, mask.shape[1] - 1)])
+        if a >= 0.002 * m.size and 0.4 <= w / max(1, h) <= 2.5 and a >= 0.35 * w * h and on_floor:
+            out.append((float(cen[i][0] / H), float(cen[i][1] / H)))
+    return out
+
+
+def fit_mask(mask: np.ndarray, meta: dict, max_pts: int = 500, seed: int = 0, bg=None) -> dict:
+    """床の 2 値画像にコールアウトを重ねる相似変換を探す。
+    コールアウト→床の距離（外れたら罰）と、床→最寄りのコールアウトの距離（コールアウトが床全体に広がっているか）の和が
+    最小になる回転・倍率・位置・鏡映。重心を合わせて総当たりし、平行移動・角度・倍率を細かく詰める。"""
+    import cv2
+    calls = meta.get("callouts") or []
+    if mask is None or len(calls) < 5:
+        return {"ok": False, "msg": "ミニマップ合わせ（地形）：材料不足"}
+    H, W = mask.shape
+    aspect = W / H
+    uv = np.array([(c["x"], c["y"]) for c in calls], float)
+    # 床の外の点から床までの距離（高さ 1 の単位）
+    dist = cv2.distanceTransform((~mask).astype(np.uint8), cv2.DIST_L2, 3) / H
+    ys, xs = np.nonzero(mask)
+    rng = np.random.default_rng(seed)
+    sel = rng.choice(len(xs), min(max_pts, len(xs)), replace=False)
+    pts = np.stack([xs[sel] / H, ys[sel] / H], axis=1).astype(np.float32)        # (N,2)、横は 0..aspect
+    cen = pts.mean(axis=0)
+    span = float(np.sqrt(mask.mean() * aspect))                                   # 床の広さの目安
+    cap = 0.08
+
+    def score(m, th, s, tr):
+        off = _offsets(uv, m, th)
+        C = (s[:, None, None] * off[None] + tr[:, None, :]).astype(np.float32)          # (S,K,2)
+        xi = np.clip((C[..., 0] * H).astype(int), 0, W - 1)
+        yi = np.clip((C[..., 1] * H).astype(int), 0, H - 1)
+        outside = ((C[..., 0] < 0) | (C[..., 0] > aspect) | (C[..., 1] < 0) | (C[..., 1] > 1))
+        d_in = np.where(outside, cap, np.minimum(dist[yi, xi], cap)).mean(axis=1)
+        dd = np.linalg.norm(C[:, :, None, :] - pts[None, None], axis=3).min(axis=1)    # (S,N)
+        cover = np.minimum(dd, cap * 2).mean(axis=1)
+        return d_in * 2.0 + cover
+
+    best = []
+    scales = np.geomspace(0.5, 2.2, 26)
+    for m in (False, True):
+        for th in np.deg2rad(np.arange(0, 360, 4)):
+            off = _offsets(uv, m, th)
+            tr = cen[None] - scales[:, None] * off.mean(axis=0)[None]
+            sc = score(m, th, scales, tr)
+            i = int(np.argmin(sc))
+            best.append((float(sc[i]), m, float(th), float(scales[i]), tr[i].copy()))
+    best.sort(key=lambda b: b[0])
+    # 上位いくつかを細かく詰める
+    refined = []
+    for sc0, m, th, s, tr in best[:6]:
+        cur = (sc0, th, s, tr)
+        for step_t, step_s, step_x in ((np.deg2rad(2), 0.04, 0.03), (np.deg2rad(1), 0.02, 0.012), (np.deg2rad(0.5), 0.01, 0.006)):
+            improved = True
+            while improved:
+                improved = False
+                _, th0, s0, tr0 = cur
+                cands = []
+                for dth in (-step_t, 0, step_t):
+                    for ds in (1 - step_s, 1, 1 + step_s):
+                        for dx in (-step_x, 0, step_x):
+                            for dy in (-step_x, 0, step_x):
+                                cands.append((th0 + dth, s0 * ds, tr0 + np.array([dx, dy])))
+                vals = [float(score(m, c[0], np.array([c[1]]), c[2][None])[0]) for c in cands]
+                k = int(np.argmin(vals))
+                if vals[k] < cur[0] - 1e-6:
+                    cur = (vals[k], *cands[k])
+                    improved = True
+        refined.append((cur[0], m, cur[1], cur[2], cur[3]))
+    # サイトの四角が見つかっていれば、サイトのコールアウトがその近くに来る候補を優先する
+    squares = site_squares(bg, mask) if bg is not None else []
+    site_uv = np.array([(c["x"], c["y"]) for c in calls if c.get("super") in ("A", "B", "C")
+                        and c.get("name", "").lower() == "site"], float)
+    if len(squares) >= 2 and len(site_uv) >= 2:
+        sq = np.array(squares)
+
+        def site_pen(b):
+            T_ = {"mirror": b[1], "theta": b[2], "scale": b[3], "tx": float(b[4][0]), "ty": float(b[4][1])}
+            P = np.array([apply(T_, u, v) for u, v in site_uv])
+            return float(np.minimum(np.linalg.norm(P[:, None] - sq[None], axis=2).min(axis=1), 0.15).mean())
+        refined = [(b[0] + 0.5 * site_pen(b), *b[1:]) for b in refined]
+    refined.sort(key=lambda b: b[0])
+    sc, m, th, s, tr = refined[0]
+    alt = next((b[0] for b in refined[1:] if b[1] != m or abs((math.degrees(b[2] - th) + 180) % 360 - 180) > 30), None)
+    T = {"mirror": bool(m), "theta": th, "scale": s * H / H, "tx": float(tr[0]), "ty": float(tr[1]), "aspect": aspect}
+    C = np.array([apply(T, u, v) for u, v in uv])
+    xi = np.clip((C[:, 0] * H).astype(int), 0, W - 1)
+    yi = np.clip((C[:, 1] * H).astype(int), 0, H - 1)
+    inside = float(np.mean([mask[y, x] or dist[y, x] < 0.012 for x, y in zip(xi, yi)]))
+    margin = (alt / sc) if alt and sc > 0 else 1.0
+    conf = max(0.0, min(1.0, (inside - 0.5) / 0.4)) * 0.6 + max(0.0, min(1.0, (margin - 1.0) / 0.5)) * 0.4
+    T.update({"score": round(sc, 4), "inside": round(inside, 2), "margin": round(margin, 2),
+              "confidence": round(conf, 2), "ok": conf >= 0.5, "method": "mask", "span": round(span, 3)})
+    T["msg"] = (f"ミニマップ合わせ（地形）：回転 {math.degrees(th) % 360:.0f}°{'・鏡映' if m else ''}・倍率 {s:.2f}"
+                f"（コールアウトが床の上 {inside:.0%}・2 位との差 ×{margin:.2f}）→ 信頼度 {conf:.0%}"
+                + ("" if T["ok"] else "（低い）"))
+    return T

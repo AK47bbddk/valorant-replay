@@ -255,7 +255,9 @@ def card_deaths(alive: np.ndarray, idxs: list[int], times: list[float], need: in
         if not any(seq[:4]):                       # 開始時から死亡（カードを取れていない）は使わない
             continue
         for j in range(1, len(seq)):
-            if seq[j - 1] and not seq[j] and all(not x for x in seq[j:j + need]) and len(seq[j:j + need]) == need:
+            rest = seq[j:j + need]
+            # 最後の数フレームで倒れた（直後にラウンドが終わってライブ区間が切れた）ときは 1 フレームでも採る
+            if seq[j - 1] and not seq[j] and all(not x for x in rest) and (len(rest) == need or j + len(rest) == len(seq)):
                 out.append((s, float(times[j])))
                 break
     return out
@@ -274,6 +276,48 @@ def merge_card_deaths(kills: list[dict], deaths: list[tuple[str, str, str, float
         seen.add(norm_name(name))
     out.sort(key=lambda k: k.get("t") or 0)
     return out
+
+
+def implied_deaths(kills: list[dict], loser: str, roster_names: list[str], last_alive: dict, t_end: float,
+                   winner: str, timer_of) -> list[dict]:
+    """全滅（elim）で終わったラウンドは負けたチームの 5 人全員が倒れている。キルフィードにもカードにも
+    出てこなかった人を、最後に生きていた時刻のすぐ後に「倒された（キラー不明）」として足す。"""
+    seen = {norm_name(k.get("victim")) for k in kills}
+    out = list(kills)
+    for name in roster_names:
+        if not name or norm_name(name) in seen or name[:1] in ("左", "右"):
+            continue
+        t = min(t_end, (last_alive.get(name) or t_end - 0.5) + 0.5)
+        out.append({"t": round(t, 1), "timer": timer_of(t), "killer": None, "killer_team": winner,
+                    "victim": name, "victim_team": loser, "weapon": None, "source": "implied"})
+        seen.add(norm_name(name))
+    out.sort(key=lambda k: k.get("t") or 0)
+    return out
+
+
+def unreliable_ult_slots(ult: np.ndarray, alive: np.ndarray, rounds, ready_th: float = 0.75) -> set[int]:
+    """ULT の読み取りが当てにならないカード（スロット 0..9）。
+
+    - ピストルラウンド（1・13）の開始直後は全員 ULT が空のはず。そこで「溜まっている」と読めるカードは、
+      枠がずれて別の明るい物（ミニマップの縁・ロゴなど）を見ている
+    - 試合を通して 8 割以上「溜まっている」カードも同じ
+    """
+    bad = set()
+    if ult is None or alive is None or not len(ult):
+        return bad
+    rounds = list(rounds or [])
+    for s in range(ult.shape[1]):
+        early = []
+        for r in rounds:
+            if getattr(r, "n", None) in (1, 13):
+                early += [float(ult[i, s]) for i in list(r.live)[:12] if alive[i, s]]
+        if len(early) >= 4 and float(np.median(early)) >= ready_th - 0.1:
+            bad.add(s)
+            continue
+        allv = [float(ult[i, s]) for r in rounds for i in r.live if alive[i, s]]
+        if len(allv) >= 40 and float(np.mean(np.array(allv) >= ready_th)) >= 0.8:
+            bad.add(s)
+    return bad
 
 
 def ult_events(ult: np.ndarray, alive: np.ndarray, idxs: list[int], ready_th: float = 0.75, empty_th: float = 0.45):
@@ -366,27 +410,72 @@ def _group_lines(dets):
     return [l[1] for l in lines]
 
 
+def _split_line(line, W):
+    """1 行の文字の塊を、いちばん広いすき間（武器アイコン）で左（倒した側）と右（倒された側）に分ける。
+    放送ではチームタグと名前が別の塊になる（「G2」「JAWGEMO」）ので、塊の端で選ぶと名前を取り違える。"""
+    line = sorted(line, key=lambda d: d[0][0])
+    gaps = [(line[i + 1][0][0] - line[i][0][2], i) for i in range(len(line) - 1)]
+    g, i = max(gaps)
+    return line[:i + 1], line[i + 1:], g
+
+
+def _snap_side(roster: Roster, parts, team: str | None = None):
+    """左右どちらかの塊（タグ＋名前など）から選手を決める。長い塊・最後の塊・全部つなげたもの・の順に試す。"""
+    texts = [d[1] for d in parts]
+    cands = [texts[-1], "".join(texts), max(texts, key=lambda x: len(norm_name(x)))] + texts[::-1]
+    for tx in cands:
+        nm, tm = roster.snap(tx, team)
+        if tm and (team is None or tm == team):
+            return nm, tm
+    return (texts[-1] if texts else None), None
+
+
 def parse_killfeed(dets, img, roster: Roster, book=None) -> list[dict]:
-    """キルフィード 1 枚の OCR 結果から [{killer, killer_team, victim, victim_team, weapon, box}]。"""
+    """キルフィード 1 枚の OCR 結果から [{killer, killer_team, victim, victim_team, weapon, box}]。
+
+    両側のチームが分かれば同じチーム同士の行（読み違い）は捨てる。片側しか読めなければ、
+    もう片側は相手チームの中から近い名前を選ぶ（それでも分からなければ名前は不明のまま、チームだけ入れる）。
+    """
     H, W = img.shape[:2]
+    teams = sorted({t for _, t in roster.by_norm.values() if t})
     rows = []
-    for line in _group_lines([d for d in dets if len(norm_name(d[1])) >= 2]):
+    for line in _group_lines([d for d in dets if len(norm_name(d[1])) >= 1]):
         if len(line) < 2:
             continue
-        line.sort(key=lambda d: d[0][0])
-        left, right = line[0], line[-1]
-        gap = right[0][0] - left[0][2]
-        if gap < 0.06 * W:                       # 間に武器アイコンがない＝キル行ではない
+        left, right, gap = _split_line(line, W)
+        if gap < 0.04 * W:                       # 間に武器アイコンがない＝キル行ではない
             continue
-        killer, kteam = roster.snap(left[1])
-        victim, vteam = roster.snap(right[1])
+        killer, kteam = _snap_side(roster, left)
+        victim, vteam = _snap_side(roster, right)
         if not kteam and not vteam:
             continue
+        other = lambda t: next((x for x in teams if x != t), None) if len(teams) == 2 else None
+        if kteam and vteam and kteam == vteam:
+            # 同じチーム同士：どちらかの読み違い。相手チームで読み直して、合う方を採る
+            k2 = _snap_side(roster, left, other(vteam))
+            v2 = _snap_side(roster, right, other(kteam))
+            if k2[1]:
+                killer, kteam = k2
+            elif v2[1]:
+                victim, vteam = v2
+            else:
+                continue
+        if not kteam and vteam:
+            kteam = other(vteam)
+            killer, _ = _snap_side(roster, left, kteam) if kteam else (killer, None)
+            if norm_name(killer) not in roster.by_norm:
+                killer = None
+        if not vteam and kteam:
+            vteam = other(kteam)
+            nm, tm = _snap_side(roster, right, vteam) if vteam else (victim, None)
+            if not tm:
+                continue                            # 倒された側が分からない行は数えない（重複の元になる）
+            victim = nm
         y0 = int(max(0, min(d[0][1] for d in line) - 4))
         y1 = int(min(H, max(d[0][3] for d in line) + 4))
         weapon = None
         if book is not None:
-            wx0, wx1 = int(left[0][2]), int(right[0][0])
+            wx0, wx1 = int(left[-1][0][2]), int(right[0][0][0])
             weapon, _ = book.classify(img[y0:y1, wx0:wx1], mirror=False, min_score=0.55)
         rows.append({"killer": killer, "killer_team": kteam, "victim": victim, "victim_team": vteam,
                      "weapon": weapon, "box": (y0, y1)})
@@ -414,7 +503,7 @@ def killfeed_bands(img, right: float = 0.55, white_v: int = 190, white_s: int = 
     """キルフィードの各行（白い名前の帯）の位置と、右側（倒された側の名前）の見た目。
 
     行の背景は半透明で、後ろのゲーム画面が動くと画像全体の差分は毎フレーム出てしまう。白い文字だけを見ると、
-    新しいキルが出たときだけ変わる。返り値 [(y0, y1, 32x6 の 2 値特徴)]（上から順）。
+    新しいキルが出たときだけ変わる。返り値 [(y0, y1, 64x10 の 2 値特徴)]（上から順）。
     """
     if img is None or img.size == 0:
         return []
@@ -429,28 +518,31 @@ def killfeed_bands(img, right: float = 0.55, white_v: int = 190, white_s: int = 
             while y < H and (rows[y] or (y + 2 < H and (rows[y + 1] or rows[y + 2]))):
                 y += 1
             if 4 <= y - y0 <= max(40, 0.25 * H):         # 文字 1 行ぶんの高さだけ（明るい背景の塊は除く）
-                feat = cv2.resize(wm[y0:y].astype(np.uint8) * 255, (32, 6), interpolation=cv2.INTER_AREA) > 96
+                feat = cv2.resize(wm[y0:y].astype(np.uint8) * 255, (64, 10), interpolation=cv2.INTER_AREA) > 96
                 bands.append((y0, y, feat))
         y += 1
     return bands
 
 
-def _bands_changed(cur, prev, tol: float = 0.2) -> bool:
-    """新しい行（以前のどの行とも見た目が違う行）があれば True。行が消えただけなら False。"""
+def _bands_changed(cur, prev, tol: float = 0.08) -> bool:
+    """新しい行（以前のどの行とも見た目が違う行）があるか、行の数が増えたら True。行が消えただけなら False。"""
     if not cur:
         return False
+    if len(cur) > len(prev):
+        return True
     for _, _, f in cur:
-        if not any(float(np.mean(f != g)) <= tol for _, _, g in prev):
+        if not any(f.shape == g.shape and float(np.mean(f != g)) <= tol for _, _, g in prev):
             return True
     return False
 
 
 def kills_in_round(store: FrameStore, idxs: list[int], times: list[float], labels: list[str], roster: Roster,
-                   book, out_path: Path, min_gap: float = 0.9) -> tuple[list[dict], Path | None]:
+                   book, out_path: Path, min_gap: float = 0.4, every: float = 2.0) -> tuple[list[dict], Path | None]:
     """ライブ区間のキルフィードから、新しく出た行をキルとして記録する。
 
-    OCR（文字の検出＋認識）は重いので、白い名前の帯に「新しい行」が出たフレームだけで行う（同じ行が続く間や、
-    行が消えただけのときは読まない）。帯が 1 つも見つからない放送では、見た目の変化＋2 秒おきに読む。
+    OCR（文字の検出＋認識）は、白い名前の帯に「新しい行」が出たフレームと、行が映っている間は every 秒おきに行う
+    （キルフィードの行は 4〜5 秒残るので、変化を見落としても次の定期の読みで拾える）。
+    帯が 1 つも見つからない放送では、見た目の変化＋2 秒おきに読む。
     """
     events, crops, seen, victims = [], [], {}, set()
     frames = []
@@ -460,26 +552,37 @@ def kills_in_round(store: FrameStore, idxs: list[int], times: list[float], label
             frames.append((j, img, killfeed_bands(img)))
     use_bands = any(b for _, _, b in frames)
     prev_bands, prev_small, last_t, pending = [], None, -1e9, False
+    todo = []
     for j, img, bands in frames:
         t = times[j]
         if use_bands:
             if _bands_changed(bands, prev_bands):
                 pending = True
-            if not pending or t - last_t < min_gap:
+            prev_bands = bands
+            due = bool(bands) and t - last_t >= every
+            if not ((pending and t - last_t >= min_gap) or due):
                 continue
         else:
             small = cv2.resize(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), (96, 64))
             if prev_small is not None and (float(np.mean(cv2.absdiff(small, prev_small))) < 1.5 or t - last_t < 2.0):
                 continue
             prev_small = small
-        pending, last_t, prev_bands = False, t, bands
-        for row in parse_killfeed(_ocr().detect(img, min_score=0.3), img, roster, book):
-            key = (norm_name(row["killer"]), norm_name(row["victim"]))
-            if (key in seen and t - seen[key] < 12) or norm_name(row["victim"]) in victims:
+        pending, last_t = False, t
+        todo.append((j, img))
+    ocr = _ocr()
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        dets = list(ex.map(lambda x: ocr.detect(x[1], min_score=0.3), todo))
+    for (j, img), det in zip(todo, dets):
+        t = times[j]
+        for row in parse_killfeed(det, img, roster, book):
+            vkey = norm_name(row["victim"])
+            key = (norm_name(row["killer"]), vkey)
+            if (key in seen and t - seen[key] < 12) or vkey in victims:
                 seen[key] = t
                 continue
             seen[key] = t
-            victims.add(norm_name(row["victim"]))
+            victims.add(vkey)
             y0, y1 = row.pop("box")
             crops.append(img[y0:y1, :])
             events.append({"t": round(t, 1), "timer": labels[j], **row})

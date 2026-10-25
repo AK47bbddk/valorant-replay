@@ -56,3 +56,24 @@ def test_fit_recovers_rotation_scale_mirror(mirror, deg, scale):
 def test_fit_without_material():
     T = M.fit([], [(0.5, 0.5)] * 5, {"callouts": [], "spawns": {}}, 1.0, {})
     assert not T["ok"] and "材料不足" in T["msg"]
+
+
+def test_fit_mask_on_real_broadcast_minimap():
+    """Champions 2026 の放送のミニマップ（Split、90 度回転して表示）の床の形にコールアウトが重なる。"""
+    import json
+    from pathlib import Path
+
+    import cv2
+    fx = Path(__file__).parent / "fixtures"
+    m = json.loads((fx / "split_callouts.json").read_text())
+    calls = [{"name": n, "super": s, "x": y * m["xMultiplier"] + m["xScalarToAdd"],
+              "y": x * m["yMultiplier"] + m["yScalarToAdd"]} for n, s, x, y in m["callouts"]]
+    mask = M.map_mask(cv2.imread(str(fx / "minimap_split_riot.jpg")))
+    assert mask is not None and 0.2 < mask.mean() < 0.45
+    T = M.fit_mask(mask, {"callouts": calls})
+    assert T["ok"] and not T["mirror"], T["msg"]
+    placed = {(c["super"], c["name"]): c for c in M.place(T, calls)}
+    a, b = placed[("A", "Site")], placed[("B", "Site")]
+    assert abs(a["x"] - 0.86) < 0.06 and abs(a["y"] - 0.34) < 0.06       # 画面右の「A」の四角
+    assert abs(b["x"] - 0.24) < 0.06 and abs(b["y"] - 0.34) < 0.06       # 画面左の「B」の四角
+    assert placed[("Defender Side", "Spawn")]["y"] < 0.3 < 0.7 < placed[("Attacker Side", "Spawn")]["y"]

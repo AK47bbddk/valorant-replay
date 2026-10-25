@@ -43,4 +43,18 @@ def test_build_decks_from_warehouse(tmp_path, monkeypatch):
     assert any(n.startswith("comp_Split_") for n in names)
     page = (out / next(n for n in names if n.startswith("team_G2"))).read_text("utf-8")
     assert "Strategy" in page and "strong point" in page and "Sets" in page and "How to Retake" in page
+    assert "初動の配置" in page and "MID 3 デフォルト" in page
     assert (out / "index.html").exists()
+
+
+def test_setup_clusters_group_similar_callouts():
+    def row(name, calls, win=True):
+        return {"setup": {"name": name, "shape": "x", "callouts": calls}, "win": win, "buy": "Buy",
+                "plant_site": None, "first_fight": "A", "yt": None, "opp_tag": "X", "n": 1}
+    rows = [row("MID 2", ["A Site", "A Site", "Mid Top", "Mid Vent", "B Site"]),
+            row("MID 2", ["A Site", "A Site", "Mid Top", "Mid Vent", "B Back"]),
+            row("MID 2", ["A Back", "A Lobby", "Mid Bottom", "Mid Mail", "B Garage"], False),
+            row("A スタック", ["A Site", "A Site", "A Main", "Mid Top", "B Site"])]
+    cl = deck.setup_clusters(rows)
+    sizes = sorted((g["name"], g["n"]) for g in cl)
+    assert ("A スタック", 1) in sizes and ("MID 2 #1", 2) in sizes and ("MID 2 #2", 1) in sizes

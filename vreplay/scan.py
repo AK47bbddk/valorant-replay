@@ -96,11 +96,11 @@ def scan_chunk(job: ScanJob) -> dict:
         panel_boxes += [("", side, panel_bbox(job.geo, side)) for side in ("L", "R")]
     if job.panel_geo and job.panel_geo != job.geo:
         panel_boxes += [("_buy", side, panel_bbox(job.panel_geo, side)) for side in ("L", "R")]
-    from .extract import _bands_changed, killfeed_bands
+    from .extract import killfeed_bands
     import time as _time
     out = {k: [] for k in ("idx", "t", "band", "timer_txt", "sl_txt", "sr_txt", "round_txt", "alive", "ult", "red")}
     batch = []
-    prev_kf, kf_bands, kf_last, kf_seen_bands = None, [], -1e9, False
+    prev_kf, kf_last, kf_seen_bands = None, -1e9, False
     prof = {"decode": 0.0, "ocr": 0.0, "features": 0.0, "save": 0.0}
     # パネル（カード）の保存は、装備表の窓がある（2 パス目）ときは「開始 9 秒前〜開始 13 秒後」と 5 秒おきだけ
     panel_windows = tuple((a, b + 10.0) for a, b in job.table_windows)
@@ -152,13 +152,12 @@ def scan_chunk(job: ScanJob) -> dict:
         if not job.killfeed_on_change:
             save_kf = True
         else:
-            # 白い名前の行に新しい行が出たときだけ保存。行が見つからない放送では見た目の変化＋2 秒おき
+            # 行（白い名前の帯）が 1 つでも映っていれば毎フレーム保存する（似た長さの名前の新しい行を
+            # 「変化なし」と見落とさないため。行が無いフレームは保存しない）。行が見つからない放送では見た目の変化＋2 秒おき
             bands = killfeed_bands(kf)
             kf_seen_bands = kf_seen_bands or bool(bands)
             if bands or kf_seen_bands:
-                save_kf = _bands_changed(bands, kf_bands)
-                if save_kf:
-                    kf_bands = bands
+                save_kf = bool(bands)
             else:
                 ch, prev_kf = _changed(prev_kf, kf)
                 save_kf = ch and t - kf_last >= 2.0

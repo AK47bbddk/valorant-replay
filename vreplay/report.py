@@ -147,7 +147,9 @@ def _map_section(rep: dict, base: Path) -> str:
         if rs.get("tags"):
             reason = (f'<div class="reason"><b>{_e(S.reason_icon(r))} 勝因：{_e("・".join(rs["tags"][:3]))}</b>'
                       + "".join(f'<br>{_e(x)}' for x in rs.get("lines") or [])
-                      + (f'<br><span class="sub">{_e(rs["caveat"])}</span>' if rs.get("caveat") else "") + '</div>')
+                      + (f'<br><span class="sub">{_e(rs["caveat"])}</span>' if rs.get("caveat") else "")
+                      + (f'<br><span class="sub">初動：{_e(S.setup_line(rep, r))}</span>' if S.setup_line(rep, r) else "")
+                      + '</div>')
         rt = r.get("tactics") or {}
         site = (f'　推定サイト <b>{_e(rt["site"])}</b>'
                 f'（{float(rt.get("site_conf") or 0):.0%}）') if rt.get("site") else ""

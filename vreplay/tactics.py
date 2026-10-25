@@ -331,6 +331,7 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
 
     samples: list[dict] = []
     dots: list[dict] = []
+    raw: list = []
     bgs: list[np.ndarray] = []
     aspect = 1.0
     for t, mm in scan_source():
@@ -341,7 +342,24 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         aspect = w / max(1, h)
         if len(bgs) < 40 and (not bgs or len(samples) % 7 == 0) and (not bgs or bgs[0].shape == mm.shape):
             bgs.append(mm.copy())
-        found = detect_dots(mm, min_area, max_area)
+        raw.append((t, r, detect_dots(mm, min_area, max_area, per_color=15)))
+    if not raw:
+        return None
+    # 背景：点や UI の動く部分を消すため、何枚かの中央値
+    background = np.median(np.stack(bgs), axis=0).astype(np.uint8) if len(bgs) >= 3 else bgs[0]
+    if bg_path is not None:
+        cv2.imwrite(str(bg_path), background, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    # 床（歩ける場所）の 2 値画像。床から離れた点（UI・背景のちらつき）は捨てる
+    mask = MM.map_mask(background)
+    near = None
+    if mask is not None:
+        dist = cv2.distanceTransform((~mask).astype(np.uint8), cv2.DIST_L2, 3)
+        near = dist <= max(3.0, 0.02 * mask.shape[0])
+    for t, r, found in raw:
+        if near is not None:
+            hh, ww = near.shape
+            found = [d for d in found if near[min(hh - 1, int(d["y"] * hh)), min(ww - 1, int(d["x"] * ww))]]
+        found = ([d for d in found if d["color"] == "warm"][:5] + [d for d in found if d["color"] == "cool"][:5])
         warm = [d for d in found if d["color"] == "warm"]
         cool = [d for d in found if d["color"] == "cool"]
         samples.append({"t": t, "n": int(r["n"]), "side1": _canon(r.get("side1")),
@@ -351,14 +369,20 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
                          "color": d["color"], "x": d["x"], "y": d["y"]})
     if not samples:
         return None
-    # 背景：点や UI の動く部分を消すため、何枚かの中央値
-    background = np.median(np.stack(bgs), axis=0).astype(np.uint8) if len(bgs) >= 3 else bgs[0]
-    if bg_path is not None:
-        cv2.imwrite(str(bg_path), background, [cv2.IMWRITE_JPEG_QUALITY, 92])
 
     start_by_n = {int(r["n"]): float(r["start"]) for r in rlist}
-    T = MM.fit(samples, [(d["x"], d["y"]) for d in dots
-                         if d["t"] >= start_by_n.get(d["n"], 0.0) + 3], meta, aspect, start_by_n)
+    # まず地形（床の形）でコールアウトを重ねる。だめなら試合中の点で合わせる
+    T = MM.fit_mask(mask, meta, bg=background) if mask is not None else {"ok": False, "msg": "床が見つかりません"}
+    if T.get("ok"):
+        placed = MM.place(T, meta["callouts"])
+        warm1, votes = _warm_team1(samples, placed, start_by_n)
+        T["warm1"] = warm1
+        T["msg"] += f"・暖色={'チーム1' if warm1 else 'チーム2'}（スポーンで {votes}）"
+    else:
+        T2 = MM.fit(samples, [(d["x"], d["y"]) for d in dots
+                              if d["t"] >= start_by_n.get(d["n"], 0.0) + 3], meta, aspect, start_by_n)
+        T2["msg"] = f"{T.get('msg', '')}／{T2.get('msg', '')}"
+        T = T2
     if T.get("ok"):
         placed = MM.place(T, meta["callouts"])
         warm1, k, score, cal_msg = T["warm1"], 0, 1.0 - T["confidence"], T["msg"]
@@ -449,6 +473,9 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
                 cnts = min(near, key=lambda x: x[0])[1]
                 tl[label] = {str(tm): dict(c) for tm, c in cnts.items() if c}
         rt["timeline"] = tl
+        rt["setups"] = {str(tm): su for tm in (1, 2)
+                        if (su := setup_of([p for p in positions if p[0] == n and p[4] == tm], st,
+                                           ATTACK if (rt["side1"] == ATTACK) == (tm == 1) else DEFENSE))}
         plant = rt.get("plant")
         rt["plant_site"] = None
         if plant is not None:
@@ -493,6 +520,101 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         "rounds": {str(n): v for n, v in sorted(round_tac.items())},
         "positions": positions,
     }
+
+
+CORE_ZONES = ("A", "Mid", "B", "C")
+
+
+def setup_name(zones: dict, side: str | None) -> str:
+    """初動（開始 6〜20 秒）のゾーン別人数から、配置の名前。"""
+    r = {k: int(v) for k, v in zones.items() if k in CORE_ZONES and v}
+    if not r:
+        return "不明"
+    top_z, top_n = max(r.items(), key=lambda kv: (kv[1], kv[0] != "Mid"))
+    many = [z for z, v in r.items() if v >= 2]
+    if side == ATTACK:
+        if top_n >= 4:
+            return f"{top_z} 寄せ" if top_z != "Mid" else "MID 寄せ"
+        if r.get("Mid", 0) >= 3:
+            return "MID 3 デフォルト"
+        if top_n >= 3:
+            return f"{top_z} 寄りデフォルト"
+        if len(many) >= 2:
+            return f"{'/'.join(sorted(many))} 分割"
+        return "散開デフォルト"
+    if top_n >= 3 and top_z != "Mid":
+        return f"{top_z} スタック"
+    if r.get("Mid", 0) >= 3:
+        return "MID 3"
+    if r.get("Mid", 0) == 2:
+        return "MID 2"
+    if r.get("Mid", 0) == 0 and len([z for z in r if z != "Mid"]) >= 2:
+        return "サイト守り（MID なし）"
+    return "バランス"
+
+
+def setup_of(ps: list, start: float, side: str | None, t0: float = 6.0, t1: float = 20.0) -> dict | None:
+    """1 チーム・1 ラウンドの初動の配置。点がいちばん多く見えたサンプルのコールアウトとゾーン。"""
+    by_t: dict[float, list] = {}
+    for p in ps:
+        e = float(p[1]) - start
+        if t0 <= e <= t1:
+            by_t.setdefault(float(p[1]), []).append(p)
+    if not by_t:
+        return None
+    t, arr = max(by_t.items(), key=lambda kv: (min(len(kv[1]), 5), kv[0]))
+    if len(arr) < 3:
+        return None
+    zones = Counter(p[6] for p in arr if p[6] and p[6] != "?")
+    calls = sorted(str(p[7]) for p in arr if p[7] and p[7] != "?")
+    shape = " ".join(f"{z}{zones[z]}" for z in CORE_ZONES if zones.get(z))
+    return {"name": setup_name(zones, side), "shape": shape, "zones": dict(zones), "callouts": calls,
+            "t": round(t - start, 1), "side": side, "n": len(arr)}
+
+
+def fight_zone(tac: dict, n: int, t: float, window: float = 4.0) -> str | None:
+    """t 秒（キルの時刻）の直前に、両チームの点がいちばん近づいていた場所のゾーン（初動のファイトの場所）。"""
+    ps = [p for p in tac.get("positions") or [] if p[0] == n and t - window <= float(p[1]) <= t + 0.6]
+    best = None
+    for tt in sorted({float(p[1]) for p in ps}, reverse=True):
+        a = [p for p in ps if float(p[1]) == tt and p[4] == 1]
+        b = [p for p in ps if float(p[1]) == tt and p[4] == 2]
+        for p in a:
+            for q in b:
+                d = math.hypot(float(p[2]) - float(q[2]), float(p[3]) - float(q[3]))
+                if best is None or d < best[0]:
+                    best = (d, p, q)
+        if best:
+            break
+    if not best or best[0] > 0.25:
+        return None
+    zs = [z for z in (best[1][6], best[2][6]) if z in CORE_ZONES]
+    return zs[0] if zs else None
+
+
+def _warm_team1(samples: list[dict], placed: list[dict], starts: dict) -> tuple[bool, str]:
+    """ラウンド開始直前、攻撃側の色の重心は攻撃側スポーンに近い。暖色がチーム1かを多数決で決める。"""
+    sp = {("攻" if "attacker" in c["super"].lower() else "防"): (c["x"], c["y"]) for c in placed
+          if c["name"].lower() == "spawn"}
+    if "攻" not in sp:
+        return True, "材料なし"
+    ax, ay = sp["攻"]
+    yes = no = 0
+    for s in samples:
+        st = starts.get(s["n"])
+        if st is None or not (st - 6 <= s["t"] <= st + 2) or not s.get("warm") or not s.get("cool"):
+            continue
+        dw = math.hypot(s["warm"][0] - ax, s["warm"][1] - ay)
+        dc = math.hypot(s["cool"][0] - ax, s["cool"][1] - ay)
+        warm_is_atk = dw < dc
+        team1_atk = s.get("side1") == ATTACK
+        if s.get("side1") not in (ATTACK, DEFENSE):
+            continue
+        if warm_is_atk == team1_atk:
+            yes += 1
+        else:
+            no += 1
+    return yes >= no, f"{max(yes, no)}/{yes + no}"
 
 
 def _fit_overlay(bg: np.ndarray, placed: list[dict], dots: list[dict], path: Path) -> Path:

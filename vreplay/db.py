@@ -124,7 +124,8 @@ CREATE INDEX IF NOT EXISTS idx_matches_date ON matches(dt_jst);
 # プレイブック用に後から足した列（ラウンドの開始・設置の時刻、設置サイト、勝因、タイマーの節目ごとの配置など）
 ROUND_EXTRA = [("t_drop", "REAL"), ("plant_t", "REAL"), ("plant_site", "TEXT"), ("yt_url", "TEXT"),
                ("eco1", "TEXT"), ("eco2", "TEXT"), ("reason_main", "TEXT"), ("reason_json", "TEXT"),
-               ("timeline_json", "TEXT"), ("kill_sources_json", "TEXT")]
+               ("timeline_json", "TEXT"), ("kill_sources_json", "TEXT"),
+               ("setups_json", "TEXT"), ("first_fight", "TEXT")]
 
 
 def connect(path: str | Path) -> sqlite3.Connection:
@@ -319,14 +320,15 @@ def ingest_report(conn: sqlite3.Connection, rep: dict, status: str | None = None
         conn.execute(
             """UPDATE rounds SET t_drop=?, plant_t=?, plant_site=?, yt_url=?, eco1=COALESCE(?, eco1),
                                  eco2=COALESCE(?, eco2), reason_main=?, reason_json=?, timeline_json=?,
-                                 kill_sources_json=?
+                                 kill_sources_json=?, setups_json=?, first_fight=?
                WHERE match_id=? AND map_order=? AND n=?""",
             (rr.get("t_drop"), rr.get("plant_t"), tac.get("plant_site"), rr.get("yt_url"),
              rr.get("eco1"), rr.get("eco2"), reason.get("main"),
              json.dumps(reason, ensure_ascii=False) if reason else None,
              json.dumps(tac.get("timeline"), ensure_ascii=False) if tac.get("timeline") else None,
              json.dumps(rr.get("kill_sources"), ensure_ascii=False) if rr.get("kill_sources") else None,
-             mid, order, rr.get("n")))
+             json.dumps(tac.get("setups"), ensure_ascii=False) if tac.get("setups") else None,
+             tac.get("first_fight"), mid, order, rr.get("n")))
     for p in rep.get("players") or []:
         team = p.get("team")
         if team in (1, 2):

@@ -187,6 +187,9 @@ def records(rep: dict) -> list[dict]:
                 "reason_tags": (reason.get("tags") or []) if won else [],
                 "loss_tags": (reason.get("tags") or []) if not won else [],
                 "yt": rr.get("yt_url"), "uv": uv,
+                "setup": (rt.get("setups") or {}).get(str(no)) if aligned else None,
+                "opp_setup": (rt.get("setups") or {}).get(str(3 - no)) if aligned else None,
+                "first_fight": rt.get("first_fight") if aligned else None,
             })
     return out
 
@@ -498,6 +501,52 @@ def defaults(rows: list[dict], mark: str = "1:15", k: int = 5) -> list[dict]:
     return out[:k]
 
 
+def _jaccard(a: list[str], b: list[str]) -> float:
+    ca, cb = Counter(a), Counter(b)
+    inter = sum((ca & cb).values())
+    union = sum((ca | cb).values())
+    return inter / union if union else 0.0
+
+
+def setup_clusters(rows: list[dict], th: float = 0.5, k: int = 6) -> list[dict]:
+    """初動の配置（ラウンドごとのタグ）を、コールアウトの重なり（Jaccard）で似たものどうしまとめる。
+    まず同じ名前（「MID 3」「A スタック」…）で分け、その中でコールアウトが近いものを 1 つの型にする。"""
+    groups: list[dict] = []
+    items = [r for r in rows if r.get("setup") and r["setup"].get("callouts")]
+    by_name = defaultdict(list)
+    for r in items:
+        by_name[r["setup"]["name"]].append(r)
+    for name, rs in by_name.items():
+        local: list[dict] = []
+        for r in sorted(rs, key=lambda r: -len(r["setup"]["callouts"])):
+            cs = r["setup"]["callouts"]
+            g = max(local, key=lambda g: _jaccard(cs, g["rep"]), default=None)
+            if g is not None and _jaccard(cs, g["rep"]) >= th:
+                g["rows"].append(r)
+            else:
+                local.append({"name": name, "rep": cs, "rows": [r]})
+        groups += local
+    out = []
+    for g in groups:
+        rs = g["rows"]
+        calls = Counter(c for r in rs for c in set(r["setup"]["callouts"]))
+        shapes = Counter(r["setup"]["shape"] for r in rs)
+        out.append({"name": g["name"], "n": len(rs), "w": sum(r["win"] for r in rs), "rows": rs,
+                    "shape": shapes.most_common(1)[0][0],
+                    "callouts": [c for c, n in calls.most_common(6) if n >= max(1, len(rs) * 0.4)],
+                    "buys": Counter(r["buy"] for r in rs),
+                    "sites": Counter(r["plant_site"] for r in rs if r["plant_site"]),
+                    "fights": Counter(r["first_fight"] for r in rs if r.get("first_fight"))})
+    out.sort(key=lambda g: (-g["n"], g["name"]))
+    # 同じ名前の型が複数あれば番号をつける
+    seen, dup = Counter(), Counter(g["name"] for g in out)
+    for g in out:
+        if dup[g["name"]] > 1:
+            seen[g["name"]] += 1
+            g["name"] = f"{g['name']} #{seen[g['name']]}"
+    return out[:k]
+
+
 def sets(rows: list[dict], k: int = 8) -> list[dict]:
     """攻めの設置ラウンドを「サイト × 攻め方」でまとめる。"""
     groups: dict[str, list] = defaultdict(list)
@@ -796,8 +845,25 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
                              f'<div class="cols"><div><ul class="plain">{ul}</ul>{_zone_html(zt)}</div>'
                              f'<div class="cols" style="grid-template-columns:1fr 1fr;gap:12px">{"".join(figs) or "<p class=empty>位置の画像はまだ作れません</p>"}</div></div>',
                              foot))
+        # 初動の配置（ラウンドごとのタグを、似たものどうしまとめた型）
+        cl = setup_clusters(srows)
+        if cl:
+            cards = []
+            for g in cl:
+                buys = "・".join(f"{b} {c}" for b, c in g["buys"].most_common())
+                fights = "、".join(f"{z} {c}" for z, c in g["fights"].most_common(3))
+                sites = "、".join(f"{z} {c}" for z, c in g["sites"].most_common())
+                cards.append(f'<div class="card"><h3>{_e(g["name"])}</h3>'
+                             f'<p>{g["w"]}/{g["n"]} 勝（{_pct(_rate(g["w"], g["n"]))}）・{_e(g["shape"])}</p>'
+                             f'<p class="sub">{_e("・".join(g["callouts"]) or "-")}</p>'
+                             f'<p class="sub">{_e(buys)}' + (f'／初動のファイト：{_e(fights)}' if fights else "")
+                             + (f'／設置：{_e(sites)}' if side == ATTACK and sites else "") + '</p>'
+                             f'<p class="sub">{_ex_links(g["rows"])}</p></div>')
+            slides.append(_slide(en, "初動の配置（似た配置をまとめた型）", f'<div class="cols3">{"".join(cards)}</div>'
+                                 '<p class="sub">開始 6〜20 秒にミニマップで見えた位置。名前は人数の偏りから自動でつけ、'
+                                 'コールアウトの重なりが半分以上のラウンドを 1 つの型にまとめています。</p>', foot))
         # デフォルト
-        ds = defaults(srows)
+        ds = [] if cl else defaults(srows)
         if ds:
             cards = []
             for g in ds:

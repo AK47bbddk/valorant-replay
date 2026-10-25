@@ -49,7 +49,13 @@ def report(mid, t1, t2, seed, map_name="Split", strong_retake=None):
                        "t_drop": t0, "plant_t": t0 + plant_e if planted else None, "duration": "1:20",
                        "kills": kills, "ults": ults, "yt_url": f"https://youtu.be/x?t={int(t0)}",
                        "tactics": {"aligned": True, "timeline": tl, "plant_site": site if planted else None,
-                                   "plant_zones": pz},
+                                   "plant_zones": pz, "first_fight": rnd.choice(["A", "Mid", "B"]),
+                                   "setups": {str(def_no): {"name": "MID 2", "shape": "A2 Mid2 B1",
+                                                            "callouts": ["A Site", "A Site", "Mid Top", "Mid Vent",
+                                                                         "B Site"], "side": "防衛"},
+                                              str(atk_no): {"name": "MID 3 デフォルト", "shape": "A1 Mid3 B1",
+                                                            "callouts": ["A Main", "Mid Mail", "Mid Mail",
+                                                                         "Mid Bottom", "B Lobby"], "side": "攻撃"}}},
                        "reason": {"tags": ["1ピック"], "main": "1ピック"}, "notes": [], "weapons": {}})
         trounds[str(n)] = {"start": t0}
         for k in range(5):

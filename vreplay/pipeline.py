@@ -157,8 +157,14 @@ def calibrate(cfg: dict, path: Path, md: vlr.MapData, roster, n: int = 30, log=p
     buy_frames = [f for f, v in zip(frames, tvals) if v is not None and v <= buy_max + 2]
 
     cards = find_cards(_even(live_frames) or _even(frames))
+    if cards and md.players:
+        cards, moved = align_cards_by_names(cards, live_frames or frames, roster, W, H)
+        if moved:
+            msg.append(f"カードの段を選手名で補正（{moved}）")
     geo = card_geometry(cards, W, H) if cards else None
     cards_buy = find_cards(_even(buy_frames)) if len(buy_frames) >= 4 else None
+    if cards_buy and md.players:
+        cards_buy, _ = align_cards_by_names(cards_buy, buy_frames, roster, W, H)
     geo_buy = card_geometry(cards_buy, W, H) if cards_buy else geo
     msg.append("カード位置 自動検出" if geo else "カード位置 見つからず（武器・ULT は無効）")
     if geo and geo_buy and geo != geo_buy:
@@ -169,6 +175,37 @@ def calibrate(cfg: dict, path: Path, md: vlr.MapData, roster, n: int = 30, log=p
             roi["killfeed"] = kf
             msg.append(f"キルフィード 自動検出（{len(hits)} 行）")
     return roi, geo, geo_buy, frames, "／".join(msg), (W, H, dur)
+
+
+def align_cards_by_names(cards: dict, frames: list, roster, W: int, H: int, k: int = 6):
+    """カード 5 枚の縦位置は ULT アイコンの丸から等間隔で当てはめるが、4 枚しか見つからないと
+    1 段ずれることがある（いちばん上のカードが「左1」のまま名前が読めず、ULT も誤検出する）。
+    -1・0・+1 段ずらした位置で名前欄を OCR し、VLR の選手名にいちばん多く合う位置を選ぶ。"""
+    from .extract import _ocr
+    from .layout import card_geometry
+    if not frames:
+        return cards, ""
+    sample = frames[:: max(1, len(frames) // k)][:k]
+    out, moved = dict(cards), []
+    for side in ("L", "R"):
+        c = cards.get(side)
+        if not c:
+            continue
+        best = None
+        for sh in (0, -1, 1):
+            cc = {**c, "ys": [y + sh * c["s"] for y in c["ys"]]}
+            if min(cc["ys"]) - 0.7 * c["s"] < 0 or max(cc["ys"]) + 0.3 * c["s"] > H:
+                continue
+            geo = card_geometry({side: cc}, W, H)[side]
+            crops = [f[g["name"][1]:g["name"][3], g["name"][0]:g["name"][2]] for f in sample for g in geo]
+            res = _ocr().rec([x for x in crops if x is not None and x.size])
+            hits = sum(1 for tx, _ in res if tx and roster.snap(tx)[1])
+            if best is None or hits > best[0]:
+                best = (hits, sh, cc)
+        if best and best[1] != 0 and best[0] > 0:
+            out[side] = best[2]
+            moved.append(f"{side} {'上' if best[1] < 0 else '下'}へ 1 段")
+    return out, "・".join(moved)
 
 
 # ---------------------------------------------------------------- 名前（カードの選手）
@@ -405,6 +442,7 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                         "sites": rt.get("sites"), "samples": rt.get("samples"), "dots": rt.get("dots"),
                         "callouts": dict(top), "timeline": rt.get("timeline") or {},
                         "plant_site": rt.get("plant_site"), "plant_zones": rt.get("plant_zones"),
+                        "setups": rt.get("setups") or {},
                         "aligned": bool(tac.get("aligned")),
                     }
                 bits = "・".join(f"{x['site']}{x['count']}" for x in (tac.get("sites") or [])[:3])
@@ -447,6 +485,11 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                     elif imgs:
                         log("    装備表は見つかりませんでした（武器は試合中のカードから読みます）")
             return tb_state["table"]
+
+        bad_ult = X.unreliable_ult_slots(obs["ult"], obs["alive"], det)
+        if bad_ult:
+            log(f"    ULT の読み取りが当てにならないカード {','.join(('L' if s_ < 5 else 'R') + str(s_ % 5 + 1) for s_ in sorted(bad_ult))}"
+                "（ピストルラウンドでも溜まって見える）→ このカードの ULT は出しません")
 
         def work(r):
             rr = by_n.get(r.n)
@@ -537,12 +580,29 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                     return labels[j] if j is not None else None
                 kills = X.merge_card_deaths(kills, [(names[s_][0], names[s_][1], other.get(names[s_][1]), tt)
                                                     for s_, tt in deaths if s_ < len(names)], timer_of)
-            rr["kill_sources"] = {"feed": n_feed, "card": len(kills) - n_feed}
+            n_card = len(kills) - n_feed
+            if rr.get("how") == "elim" and rr.get("winner") and r.live:
+                # 全滅ラウンドは負けた 5 人全員が倒れている：どこにも出なかった人を補う
+                loser = m.team2 if rr["winner"] == m.team1 else m.team1
+                roster_l = [p.name for p in md.players if (p.team == 1) == (loser == m.team1)]
+                last_alive = {}
+                if geo and names:
+                    for s_, (nm_, tm_) in enumerate(names[:10]):
+                        al = [t[i] for i in r.live if obs["alive"][i, s_]]
+                        if al:
+                            last_alive[nm_] = float(al[-1])
+                kills = X.implied_deaths(kills, loser, roster_l, last_alive, float(t[r.live[-1]]), rr["winner"],
+                                         timer_of if geo and names else (lambda tt: None))
+            rr["kill_sources"] = {"feed": n_feed, "card": n_card, "implied": len(kills) - n_feed - n_card}
             for k in kills:
                 k["weapon_ja"] = wja(k["weapon"]) if k.get("weapon") else None
             a["kill_strip"] = str(strip) if strip else None
             if geo and r.live:
                 evs, ready0 = X.ult_events(obs["ult"], obs["alive"], r.live)
+                # ピストルラウンド（1・13）は ULT が溜まっていることはまず無い。読み取りが当てにならないカードも除く
+                pistol = r.n in (1, 13)
+                evs = [(s_, j) for s_, j in evs if s_ not in bad_ult and not pistol]
+                ready0 = [s_ for s_ in ready0 if s_ not in bad_ult and not pistol]
                 rr["ults"] = [{"t": round(t[r.live[j]], 1), "timer": labels[j], "player": names[s_][0],
                                "slot": f"{'L' if s_ < 5 else 'R'}{s_ % 5 + 1}",
                                "team": names[s_][1], "agent": agent.get(names[s_][0])}
@@ -571,11 +631,19 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
         log(f"    ラウンドごとの素材 {len(det)} ラウンド {perf.fmt_seconds(st_assets['seconds'])}"
             f"｜{perf.fmt_resources(st_assets['resources'])}")
         found = {r.n for r in det}
+        if rep.get("tactics", {}).get("aligned"):
+            from .tactics import fight_zone
+            for rr in rep["rounds"]:
+                ks = [k for k in rr.get("kills") or [] if k.get("t") is not None]
+                if ks and rr.get("tactics") is not None:
+                    rr["tactics"]["first_fight"] = fight_zone(rep["tactics"], rr["n"], float(ks[0]["t"]))
         add_reasons(rep)
         ks = [rr.get("kill_sources") or {} for rr in rep["rounds"]]
         n_feed, n_card = sum(k.get("feed", 0) for k in ks), sum(k.get("card", 0) for k in ks)
+        n_imp = sum(k.get("implied", 0) for k in ks)
         if n_feed or n_card:
-            stats["kills_note"] = f"キル キルフィード {n_feed}・カードで補完 {n_card}"
+            stats["kills_note"] = (f"キル キルフィード {n_feed}・カードで補完 {n_card}"
+                                   + (f"・全滅から補完 {n_imp}" if n_imp else ""))
         for rr in rep["rounds"]:
             if rr["n"] not in found:
                 rr["notes"].append("動画からこのラウンドを特定できませんでした（放送が別画面だった可能性）")

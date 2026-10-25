@@ -10,7 +10,9 @@
 - ポストプラント成功（攻撃側が設置後に守り切る：爆破・全滅）
 - ラッシュ（攻撃側が開始 30 秒以内に設置、または 20 秒以内に 2 キル以上で押し切る）
 - カウンター（守備側が開始 20 秒以内に先手のキルを取り、設置させずに勝つ）
-- 1ピック（勝ったチームが最初のキル）／先制されて逆転
+- 1ピック（勝ったチームが最初のキル）／先制されて逆転。ミニマップで場所が分かれば「初動Aファイト勝ち」など
+- オペレーターで1ピック／トレード勝ち（倒された 4 秒以内に倒し返す ×2 以上）／マルチキル（3〜4 キル）
+- エントリー成功（攻撃側が先制した場所にそのまま設置）／ULTリテイク／ULTで攻め切り／フォースバイ勝ち
 - エコ勝ち（装備で劣る側の勝利）／アンチエコ（装備で勝る側が落とさなかった）
 - 時間切れまで守り切り／設置前に全滅（攻撃側）／設置させずに守り勝ち（守備側）
 - ピストル（各ハーフの最初のラウンド）
@@ -19,9 +21,13 @@ from __future__ import annotations
 
 ATTACK, DEFENSE = "攻撃", "防衛"
 BUY_RANK = {"pistol": 0, "eco": 1, "semi-eco": 2, "half": 3, "semi-buy": 3, "full": 4}
-PRIORITY = ["エース", "クラッチ", "リテイク", "ポストプラント成功", "ラッシュ", "カウンター", "数的不利から逆転",
-            "エコ勝ち", "1ピック", "先制されて逆転", "時間切れまで守り切り", "設置前に全滅",
-            "設置させずに守り勝ち", "アンチエコ", "ピストル"]
+PRIORITY = ["エース", "クラッチ", "ULTリテイク", "リテイク", "ポストプラント成功", "ラッシュ", "エントリー成功",
+            "カウンター", "数的不利から逆転", "エコ勝ち", "フォースバイ勝ち", "オペレーターで1ピック", "初動ファイト勝ち",
+            "1ピック", "初動ファイト負けから逆転", "先制されて逆転", "トレード勝ち", "マルチキル", "ULTで攻め切り",
+            "時間切れまで守り切り", "設置前に全滅", "設置させずに守り勝ち", "アンチエコ", "ピストル"]
+# 表示名に場所が入るタグ（「初動Aファイト勝ち」など）。PRIORITY の並べ替えには基本名を使う
+ZONE_TAGS = {"初動ファイト勝ち": "初動{z}ファイト勝ち", "初動ファイト負けから逆転": "初動{z}ファイト負けから逆転",
+             "エントリー成功": "{z}エントリー成功"}
 
 
 def _clock(sec: float | None) -> str:
@@ -78,22 +84,71 @@ def analyze(r: dict, rep: dict) -> dict:
     elif worst >= 2:
         tags["数的不利から逆転"] = f"最大 {worst} 人差の不利から勝利"
     if best and 3 <= best[1] < 5 and "エース" not in tags:
-        tags.setdefault("_multi", f"{best[0]} が {best[1]} キル")
+        tags["マルチキル"] = f"{best[0]} が {best[1]} キル"
 
-    # --- 先制
+    # --- 先制（初動のファイトの場所が分かれば「初動Aファイト勝ち」）
+    fz = (r.get("tactics") or {}).get("first_fight")
+    zone_of_tag = {}
     if kills:
         fk = kills[0]
         when = el(fk.get("t"))
-        who = f"{fk.get('killer') or '?'}→{fk.get('victim') or '?'}（{_clock(when)} 経過）"
+        wpn = fk.get("weapon_ja") or fk.get("weapon")
+        who = (f"{fk.get('killer') or '?'}→{fk.get('victim') or '?'}（{_clock(when)} 経過"
+               + (f"・{wpn}" if wpn else "") + (f"・{fz}" if fz else "") + "）")
         if fk["killer_team"] == W:
-            tags["1ピック"] = who
+            if fz:
+                tags["初動ファイト勝ち"] = who
+                zone_of_tag["初動ファイト勝ち"] = fz
+            else:
+                tags["1ピック"] = who
+            if (fk.get("weapon") or "").lower() == "operator":
+                tags["オペレーターで1ピック"] = who
         else:
-            tags["先制されて逆転"] = who
+            if fz:
+                tags["初動ファイト負けから逆転"] = who
+                zone_of_tag["初動ファイト負けから逆転"] = fz
+            else:
+                tags["先制されて逆転"] = who
         early = [k for k in kills if el(k.get("t")) is not None and el(k["t"]) <= 20]
         if atk == W and len([k for k in early if k["killer_team"] == W]) >= 2:
             tags["ラッシュ"] = f"開始 20 秒で {len([k for k in early if k['killer_team'] == W])} キル"
         if atk == L and fk["killer_team"] == W and when is not None and when <= 20 and plant is None:
             tags["カウンター"] = f"守備側が {_clock(when)} で先手、設置させずに勝利"
+
+        # エントリー：攻撃側が先制し、その場所に設置して勝つ
+        ps = (r.get("tactics") or {}).get("plant_site")
+        if atk == W and fk["killer_team"] == W and fz and ps and fz == ps:
+            tags["エントリー成功"] = f"{fz} で先制してそのまま {ps} に設置"
+            zone_of_tag["エントリー成功"] = fz
+
+    # --- トレード（味方が倒された 4 秒以内に、倒した相手を倒し返す）
+    trades = 0
+    for i, k in enumerate(kills):
+        if k["killer_team"] != L or not k.get("killer"):
+            continue
+        for k2 in kills[i + 1:]:
+            if k2.get("t") is None or k.get("t") is None or k2["t"] - k["t"] > 4:
+                break
+            if k2["killer_team"] == W and k2.get("victim") == k["killer"]:
+                trades += 1
+                break
+    if trades >= 2:
+        tags["トレード勝ち"] = f"倒されても {trades} 回すぐに倒し返す"
+
+    # --- オペレーター・マルチキル
+    op = [k for k in kills if k["killer_team"] == W and (k.get("weapon") or "").lower() == "operator"]
+    if len(op) >= 2 and "オペレーターで1ピック" not in tags:
+        tags["オペレーターで1ピック"] = f"オペレーターで {len(op)} キル"
+
+    # --- ULT
+    ults_w = [u for u in r.get("ults") or [] if u.get("team") == W]
+    if ults_w:
+        names_u = "・".join(sorted({u.get("agent") or u.get("player") or "?" for u in ults_w}))
+        post = [u for u in ults_w if plant and plant > 0 and u.get("t") is not None and u["t"] >= plant]
+        if atk == L and post and (how == "defuse" or plant is not None):
+            tags["ULTリテイク"] = f"設置後に {names_u} の ULT"
+        elif atk == W:
+            tags["ULTで攻め切り"] = f"{names_u} の ULT"
 
     # --- スパイク
     pe = el(plant) if plant and plant > 0 else None
@@ -125,17 +180,20 @@ def analyze(r: dict, rep: dict) -> dict:
     if bw is not None and bl is not None and bw > 0 and bl > 0:
         if bw <= 2 and bl >= 3:
             tags["エコ勝ち"] = "装備で劣る側が勝利"
+        elif bw == 3 and bl >= 4:
+            tags["フォースバイ勝ち"] = "ハーフ・フォースバイでフル装備に勝利"
         elif bw >= 4 and bl <= 2:
             tags["アンチエコ"] = "装備の差を活かして勝利"
     if r.get("n") in (1, 13):
         tags["ピストル"] = "ピストルラウンド"
 
-    multi = tags.pop("_multi", None)
+    if "初動ファイト勝ち" in tags and "1ピック" in tags:
+        tags.pop("1ピック")
     order = [t for t in PRIORITY if t in tags]
-    main = order[0] if order else None
-    lines = [f"{t}：{tags[t]}" for t in order]
-    if multi:
-        lines.append(f"活躍：{multi}")
+    show = {t: ZONE_TAGS[t].format(z=zone_of_tag[t]) if t in ZONE_TAGS and t in zone_of_tag else t for t in order}
+    main = show[order[0]] if order else None
+    lines = [f"{show[t]}：{tags[t]}" for t in order]
+    order = [show[t] for t in order]
     summary = f"{tagW} の勝因：" + "・".join(order[:3]) if order else ""
     caveat = None
     expected = 5 if how == "elim" else None

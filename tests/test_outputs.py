@@ -261,9 +261,25 @@ def test_killfeed_ocr_only_when_new_row(tmp_path, monkeypatch):
             return []
 
     monkeypatch.setattr(X, "_ocr", lambda: OCR())
-    X.kills_in_round(st, list(range(len(seq))), [i * 1.0 for i in range(len(seq))], ["-"] * len(seq),
-                     X.Roster([("Derke", "A")]), None, tmp_path / "k.jpg")
-    assert OCR.calls == 2
+    args = (st, list(range(len(seq))), [i * 1.0 for i in range(len(seq))], ["-"] * len(seq),
+            X.Roster([("Derke", "A")]), None, tmp_path / "k.jpg")
+    X.kills_in_round(*args, every=60)
+    assert OCR.calls == 2                 # 新しい行が出た 2 回だけ
+    OCR.calls = 0
+    X.kills_in_round(*args)
+    assert OCR.calls == 4                 # 既定では行が映っている間 2 秒おきにも読む（見落とし対策）
+
+
+def test_parse_killfeed_tags_and_teams():
+    """チームタグが別の塊になっても名前を取り違えない。同じチーム同士の行は読み直し、片側だけでも相手チームで補う。"""
+    roster = X.Roster([("JAWGEMO", "G2"), ("trent", "G2"), ("Timotino", "100T"), ("Asuna", "100T")])
+    img = np.zeros((100, 600, 3), np.uint8)
+    d = lambda x0, x1, y, t: ((x0, y, x1, y + 20), t, 0.9)
+    dets = [d(10, 40, 10, "G2"), d(45, 160, 10, "JAWGEMO"), d(300, 340, 10, "100T"), d(345, 470, 10, "Timotino"),
+            d(10, 60, 50, "100T"), d(65, 150, 50, "Asuma"), d(300, 330, 50, "G2"), d(335, 420, 50, "tre nt")]
+    rows = X.parse_killfeed(dets, img, roster)
+    assert [(r["killer"], r["victim"]) for r in rows] == [("JAWGEMO", "Timotino"), ("Asuna", "trent")]
+    assert rows[0]["killer_team"] == "G2" and rows[0]["victim_team"] == "100T"
 
 
 def test_card_deaths_fill_missing_kills():
@@ -276,3 +292,20 @@ def test_card_deaths_fill_missing_kills():
     kills = [{"t": 2.0, "killer": "Derke", "killer_team": "A", "victim": "tkzin", "victim_team": "B"}]
     out = X.merge_card_deaths(kills, [("Life", "A", "B", 5.0), ("tkzin", "B", "A", 2.5)], lambda t: "1:30")
     assert [(k["victim"], k["killer_team"], k.get("source")) for k in out] == [("tkzin", "A", None), ("Life", "B", "card")]
+
+
+def test_ult_slot_lit_in_pistol_round_is_ignored():
+    """ピストルラウンドの開始直後から「溜まっている」カードは枠ずれとみなして ULT を出さない。"""
+    from types import SimpleNamespace
+    ult = np.zeros((60, 10), np.float32)
+    alive = np.ones((60, 10), bool)
+    ult[:, 0] = 0.95                       # L1 は常に光って見える（枠がずれている）
+    ult[30:35, 3] = 0.95                   # L4 は 2 ラウンド目で溜まって使った
+    rounds = [SimpleNamespace(n=1, live=list(range(0, 20))), SimpleNamespace(n=2, live=list(range(20, 60)))]
+    assert X.unreliable_ult_slots(ult, alive, rounds) == {0}
+
+
+def test_card_death_at_round_end_counts():
+    alive = np.ones((6, 10), bool)
+    alive[5, 4] = False                    # 最後のフレームで倒れた（直後にラウンドが終わる）
+    assert X.card_deaths(alive, list(range(6)), [float(i) for i in range(6)]) == [(4, 5.0)]

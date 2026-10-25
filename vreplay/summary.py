@@ -88,7 +88,21 @@ def player_weapons(r: dict, no: str) -> str:
 REASON_ICON = {"エース": "🔥", "クラッチ": "🧊", "リテイク": "🔁", "ポストプラント成功": "💣", "ラッシュ": "⚡",
                "カウンター": "🛡️", "数的不利から逆転": "↩️", "エコ勝ち": "💰", "1ピック": "🎯", "先制されて逆転": "↩️",
                "時間切れまで守り切り": "⏱", "設置前に全滅": "💀", "設置させずに守り勝ち": "🛡️", "アンチエコ": "💰",
-               "ピストル": "🔫"}
+               "ピストル": "🔫", "初動ファイト勝ち": "🎯", "初動ファイト負けから逆転": "↩️", "エントリー成功": "🚪",
+               "オペレーターで1ピック": "🔭", "トレード勝ち": "🤝", "マルチキル": "💥", "ULTリテイク": "🌀",
+               "ULTで攻め切り": "🌀", "フォースバイ勝ち": "💰"}
+
+
+def _icon(tag: str) -> str:
+    if tag in REASON_ICON:
+        return REASON_ICON[tag]
+    if tag.startswith("初動") and tag.endswith("ファイト勝ち"):
+        return REASON_ICON["初動ファイト勝ち"]
+    if tag.startswith("初動"):
+        return REASON_ICON["初動ファイト負けから逆転"]
+    if tag.endswith("エントリー成功"):
+        return REASON_ICON["エントリー成功"]
+    return ""
 
 
 def reason_cell(r: dict) -> str:
@@ -96,9 +110,22 @@ def reason_cell(r: dict) -> str:
     tags = (r.get("reason") or {}).get("tags") or []
     if not tags:
         return "-"
-    return REASON_ICON.get(tags[0], "") + "・".join(tags[:2])
+    return _icon(tags[0]) + "・".join(tags[:2])
 
 
 def reason_icon(r: dict) -> str:
     main = (r.get("reason") or {}).get("main")
-    return REASON_ICON.get(main or "", "🏁")
+    return _icon(main or "") or "🏁"
+
+
+def setup_line(rep: dict, r: dict) -> str:
+    """初動の配置：'G2（守り）バランス A2 Mid1 B2 ／ 100T（攻め）MID 3 デフォルト Mid3 A1 B1'"""
+    sus = ((r.get("tactics") or {}).get("setups")) or {}
+    out = []
+    for no, tg in (("1", rep.get("tag1")), ("2", rep.get("tag2"))):
+        su = sus.get(no)
+        if not su:
+            continue
+        side = "攻め" if su.get("side") == "攻撃" else "守り" if su.get("side") == "防衛" else ""
+        out.append(f"{tg}（{side}）{su.get('name')} {su.get('shape') or ''}".strip())
+    return " ／ ".join(out)

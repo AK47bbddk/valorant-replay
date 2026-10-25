@@ -131,3 +131,43 @@ def test_range_download_matches_source(tmp_path, monkeypatch):
     common = sorted(set(ref) & set(got))
     assert len(common) >= 70
     assert all(abs(ref[t] - got[t]) < 3 for t in common)
+
+
+def test_range_getter_falls_back_to_query_and_uses_ytdlp(tmp_path):
+    """Range ヘッダーを拒否するサーバーでも &range=a-b で取れる。yt-dlp の接続（プロセス内）でも取れる。"""
+    import re
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs, urlparse
+
+    from vreplay import ytrange
+    data = bytes(range(256)) * 64
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            q = parse_qs(urlparse(self.path).query).get("range")
+            if self.headers.get("Range") or not q:
+                self.send_response(403)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            a, b = map(int, re.match(r"(\d+)-(\d+)", q[0]).groups())
+            body = data[a:b + 1]
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_port}/v?id=1"
+    try:
+        for opts in (None, ytrange.ydl_options("bv*")):
+            g = ytrange.Getter(url, {}, opts)
+            assert g.probe() == "query"
+            assert g.get(100, 4195) == data[100:4196]
+    finally:
+        srv.shutdown()

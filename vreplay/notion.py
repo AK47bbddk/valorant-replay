@@ -275,6 +275,8 @@ def round_blocks(rep: dict, r: dict, uploads: dict[str, str | None]) -> list[dic
             extra.append(f"設置 {r['plant_clock']} 経過")
         if r.get("duration"):
             extra.append(f"ラウンド時間 {r['duration']}")
+        if S.setup_line(rep, r):
+            extra.append("初動：" + S.setup_line(rep, r))
         if extra:
             rt.append(_rt("\n" + "　".join(extra), color="gray"))
         out.append({"type": "callout", "callout": {"rich_text": rt,

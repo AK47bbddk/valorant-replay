@@ -168,6 +168,8 @@ def test_analyze_video_aligns_minimap_and_reads_plant_site(tmp_path, monkeypatch
     assert tac["warm_team1"] is True
     sites = {n: tac["rounds"][str(n)]["plant_site"] for n in range(1, 17)}
     assert sum(sites[n] == ("A" if n % 2 else "B") for n in sites) >= 14, sites
+    su = tac["rounds"]["1"]["setups"]
+    assert su["1"]["side"] == "攻撃" and su["1"]["name"] and su["2"]["callouts"]
     tl = tac["rounds"]["1"]["timeline"]
     assert "1:00" in tl and sum(tl["1:00"]["1"].values()) >= 4
     assert tac["fit_image"] and (tmp_path / "o" / "_tactics" / "test_fit.jpg").exists()

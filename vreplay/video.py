@@ -92,12 +92,17 @@ def find_cached(video_id: str, start: int, end: int, dirs) -> Path | None:
 # YouTube の取得方法（yt-dlp の player_client）。None は yt-dlp の既定。
 # 一部の形式は数 MB 進むと 403 で切られる（ffmpeg exited with code 8）ため、順に試す
 CLIENTS = [None, "web_safari", "tv", "mweb", "web_embedded"]
+# 範囲取得で試すクライアント。tv・visionos の https 形式は Range でどこからでも取れることが多い
+RANGE_CLIENTS = [None, "tv", "visionos", "web_safari", "mweb", "android_vr"]
 
 
 def _err_lines(stderr: str, n: int = 6) -> str:
     keys = ("ERROR", "error", "Error", "403", "failed", "Invalid", "denied")
     lines = [l.strip() for l in stderr.replace("\r", "\n").splitlines() if any(k in l for k in keys)]
     return " / ".join(lines[-n:]) or stderr.strip()[-300:]
+
+
+_RANGE_FAILS = 0
 
 
 def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_height: int = 1080,
@@ -116,17 +121,27 @@ def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_hei
         return hit
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    global _RANGE_FAILS
+    if method == "range" and _RANGE_FAILS >= 2:
+        method = "sections"                         # 2 回続けて範囲取得ができなかった実行では、もう試さない
     if method == "range":
         try:
             man = _download_range(video_id, start, end, out_dir, max_height, cookies, threads=range_threads)
+            _RANGE_FAILS = 0
             if log:
-                log(f"    必要な範囲だけを {range_threads} 本同時に取得しました")
+                try:
+                    j = json.loads(Path(man).read_text(encoding="utf-8"))
+                    how = f"（取得方法 {j.get('client')}・{'Range ヘッダー' if j.get('mode') == 'header' else '&range='}）"
+                except Exception:
+                    how = ""
+                log(f"    必要な範囲だけを {range_threads} 本同時に取得しました{how}")
             return man
         except Exception as e:                       # 取れなければ従来の分割取得へ
             if "Sign in to confirm" in str(e):
                 raise RuntimeError(COOKIE_HELP + f"\n  yt-dlp: {e}")
+            _RANGE_FAILS += 1
             if log:
-                log(f"    範囲の取得ができなかったので分割取得に切り替えます（{str(e).splitlines()[0][:120]}）")
+                log(f"    範囲の取得ができなかったので分割取得に切り替えます（{str(e).splitlines()[0][:300]}）")
     parts = max(1, min(int(parts or 1), int((end - start) // 120) or 1))      # 1 本 2 分以上
     if parts == 1:
         return _download_one(video_id, start, end, out_dir, max_height, cookies, cache_dirs, log, fragments)
@@ -159,17 +174,7 @@ def _download_range(video_id: str, start: int, end: int, out_dir: Path, max_heig
     env = _ytdlp_env()
     fmt = f"bv*[height<={max_height}][vcodec^=avc1][ext=mp4]/bv*[height<={max_height}][ext=mp4]"
     errors = []
-    info = None
-    for client in CLIENTS:
-        try:
-            info = ytrange.format_info(video_id, fmt, cookies, client, env)
-            break
-        except Exception as e:
-            errors.append(f"[{client or '既定'}] {str(e).splitlines()[-1][:160] if str(e) else e}")
-            if "Sign in to confirm" in str(e):
-                raise
-    if info is None:
-        raise RuntimeError("形式の情報を取れません：" + " / ".join(errors))
+    info = getter = None
     jar = None
     if cookies and Path(cookies).exists():
         import http.cookiejar
@@ -178,11 +183,26 @@ def _download_range(video_id: str, start: int, end: int, out_dir: Path, max_heig
             jar.load(ignore_discard=True, ignore_expires=True)
         except Exception:
             jar = None
+    # クライアントごとに「形式の URL を得る → 1KB だけ取ってみる」。通った最初のクライアントで本番を取る
+    for client in RANGE_CLIENTS:
+        try:
+            info = ytrange.format_info(video_id, fmt, cookies, client, env)
+            getter = ytrange.Getter(info["url"], info["headers"], info.get("opts"), cookies=jar)
+            mode = getter.probe()
+            info["client"], info["mode"] = client or "既定", mode
+            break
+        except Exception as e:
+            errors.append(f"[{client or '既定'}] {str(e).splitlines()[-1][:160] if str(e) else e}")
+            if "Sign in to confirm" in str(e):
+                raise
+            info = getter = None
+    if getter is None:
+        raise RuntimeError("範囲の取得ができません：" + " / ".join(errors))
     stem = f"{video_id}_{start}_{end}"
     tmp = Path(tempfile.mkdtemp(prefix="vreplay_r_"))
     try:
         f = tmp / f"{stem}.range.mp4"
-        t0, t1 = ytrange.fetch_section(info["url"], info["headers"], start, end, f, threads=threads, cookies=jar)
+        t0, t1 = ytrange.fetch_section(getter, start, end, f, threads=threads)
         _, _, dur = probe(f)
         if dur < (min(end, t1) - max(start, t0)) - 10:
             raise RuntimeError(f"取れた長さが足りません（{dur:.0f} 秒）")
@@ -192,7 +212,8 @@ def _download_range(video_id: str, start: int, end: int, out_dir: Path, max_heig
         shutil.rmtree(tmp, ignore_errors=True)
     man = out_dir / f"{stem}{PARTS}"
     man.write_text(json.dumps({"video_id": video_id, "start": start, "end": end, "method": "range",
-                               "format": info.get("format_id"),
+                               "format": info.get("format_id"), "client": info.get("client"),
+                               "mode": info.get("mode"),
                                "parts": [{"file": dst.name, "offset": round(t0 - start, 3), "length": round(dur, 3)}]},
                               ensure_ascii=False, indent=1), encoding="utf-8")
     return man
