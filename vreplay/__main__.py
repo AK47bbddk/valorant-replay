@@ -22,6 +22,19 @@ from pathlib import Path
 from . import config, vlr
 
 
+def parse_day(s: str) -> date:
+    """日付をゆるく読む：2026-09-24 / 2026-9-24 / 2026/9/24 / 2026.9.24 / 20260924 / 9-24（今年）"""
+    import re
+    t = str(s).strip()
+    m = re.fullmatch(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", t) or re.fullmatch(r"(\d{4})(\d{2})(\d{2})", t)
+    if m:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    m = re.fullmatch(r"(\d{1,2})[-/.](\d{1,2})", t)
+    if m:
+        return date(date.today().year, int(m.group(1)), int(m.group(2)))
+    raise SystemExit(f"日付の形が読めません：{s}（例 2026-09-24）")
+
+
 def main():
     ap = argparse.ArgumentParser(prog="vreplay")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -84,20 +97,20 @@ def main():
     cfg = config.load(a.config)
 
     if a.cmd == "run":
-        day = None if a.date == "yesterday" else date.fromisoformat(a.date)
+        day = None if a.date == "yesterday" else parse_day(a.date)
         from .pipeline import run
         run(cfg, day=day, match_urls=a.match, no_video=a.no_video, force=a.force, upsert_only=a.upsert_only)
     elif a.cmd == "fetch":
-        day = None if a.date == "yesterday" else date.fromisoformat(a.date)
+        day = None if a.date == "yesterday" else parse_day(a.date)
         from .pipeline import fetch
         fetch(cfg, day=day, match_urls=a.match)
     elif a.cmd == "backfill":
         from .backfill import run as backfill
-        backfill(cfg, date.fromisoformat(a.start), date.fromisoformat(a.end), limit=a.limit,
+        backfill(cfg, parse_day(a.start), parse_day(a.end), limit=a.limit,
                  pages_max=a.pages_max, tier1=not a.all_events, dry_run=a.dry_run)
     elif a.cmd == "batch":
         from .batch import run as batch
-        batch(cfg, start=a.start, end=a.end, limit=a.limit, retry_failed=not a.no_retry,
+        batch(cfg, start=parse_day(a.start).isoformat() if a.start else None, end=parse_day(a.end).isoformat() if a.end else None, limit=a.limit, retry_failed=not a.no_retry,
               shard=a.shard, force=a.force, out_root=Path(a.out) if a.out else None)
     elif a.cmd == "playbook":
         from . import db, deck

@@ -131,3 +131,9 @@ def test_parse_match_2026_layout():
         ("pistol", "pistol", 3.9, 4.0, 0.1, 0.1), ("eco", "half", 3.0, 17.2, 9.8, 2.1),
         ("full", "full", 22.5, 20.0, 0.6, 13.7)]
     assert (md.vod_id, md.vod_t) == ("QnBTE-UVpX4", 115)
+
+
+def test_parse_day_lenient():
+    from datetime import date
+    from vreplay.__main__ import parse_day
+    assert parse_day("2026-9-24") == parse_day("2026/09/24") == parse_day("20260924") == date(2026, 9, 24)
