@@ -86,7 +86,7 @@ def _first_kill_t(kills: list) -> float | None:
 
 
 def build(cfg: dict, out_dir: Path, min_maps: int = 1, log=print) -> dict:
-    conn = db.connect(db.warehouse_path(cfg))
+    conn = db.open_warehouse(cfg)
     out_dir = Path(out_dir)
     (out_dir / "img").mkdir(parents=True, exist_ok=True)
 

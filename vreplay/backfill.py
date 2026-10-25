@@ -33,7 +33,7 @@ def run(cfg: dict, start: date, end: date, limit: int | None = None, pages_max: 
     if end < start:
         raise SystemExit("--to は --from 以降の日付にしてください")
     filters = _filters(cfg, tier1)
-    conn = db.connect(db.warehouse_path(cfg))
+    conn = db.open_warehouse(cfg)
     before = db.stats(conn)
     log(f"VLR 結果一覧を {start}〜{end} までたどります"
         + ("（Tier1 以外を除外）" if tier1 else "（全大会）"))

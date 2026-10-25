@@ -117,7 +117,7 @@ def main():
         from .playbook import build
         out = Path(a.out) if a.out else Path(cfg["output"]["dir"]) / "playbook"
         if a.sync:
-            conn = db.connect(db.warehouse_path(cfg))
+            conn = db.open_warehouse(cfg)
             n = db.sync_reports(conn, Path(cfg["output"]["dir"]))
             print(f"{n} 件の report.json を DB に取り込みました")
             conn.close()
@@ -137,14 +137,14 @@ def main():
             build(cfg, out / "stats", min_maps=a.min_maps)      # 以前の集計ページ（ヒートマップ・型の表）
     elif a.cmd == "sync":
         from . import db
-        conn = db.connect(db.warehouse_path(cfg))
+        conn = db.open_warehouse(cfg)
         root = Path(a.root) if a.root else Path(cfg["output"]["dir"])
         n = db.sync_reports(conn, root)
         print(f"{n} 件の report.json を DB に取り込みました（{db.warehouse_path(cfg)}）")
         print(db.stats(conn))
     elif a.cmd == "stats":
         from . import db
-        conn = db.connect(db.warehouse_path(cfg))
+        conn = db.open_warehouse(cfg)
         st = db.stats(conn)
         print(f"DB: {db.warehouse_path(cfg)}")
         for k, v in st.items():

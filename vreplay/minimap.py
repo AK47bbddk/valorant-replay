@@ -231,6 +231,18 @@ def _edge_agreement(m: np.ndarray, line: np.ndarray) -> float:
     return float((edge & near).sum() / max(1, edge.sum()))
 
 
+def _edge_f(m: np.ndarray, line: np.ndarray) -> float:
+    """床の縁と白い縁の線の一致（適合率と再現率の調和平均）。小さな床の切れ端だけを選ばないよう、
+    線のうち床の縁の近くにあるものの割合（再現率）も見る。"""
+    import cv2
+    mm = m.astype(np.uint8)
+    edge = (mm - cv2.erode(mm, np.ones((3, 3), np.uint8))).astype(bool)
+    near_edge = cv2.dilate(edge.astype(np.uint8), np.ones((7, 7), np.uint8)).astype(bool)
+    p = _edge_agreement(m, line)
+    r = float((line & near_edge).sum() / max(1, line.sum()))
+    return 0.0 if p + r == 0 else 2 * p * r / (p + r)
+
+
 def map_mask(bg: np.ndarray) -> np.ndarray | None:
     """ミニマップの背景（何枚かの中央値＝点が消えた画像）から、歩ける場所（灰色の床）の 2 値画像。
 
@@ -258,15 +270,35 @@ def map_mask(bg: np.ndarray) -> np.ndarray | None:
         hist = np.convolve(hist, np.ones(7), mode="same")
         fl = int(np.argmax(hist))
         cands.append(_keep_main((neutral & (np.abs(lab[..., 0] - fl) <= 20)) | sq))
+    # ③ 色の k-means（3・4 色）の各クラスタ。床が不透明で、後ろの試合画面とほぼ同じ明るさの灰色のとき
+    #   （Summit の中国の放送など）は ①② では床と背景を分けられないので、色の塊ごとに縁の線との一致を見る
+    Z = lab.reshape(-1, 3).astype(np.float32)
+    crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
+    for K in (3, 4):
+        try:
+            cv2.setRNGSeed(K)
+            _, lbl, cen = cv2.kmeans(Z, K, None, crit, 2, cv2.KMEANS_PP_CENTERS)
+        except cv2.error:
+            continue
+        lbl = lbl.reshape(lab.shape[:2])
+        for c in range(K):
+            L_, a_, b_ = cen[c]
+            if not (95 <= L_ <= 185 and abs(a_ - 128) <= 8 and abs(b_ - 128) <= 8):
+                continue
+            m = cv2.morphologyEx((lbl == c).astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)).astype(bool)
+            cands.append(_keep_main(m | sq))
     best = None
     for m in cands:
         frac = float(m.mean())
         if not 0.08 <= frac <= 0.6:
             continue
         agree = _edge_agreement(m, line)
-        if best is None or agree > best[0]:
-            best = (agree, m)
-    if best is None or best[0] < 0.25:
+        if agree < 0.25:
+            continue
+        f = _edge_f(m, line)
+        if best is None or f > best[0]:
+            best = (f, m)
+    if best is None:
         return None
     return best[1]
 

@@ -128,20 +128,103 @@ ROUND_EXTRA = [("t_drop", "REAL"), ("plant_t", "REAL"), ("plant_site", "TEXT"), 
                ("setups_json", "TEXT"), ("first_fight", "TEXT")]
 
 
-def connect(path: str | Path) -> sqlite3.Connection:
+class _SyncedConnection(sqlite3.Connection):
+    """Google Drive 上の DB をローカルの複製で開き、commit・close のたびに Drive へ書き戻す接続。
+
+    Drive（/content/drive）の上で SQLite を直接書くと、Drive の同期と SQLite のロック・ジャーナルが
+    かみ合わず「database disk image is malformed」で壊れることがある。ローカル（/tmp）の複製を使い、
+    書き戻しは一時ファイルに丸ごとコピーしてから名前を差し替える（途中で切れても元のファイルは壊れない）。"""
+    remote: Path | None = None
+    _dirty = False
+
+    def commit(self):
+        super().commit()
+        self._dirty = True
+        self._push(min_interval=600.0)   # DB 全体のコピーなので 10 分に 1 回まで（close で必ず書き戻す）
+
+    def _push(self, min_interval: float = 0.0):
+        import time
+        if self.remote is None or not self._dirty:
+            return
+        now = time.time()
+        if min_interval and now - getattr(self, "_last_push", 0.0) < min_interval:
+            return
+        tmp = self.remote.with_name(self.remote.name + ".tmp")
+        try:
+            dst = sqlite3.connect(str(tmp))
+            with dst:
+                self.backup(dst)
+            dst.close()
+            tmp.replace(self.remote)
+            self._dirty, self._last_push = False, now
+        except Exception as e:
+            print(f"  ウェアハウスを Drive に書き戻せませんでした（次の commit でやり直します）: {e}")
+
+    def close(self):
+        try:
+            if self.in_transaction:
+                super().commit()
+                self._dirty = True
+            self._push()
+        finally:
+            super().close()
+
+
+def _ok(path: Path) -> bool:
+    try:
+        c = sqlite3.connect(str(path))
+        r = c.execute("PRAGMA quick_check").fetchone()
+        c.close()
+        return bool(r) and r[0] == "ok"
+    except sqlite3.DatabaseError:
+        return False
+
+
+def connect(path: str | Path, rebuild_root: str | Path | None = None, log=print) -> sqlite3.Connection:
+    """DB を開く。壊れていたら別名で退避して作り直し、rebuild_root があればその下の report.json から入れ直す。
+    Drive 上のファイルはローカルの複製で開き、commit・close で書き戻す（_SyncedConnection）。"""
+    import shutil
+    import tempfile
+    from datetime import datetime as _dt
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), timeout=60)
+    on_drive = "/drive/" in str(path.resolve())
+    rebuilt = False
+    if path.exists() and path.stat().st_size and not _ok(path):
+        bad = path.with_name(f"{path.stem}.broken-{_dt.now():%Y%m%d-%H%M%S}{path.suffix}")
+        path.replace(bad)
+        for ext in ("-journal", "-wal", "-shm"):
+            Path(str(path) + ext).unlink(missing_ok=True)
+        log(f"ウェアハウスが壊れていたので {bad.name} に退避し、作り直します")
+        rebuilt = True
+    if on_drive:
+        local = Path(tempfile.gettempdir()) / "vreplay_wh" / path.name
+        local.parent.mkdir(parents=True, exist_ok=True)
+        for ext in ("", "-journal", "-wal", "-shm"):
+            Path(str(local) + ext).unlink(missing_ok=True)
+        if path.exists():
+            shutil.copyfile(path, local)
+        conn = sqlite3.connect(str(local), timeout=60, factory=_SyncedConnection)
+        conn.remote = path
+        conn._dirty = not path.exists()
+    else:
+        conn = sqlite3.connect(str(path), timeout=60)
     conn.row_factory = sqlite3.Row
-    # Google Drive（/content/drive）は共有メモリを使う WAL に向かないので、そこでは通常のジャーナルにする
-    mode = "DELETE" if "/drive/" in str(path.resolve()) else "WAL"
     try:
-        conn.execute(f"PRAGMA journal_mode={mode}")
+        conn.execute("PRAGMA journal_mode=WAL" if not on_drive else "PRAGMA journal_mode=DELETE")
     except sqlite3.DatabaseError:
         conn.execute("PRAGMA journal_mode=DELETE")
     conn.executescript(SCHEMA)
     _migrate(conn)
+    if rebuilt and rebuild_root is not None:
+        n = sync_reports(conn, Path(rebuild_root), log=log)
+        log(f"  report.json {n} 件から作り直しました")
     return conn
+
+
+def open_warehouse(cfg: dict, log=print) -> sqlite3.Connection:
+    """ウェアハウスを開く（壊れていたら output.dir の report.json から作り直す）。"""
+    return connect(warehouse_path(cfg), rebuild_root=Path(cfg["output"]["dir"]), log=log)
 
 
 def _migrate(conn: sqlite3.Connection) -> None:

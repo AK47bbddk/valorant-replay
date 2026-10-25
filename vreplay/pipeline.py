@@ -746,7 +746,7 @@ class _Warehouse:
         if (cfg.get("warehouse") or {}).get("enabled", True) is False:
             return
         try:
-            self.conn = db.connect(db.warehouse_path(cfg))
+            self.conn = db.open_warehouse(cfg)
         except Exception as e:
             log(f"ウェアハウスを開けませんでした（プレイブック用のデータはためません）: {e}")
 

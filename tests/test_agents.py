@@ -20,9 +20,9 @@ def _icon(seed):
     return img
 
 
-def _minimap(icons, places, H=400, W=400):
+def _minimap(icons, places, H=400, W=400, frac=0.058):
     img = np.full((H, W, 3), 70, np.uint8)
-    D = int(0.058 * H)
+    D = int(frac * H)
     for (agent, color, x, y) in places:
         t = cv2.resize(icons[agent], (D, D))
         m = np.zeros((D, D), np.uint8)
@@ -30,7 +30,7 @@ def _minimap(icons, places, H=400, W=400):
         x0, y0 = int(x * W) - D // 2, int(y * H) - D // 2
         roi = img[y0:y0 + D, x0:x0 + D]
         roi[m > 0] = t[m > 0]
-        rim = (40, 40, 230) if color == "warm" else (200, 200, 40)
+        rim = (40, 40, 230) if color == "warm" else (200, 190, 30)
         cv2.circle(img, (int(x * W), int(y * H)), int(D * 0.52), rim, 3)
     return img
 
@@ -124,3 +124,33 @@ def test_match_ignores_agents_not_on_the_map():
     found = AG.match(img, icons, {1: ["Sova", "Jett", "Viper"], 2: ["Omen", "Killjoy"]}, {"warm": 1, "cool": 2})
     got = {f["agent"] for f in found}
     assert {"Sova", "Jett", "Omen"} <= got and "Viper" not in got
+
+
+def test_icon_size_is_estimated_and_alive_caps_the_count():
+    names = ["Sova", "Jett", "Omen", "Killjoy", "Viper"]
+    icons = {n: _icon(i) for i, n in enumerate(names)}
+    places = [("Sova", "warm", 0.2, 0.2), ("Jett", "warm", 0.5, 0.3), ("Omen", "cool", 0.7, 0.7),
+              ("Killjoy", "cool", 0.3, 0.8), ("Viper", "warm", 0.8, 0.2)]
+    imgs = [_minimap(icons, places, frac=0.036)]
+    teams = {1: ["Sova", "Jett", "Viper"], 2: ["Omen", "Killjoy"]}
+    f = AG.estimate_icon_frac(imgs, icons=icons, teams=teams)
+    assert f is not None and 0.028 <= f <= 0.046, f
+    f_ring = AG.estimate_icon_frac(imgs)
+    assert f_ring is not None and 0.026 <= f_ring <= 0.05, f_ring
+    found = AG.match(imgs[0], icons, teams, {"warm": 1, "cool": 2}, icon_frac=f)
+    assert {e["agent"] for e in found if e["agent"]} >= {"Sova", "Jett", "Viper", "Omen"}
+    capped = AG.match(imgs[0], icons, teams, {"warm": 1, "cool": 2}, icon_frac=f, alive={1: 1, 2: 2})
+    assert sum(e["team"] == 1 for e in capped) == 1
+
+
+def test_static_background_marks_are_not_icons():
+    names = ["Sova", "Jett"]
+    icons = {n: _icon(i) for i, n in enumerate(names)}
+    img = _minimap(icons, [("Sova", "warm", 0.3, 0.3)], frac=0.04)
+    bg = np.full_like(img, 70)
+    D = int(0.04 * 400)
+    for m in (img, bg):           # 動かない赤い輪（設置位置の円など）
+        cv2.circle(m, (300, 300), int(D * 0.5), (40, 40, 230), 3)
+    found = AG.match(img, icons, {1: names, 2: []}, {"warm": 1, "cool": 2}, icon_frac=0.04, background=bg)
+    assert all(abs(e["x"] - 0.75) > 0.05 for e in found)
+    assert any(e["agent"] == "Sova" for e in found)

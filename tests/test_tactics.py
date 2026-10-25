@@ -32,7 +32,7 @@ def _cfg(tmp_path):
 def test_detect_dots():
     img = np.zeros((200, 200, 3), np.uint8)
     cv2.circle(img, (50, 50), 4, (0, 0, 255), -1)     # 赤＝暖色
-    cv2.circle(img, (150, 150), 4, (255, 0, 0), -1)   # 青＝寒色
+    cv2.circle(img, (150, 150), 4, (230, 200, 0), -1)   # 青緑＝寒色
     dots = tactics.detect_dots(img)
     cols = sorted(d["color"] for d in dots)
     assert cols == ["cool", "warm"]

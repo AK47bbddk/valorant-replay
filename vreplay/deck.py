@@ -1088,7 +1088,7 @@ def tactics_meta(cfg: dict, map_name: str) -> list[dict]:
 def build(cfg: dict, out_dir: Path, team: str | None = None, map_name: str | None = None,
           min_maps: int = 1, log=print, use_llm: bool = True, notion=None, notion_parent: str | None = None) -> list[Path]:
     """DB のマップから、チーム × マップ × 構成 と 構成 × マップ のプレイブックを作る。"""
-    conn = db.connect(db.warehouse_path(cfg))
+    conn = db.open_warehouse(cfg)
     reps = load_reports(conn)
     rows = [r for rep in reps for r in records(rep)]
     out_dir = Path(out_dir)

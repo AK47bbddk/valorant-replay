@@ -34,7 +34,7 @@ GRID = 16
 
 # 放送のミニマップのアイコンの縁（赤系・青緑系）。くすんでも拾えるよう彩度・明度は低めから
 WARM_RANGES = [((0, 70, 90), (14, 255, 255)), ((160, 70, 90), (179, 255, 255))]
-COOL_RANGES = [((78, 70, 70), (130, 255, 255))]
+COOL_RANGES = [((78, 50, 70), (108, 255, 255))]   # 青緑（H≈85〜95）。背景の青（H≈115）は含めない
 SITE_SUPERS = {"A", "B", "C"}
 
 
@@ -141,7 +141,8 @@ def _mask(hsv, ranges):
 ICON_FRAC = 0.058          # ミニマップのアイコンの直径（切り抜きの高さに対する比）。1080p の放送で約 24px
 
 
-def detect_dots(img, min_area: int = 4, max_area: int = 450, per_color: int = 5) -> list[dict]:
+def detect_dots(img, min_area: int = 4, max_area: int = 450, per_color: int = 5,
+                icon_frac: float | None = None) -> list[dict]:
     """選手のアイコン（チーム色の縁のついた丸い顔アイコン）を検出する。
 
     縁の色は試合画面の明るさでくすむので色の範囲は広めに取り、アイコン 1 つが縁の切れ目で何個にも割れないよう、
@@ -150,7 +151,7 @@ def detect_dots(img, min_area: int = 4, max_area: int = 450, per_color: int = 5)
     if img is None or img.size == 0:
         return []
     h, w = img.shape[:2]
-    D = ICON_FRAC * h
+    D = (icon_frac or ICON_FRAC) * h
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     out = []
     for color, ranges in (("warm", WARM_RANGES), ("cool", COOL_RANGES)):
@@ -347,10 +348,31 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
     aspect = 1.0
     # エージェントのアイコン照合に使う、タイマーの節目のミニマップ（ラウンド・節目ごとに 1 枚）
     keep: dict = {}
+    # アイコンの大きさは放送（レイアウト・解像度）で違うので、最初の何枚かから見積もってから点を数える
+    from . import agents as AG
+    icons = AG.load_icons(cfg, [a for ags in (agent_teams or {}).values() for a in ags if a], log=log) \
+        if agent_teams else {}
+    icon_frac = float(tcfg.get("icon_frac") or 0) or None
+    pending: list = []
+
+    def flush():
+        for t_, r_, mm_ in pending:
+            raw.append((t_, r_, detect_dots(mm_, min_area, max_area, per_color=15, icon_frac=icon_frac)))
+        pending.clear()
+
     for t, mm in scan_source():
         r = round_of(t)
         if r is None or mm is None or mm.size == 0:
             continue
+        if icon_frac is None:
+            pending.append((t, r, mm.copy()))
+            if len(pending) >= 16:
+                sample = [x[2] for x in pending if x[0] >= float(x[1]["start"]) + 5][:8] or [x[2] for x in pending[:8]]
+                icon_frac = (AG.estimate_icon_frac(sample, icons=icons or None, teams=agent_teams if icons else None)
+                             or ICON_FRAC)
+                if log:
+                    log(f"    ミニマップのアイコンの大きさ：高さの {icon_frac:.3f}（{icon_frac * mm.shape[0]:.0f}px）")
+                flush()
         if agent_teams:
             st_ = float(r["start"])
             for label, e in MARKS.items():
@@ -361,7 +383,13 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         aspect = w / max(1, h)
         if len(bgs) < 40 and (not bgs or len(samples) % 7 == 0) and (not bgs or bgs[0].shape == mm.shape):
             bgs.append(mm.copy())
-        raw.append((t, r, detect_dots(mm, min_area, max_area, per_color=15)))
+        if icon_frac is not None:
+            raw.append((t, r, detect_dots(mm, min_area, max_area, per_color=15, icon_frac=icon_frac)))
+    if pending:
+        if icon_frac is None:
+            icon_frac = AG.estimate_icon_frac([x[2] for x in pending[:8]], icons=icons or None,
+                                              teams=agent_teams if icons else None) or ICON_FRAC
+        flush()
     if not raw:
         return None
     # 背景：点や UI の動く部分を消すため、何枚かの中央値
@@ -546,7 +574,8 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
     agent_info = None
     if agent_teams and keep:
         agent_info = _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed, aspect,
-                                      T if T.get("ok") else None, background, out_dir, round_tac, log)
+                                      T if T.get("ok") else None, background, out_dir, round_tac, log,
+                                      icons=icons, icon_frac=icon_frac, alive_fn=alive_fn)
         _agent_setups(agent_info, round_tac)
     top_callouts = [{"name": n, "count": c} for n, c in callouts_all.most_common(12)]
     top_sites = [{"site": s, "count": c} for s, c in sites_all.most_common()]
@@ -716,7 +745,7 @@ def _agent_setups(agent_info: dict | None, round_tac: dict) -> None:
                 continue
             side = ATTACK if (rt.get("side1") == ATTACK) == (tm == 1) else DEFENSE
             who = {}
-            for e in sorted(ents, key=lambda e: e["agent"]):
+            for e in sorted((e for e in ents if e.get("agent")), key=lambda e: e["agent"]):
                 who.setdefault(e.get("zone") or "?", []).append(e["agent"])
             old_su = (rt.get("setups") or {}).get(str(tm)) or {}
             rt.setdefault("setups", {})[str(tm)] = {
@@ -795,24 +824,34 @@ def board_png(base: np.ndarray, entries: list[dict], icons: dict, path: Path, to
 
 
 def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed, aspect, T, background,
-                     out_dir, round_tac, log):
+                     out_dir, round_tac, log, icons=None, icon_frac=None, alive_fn=None):
     """節目ごとのミニマップでエージェントのアイコンを照合し、位置・ゾーンと配置図を作る。"""
     from . import agents as AG
     from . import minimap as MM
-    names = [a for ags in agent_teams.values() for a in ags if a]
-    icons = AG.load_icons(cfg, names, log=log)
+    if icons is None:
+        icons = AG.load_icons(cfg, [a for ags in agent_teams.values() for a in ags if a], log=log)
     if not icons:
         return None
+    icon_frac = icon_frac or ICON_FRAC
     team_color = {v: k for k, v in color_team.items()}
     base = map_icon(cfg, meta.get("name") or "", 512) if T else None
     out = {}
     first = None
     n_found = n_try = 0
     for (n, label), (_, t, mm) in sorted(keep.items()):
-        found = AG.match(mm, icons, agent_teams, color_team, mask=mask)
+        alive = None
+        if alive_fn is not None:
+            try:
+                a1, a2 = alive_fn(t)
+                alive = {1: a1, 2: a2} if a1 is not None and a2 is not None else None
+            except Exception:
+                alive = None
+        found = AG.match(mm, icons, agent_teams, color_team, icon_frac=icon_frac,
+                         mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
+                         alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None)
         n_try += 1
         n_found += len(found)
-        if first is None and found:
+        if found and (first is None or len(found) > len(first[1])):
             first = (mm, found)
         ents = []
         for f in found:
@@ -838,7 +877,7 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
                 board_png(bg, ents, icons, p, lambda e: (e["x"] * bg.shape[1], e["y"] * bg.shape[0]), f"R{n} {label}")
             rt.setdefault("boards", {})[label] = str(p)
     if first is not None and out_dir:
-        AG.contact_sheet(first[0], first[1], icons, Path(out_dir) / "_tactics" / "agents_check.jpg")
+        AG.contact_sheet(first[0], first[1], icons, Path(out_dir) / "_tactics" / "agents_check.jpg", icon_frac=icon_frac)
     if log:
         log(f"    エージェントの位置：{n_try} 枚で平均 {n_found / max(1, n_try):.1f} 人を照合（アイコン {len(icons)} 種）")
     return out

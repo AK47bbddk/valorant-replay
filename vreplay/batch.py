@@ -67,7 +67,7 @@ def run(cfg: dict, start: str | None = None, end: str | None = None, limit: int 
         out_root: Path | None = None, log=print) -> dict:
     perf.start()
     t0 = time.time()
-    conn = db.connect(db.warehouse_path(cfg))
+    conn = db.open_warehouse(cfg)
     rows = _rows(conn, start, end, retry_failed, shard, limit)
     if not rows:
         log("処理待ちのマップがありません。先に `vreplay backfill` を実行してください。")
