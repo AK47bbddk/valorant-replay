@@ -96,6 +96,10 @@ def _map_section(rep: dict, base: Path) -> str:
         conf = float(tac.get("confidence") or 0)
         out.append(f'<p class="sub">推定サイト（動画のミニマップから・目安）：{_e(sites)}'
                    f'　信頼度 {conf:.0%}</p>')
+    if tac.get("fit_image") and Path(tac["fit_image"]).exists():
+        out.append(f'<details><summary>ミニマップ合わせの確認（コールアウトが地形に乗っていれば OK）</summary>'
+                   f'<div class="body"><p class="sub">{_e(tac.get("calibration"))}</p>'
+                   f'{_img(tac["fit_image"], base, "ミニマップとコールアウトの重ね合わせ")}</div></details>')
     if rep.get("perf_note"):
         out.append(f'<p class="sub">{_e(rep["perf_note"])}</p>')
     if rep.get("timings"):

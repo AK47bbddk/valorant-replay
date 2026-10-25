@@ -387,7 +387,7 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
         try:
             tac_rounds = [{
                 "n": r.n, "start": r.t_drop, "end": r.t_end, "side1": sides.get(r.n),
-                "plant": next((float(t[i]) for i in r.live if obs["spike"][i]), None),
+                "plant": next((float(t[i]) for i in r.live if obs["spike"][i] and t[i] > r.t_drop + 5), None),
             } for r in det]
             from . import tactics
             with perf.stage("tactics", tag=tag, label="サイト・位置の解析") as st_tac:
@@ -403,11 +403,15 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                     rr["tactics"] = {
                         "site": rt.get("site"), "site_conf": rt.get("site_conf"),
                         "sites": rt.get("sites"), "samples": rt.get("samples"), "dots": rt.get("dots"),
-                        "callouts": dict(top),
+                        "callouts": dict(top), "timeline": rt.get("timeline") or {},
+                        "plant_site": rt.get("plant_site"), "plant_zones": rt.get("plant_zones"),
+                        "aligned": bool(tac.get("aligned")),
                     }
                 bits = "・".join(f"{x['site']}{x['count']}" for x in (tac.get("sites") or [])[:3])
+                n_ps = sum(1 for v in tac["rounds"].values() if v.get("plant_site"))
                 tac_note = (f"サイト {bits or '-'}・点 {tac['mean_dots']:.1f}/枚"
-                            f"・信頼度 {tac['confidence']:.0%}")
+                            f"・{'ミニマップ合わせ OK' if tac.get('aligned') else 'ミニマップ合わせ 失敗'}"
+                            f"・設置サイト {n_ps}R・信頼度 {tac['confidence']:.0%}")
                 log(f"    {tac_note}（{perf.fmt_seconds(st_tac['seconds'])}）")
         except Exception:
             traceback.print_exc()

@@ -1,4 +1,5 @@
 import json
+import math
 
 import cv2
 import numpy as np
@@ -110,3 +111,63 @@ def test_analyze_video_reuses_scanned_minimaps(tmp_path, monkeypatch):
                                 log=lambda *a: None, store=Store(), obs=obs)
     assert tac and tac["samples"] >= 4
     assert tac["rounds"]["1"]["site"] == "A"
+
+
+def test_analyze_video_aligns_minimap_and_reads_plant_site(tmp_path, monkeypatch):
+    from vreplay import minimap as M
+    rng = np.random.default_rng(3)
+    calls = []
+    for i in range(40):
+        u, v = rng.uniform(0.12, 0.88, 2)
+        sup = "A" if u < 0.4 and v < 0.55 else "B" if u > 0.6 and v < 0.55 else "Mid"
+        calls.append({"name": f"c{i}", "super": sup, "x": float(u), "y": float(v)})
+    calls += [{"name": "Spawn", "super": "Attacker Side", "x": 0.5, "y": 0.9},
+              {"name": "Spawn", "super": "Defender Side", "x": 0.5, "y": 0.12}]
+    meta = {"name": "Test", "callouts": calls,
+            "spawns": {tactics.ATTACK: (0.5, 0.9), tactics.DEFENSE: (0.5, 0.12)}}
+    monkeypatch.setattr(tactics, "load_map", lambda name, cfg, log=None: meta)
+    truth = {"mirror": False, "theta": math.radians(90), "scale": 0.85, "tx": 0.5, "ty": 0.5}
+    a_sites = [c for c in calls if c["super"] == "A"]
+    b_sites = [c for c in calls if c["super"] == "B"]
+    rounds, frames, ts = [], [], []
+    for n in range(1, 17):
+        st = n * 150.0
+        side1 = "攻撃" if n <= 8 else "防衛"
+        plant = st + 50
+        rounds.append({"n": n, "start": st, "end": st + 90, "side1": side1, "plant": plant})
+        for t in np.arange(st - 6, st + 90, 1.0):
+            img = np.zeros((300, 300, 3), np.uint8)
+            e = t - st
+            atk, dfd = [], []
+            for k in range(5):
+                if e < 0:
+                    atk.append((0.5 + rng.normal(0, 0.03), 0.88 + rng.normal(0, 0.02)))
+                    dfd.append((rng.uniform(0.3, 0.7), 0.15 + rng.normal(0, 0.05)))
+                else:
+                    src = a_sites if n % 2 else b_sites       # 奇数ラウンドは A、偶数は B に設置
+                    c = src[k % len(src)] if e >= 40 else calls[rng.integers(len(calls))]
+                    atk.append((c["x"] + rng.normal(0, 0.015), c["y"] + rng.normal(0, 0.015)))
+                    c2 = calls[rng.integers(len(calls))]
+                    dfd.append((c2["x"] + rng.normal(0, 0.015), c2["y"] + rng.normal(0, 0.015)))
+            warm, cool = (atk, dfd) if side1 == "攻撃" else (dfd, atk)
+            for pts, col in ((warm, (0, 0, 255)), (cool, (255, 128, 0))):
+                for u, v in pts:
+                    x, y = M.apply(truth, u, v)
+                    cv2.circle(img, (int(x * 300), int(y * 300)), 4, col, -1)
+            frames.append(img)
+            ts.append(float(t))
+
+    class Store:
+        def get(self, idx, name):
+            return frames[idx]
+
+    obs = {"t": ts, "idx": list(range(len(ts)))}
+    tac = tactics.analyze_video(_cfg(tmp_path), tmp_path / "v.mp4", "Test", rounds, out_dir=tmp_path / "o",
+                                log=lambda *a: None, store=Store(), obs=obs)
+    assert tac["aligned"], tac["calibration"]
+    assert tac["warm_team1"] is True
+    sites = {n: tac["rounds"][str(n)]["plant_site"] for n in range(1, 17)}
+    assert sum(sites[n] == ("A" if n % 2 else "B") for n in sites) >= 14, sites
+    tl = tac["rounds"]["1"]["timeline"]
+    assert "1:00" in tl and sum(tl["1:00"]["1"].values()) >= 4
+    assert tac["fit_image"] and (tmp_path / "o" / "_tactics" / "test_fit.jpg").exists()

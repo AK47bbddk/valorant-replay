@@ -86,22 +86,19 @@ def load_map(name: str, cfg: dict, log=None) -> dict | None:
     for c in m["callouts"]:
         loc = c.get("location") or {}
         x, y = float(loc.get("x") or 0), float(loc.get("y") or 0)
-        nx, ny = (x * xm + xa, y * ym + ya) if xm or ym else (x, y)
+        # valorant-api の変換は x と y が入れ替わる：画像の横 = ゲームの y、画像の縦 = ゲームの x
+        nx, ny = (y * xm + xa, x * ym + ya) if xm or ym else (x, y)
         raw.append((nx, ny, c.get("regionName") or "", c.get("superRegionName") or ""))
     xs = [p[0] for p in raw]
     ys = [p[1] for p in raw]
+    inside = all(-0.25 <= v <= 1.25 for v in xs + ys)
     x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
-    pad = 0.04
     callouts = []
     for nx, ny, region, super_ in raw:
-        fx = (nx - x0) / (x1 - x0) if x1 > x0 else 0.5
-        fy = (ny - y0) / (y1 - y0) if y1 > y0 else 0.5
-        callouts.append({
-            "name": region,
-            "super": super_,
-            "x": min(1.0, max(0.0, fx * (1 + 2 * pad) - pad)),
-            "y": min(1.0, max(0.0, fy * (1 + 2 * pad) - pad)),
-        })
+        if not inside:                       # 変換係数が無い・おかしいときだけ、外接矩形で 0..1 に直す
+            nx = (nx - x0) / (x1 - x0) if x1 > x0 else 0.5
+            ny = (ny - y0) / (y1 - y0) if y1 > y0 else 0.5
+        callouts.append({"name": region, "super": super_, "x": float(nx), "y": float(ny)})
     return {
         "name": m.get("displayName") or name,
         "icon": m.get("displayIcon"),
@@ -245,9 +242,44 @@ def _calibrate(early: list[dict], spawns: dict, log=print) -> tuple[int, bool, f
 
 
 # ---------------------------------------------------------------- 動画の解析
+# ラウンドの経過秒 → タイマー表示（1:40 始まり）。プレイブックの「1:00 までに MID から減らす」などに使う
+MARKS = {"1:30": 10, "1:15": 25, "1:00": 40, "0:40": 60, "0:20": 80}
+ZONE_JA = {"attacker side": "攻撃側", "defender side": "防衛側"}
+
+
+def zone_of(callout: dict | None) -> str:
+    if not callout:
+        return "?"
+    sup = callout.get("super") or ""
+    if sup in SITE_SUPERS:
+        return sup
+    low = sup.lower()
+    if "mid" in low:
+        return "Mid"
+    return ZONE_JA.get(low, sup or "?")
+
+
+def _wanted_times(rlist: list[dict], every: float) -> list[float]:
+    """ラウンドごとに、開始直前（スポーン）・タイマーの節目・一定間隔・設置直後の時刻。"""
+    out = []
+    for r in rlist:
+        st, en = float(r["start"]), float(r["end"])
+        out += [st - 5.0, st - 3.0, st - 1.0]
+        out += [st + e for e in MARKS.values() if st + e < en]
+        e = 4.0
+        while st + e < en:
+            out.append(st + e)
+            e += every
+        if r.get("plant") is not None:
+            p = float(r["plant"])
+            out += [p + 1.0, p + 5.0, p + 10.0]
+    return sorted(t for t in out if t >= 0)
+
+
 def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
                   out_dir: Path | None = None, log=print, store=None, obs=None) -> dict | None:
-    """rounds: [{"n": 1, "start": 10.0, "end": 120.0, "side1": "攻撃"|"防御"}, ...]"""
+    """rounds: [{"n": 1, "start": 10.0, "end": 120.0, "side1": "攻撃"|"防御", "plant": 秒|None}, ...]"""
+    from . import minimap as MM
     if not rounds or path is None:
         return None
     meta = load_map(map_name, cfg, log=log)
@@ -260,77 +292,90 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
     min_area = int(tcfg.get("min_dot_area") or 4)
     max_area = int(tcfg.get("max_dot_area") or 450)
 
-    start = max(0.0, min(float(r["start"]) for r in rounds))
-    end = max(float(r["end"]) for r in rounds) + 1.0
+    rlist = sorted(rounds, key=lambda r: float(r["start"]))
+    start = max(0.0, min(float(r["start"]) for r in rlist) - 6.0)
+    end = max(float(r["end"]) for r in rlist) + 1.0
     roi = cfg["hud"]["roi"]["minimap"]
-    background = None
-    bg_path = None
+    bg_path = fit_path = None
     if out_dir:
         bg_path = Path(out_dir) / "_tactics" / f"{_norm(map_name) or 'map'}.jpg"
+        fit_path = bg_path.with_name(bg_path.stem + "_fit.jpg")
         bg_path.parent.mkdir(parents=True, exist_ok=True)
 
-    samples: list[dict] = []
-    dots: list[dict] = []
-    ri = 0
-    rlist = sorted(rounds, key=lambda r: float(r["start"]))
+    def round_of(t: float):
+        for r in rlist:
+            if float(r["start"]) - 6.0 <= t < float(r["end"]):
+                return r
+        return None
 
     def scan_source():
         """スキャン時に保存したミニマップを使い、動画の二度デコードを避ける。"""
         if store is not None and obs is not None and len(obs.get("t") or []) and obs.get("idx"):
             getter = getattr(store, "get_nearest", None) or store.get
-            last = -1e9
-            for t, idx in zip(obs["t"], obs["idx"]):
-                t = float(t)
-                if t < start or t > end or t - last < every - 1e-6:
+            ts = np.asarray(obs["t"], float)
+            used = set()
+            for w in _wanted_times(rlist, every):
+                j = int(np.argmin(np.abs(ts - w)))
+                if abs(ts[j] - w) > max(1.5, every / 2) or j in used:
                     continue
-                mm = getter(int(idx), "minimap")
+                used.add(j)
+                mm = getter(int(obs["idx"][j]), "minimap")
                 if mm is None or mm.size == 0:
                     continue
-                last = t
-                yield t, mm
+                yield float(ts[j]), mm
             return
-        for t, frame in iter_frames(Path(path), 1.0 / every, start, end - start, hwaccel=False):
+        for t, frame in iter_frames(Path(path), 1.0 / min(every, 3.0), start, end - start, hwaccel=False):
             mm = crop(frame, roi)
             if mm is not None and mm.size:
                 yield t, mm
 
+    samples: list[dict] = []
+    dots: list[dict] = []
+    bgs: list[np.ndarray] = []
+    aspect = 1.0
     for t, mm in scan_source():
-        while ri < len(rlist) and t >= float(rlist[ri]["end"]):
-            ri += 1
-        if ri >= len(rlist) or t < float(rlist[ri]["start"]):
+        r = round_of(t)
+        if r is None or mm is None or mm.size == 0:
             continue
-        r = rlist[ri]
-        if mm is None or mm.size == 0:
-            continue
-        if background is None:
-            background = mm.copy()
-            if bg_path:
-                cv2.imwrite(str(bg_path), mm, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        h, w = mm.shape[:2]
+        aspect = w / max(1, h)
+        if len(bgs) < 40 and (not bgs or len(samples) % 7 == 0) and (not bgs or bgs[0].shape == mm.shape):
+            bgs.append(mm.copy())
         found = detect_dots(mm, min_area, max_area)
         warm = [d for d in found if d["color"] == "warm"]
         cool = [d for d in found if d["color"] == "cool"]
-        sample = {
-            "t": t, "n": int(r["n"]), "side1": _canon(r.get("side1")),
-            "warm": _centroid(warm), "cool": _centroid(cool),
-            "n_dots": len(found),
-        }
-        samples.append(sample)
+        samples.append({"t": t, "n": int(r["n"]), "side1": _canon(r.get("side1")),
+                        "warm": _centroid(warm), "cool": _centroid(cool), "n_dots": len(found)})
         for d in found:
             dots.append({"t": t, "n": int(r["n"]), "side1": _canon(r.get("side1")),
                          "color": d["color"], "x": d["x"], "y": d["y"]})
     if not samples:
         return None
+    # 背景：点や UI の動く部分を消すため、何枚かの中央値
+    background = np.median(np.stack(bgs), axis=0).astype(np.uint8) if len(bgs) >= 3 else bgs[0]
+    if bg_path is not None:
+        cv2.imwrite(str(bg_path), background, [cv2.IMWRITE_JPEG_QUALITY, 92])
 
-    # 各ラウンドの開始直後（スポーンに固まっている時間）を補正材料にする
     start_by_n = {int(r["n"]): float(r["start"]) for r in rlist}
-    early = [s for s in samples if s["t"] <= start_by_n.get(s["n"], 0.0) + spawn_window]
-    k, warm1, score, cal_msg = _calibrate(early, meta["spawns"], log=log)
+    T = MM.fit(samples, [(d["x"], d["y"]) for d in dots
+                         if d["t"] >= start_by_n.get(d["n"], 0.0) + 3], meta, aspect, start_by_n)
+    if T.get("ok"):
+        placed = MM.place(T, meta["callouts"])
+        warm1, k, score, cal_msg = T["warm1"], 0, 1.0 - T["confidence"], T["msg"]
+    else:
+        # 合わせられないときは従来どおり（90 度単位の向きとスポーン）で目安だけ出す
+        early = [s for s in samples if 0 <= s["t"] - start_by_n.get(s["n"], 0.0) <= spawn_window]
+        k, warm1, score, cal_msg = _calibrate(early, meta["spawns"], log=log)
+        cal_msg = f"{T.get('msg', '')}／{cal_msg}"
+        placed = [{**c, "x": _tf(c["x"], c["y"], k)[0], "y": _tf(c["x"], c["y"], k)[1]}
+                  for c in meta["callouts"]]
     if cal_msg and log:
-        log(f"    ミニマップ補正: {cal_msg}")
-
-    tf_callouts = [{**c, "x": _tf(c["x"], c["y"], k)[0], "y": _tf(c["x"], c["y"], k)[1]}
-                   for c in meta["callouts"]]
-    # チーム番号: 暖色がチーム1なら warm=1/cool=2、そうでなければ逆
+        log(f"    {cal_msg}")
+    if fit_path is not None:
+        try:
+            _fit_overlay(background, placed, dots, fit_path)
+        except Exception:
+            fit_path = None
     color_team = {"warm": 1 if warm1 else 2, "cool": 2 if warm1 else 1}
 
     grid = np.zeros((GRID, GRID), int)
@@ -347,9 +392,13 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         } for r in rlist
     }
     positions = []
+    by_sample: dict[tuple[int, float], dict[int, Counter]] = {}
 
     for d in dots:
         x, y = d["x"], d["y"]
+        n = int(d["n"])
+        if d["t"] < start_by_n.get(n, 0.0):           # 開始前（スポーン）の点は位置の集計に入れない
+            continue
         gx, gy = min(GRID - 1, max(0, int(x * GRID))), min(GRID - 1, max(0, int(y * GRID)))
         grid[gy, gx] += 1
         team = color_team.get(d["color"])
@@ -357,27 +406,28 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         side = d.get("side1") if team == 1 else _opp(d.get("side1"))
         if side in grid_side:
             grid_side[side][gy, gx] += 1
-        c, dist = nearest(tf_callouts, x, y)
-        site = c["super"] if c and c["super"] in SITE_SUPERS else (c["super"] if c else "?")
+        c, dist = MM.nearest(placed, x, y, aspect)
+        if dist > 0.18:
+            c = None
+        site = zone_of(c)
         callout = f"{site} {c['name']}" if c and site in SITE_SUPERS else (c["name"] if c else "?")
         callouts_all[callout] += 1
-        n = int(d["n"])
+        by_sample.setdefault((n, float(d["t"])), {1: Counter(), 2: Counter()})[team][site] += 1
         rt = round_tac.get(n)
         if rt is None:
             continue
         rt["dots"] += 1
         rt["sites"][site] += 1
         rt["callouts"][callout] += 1
-        if team in (1, 2):
-            rt["teams"][team][site] += 1
-        if d["t"] >= start_by_n.get(int(d["n"]), 0.0) + site_after:
+        rt["teams"][team][site] += 1
+        if d["t"] >= start_by_n.get(n, 0.0) + site_after:
             sites_all[site] += 1
-        if len(positions) < 12000 and team in (1, 2):
+        if len(positions) < 15000:
             positions.append([n, round(float(d["t"]), 1), round(x, 3), round(y, 3), int(team),
                               1 if side == ATTACK else 2, site, callout])
 
     for n, rt in round_tac.items():
-        rt["samples"] = sum(1 for s in samples if s["n"] == n)
+        rt["samples"] = sum(1 for s in samples if s["n"] == n and s["t"] >= start_by_n.get(n, 0.0))
         for key in ("sites", "callouts"):
             rt[key] = dict(rt[key])
         rt["teams"] = {str(kk): dict(v) for kk, v in rt["teams"].items()}
@@ -389,23 +439,52 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         else:
             rt["site"] = None
             rt["site_conf"] = 0.0
+        # タイマーの節目ごとの、チーム別の人数（点の数）
+        st = start_by_n[n]
+        mine = sorted((t, cnts) for (nn, t), cnts in by_sample.items() if nn == n)
+        tl = {}
+        for label, e in MARKS.items():
+            near = [(abs(t - st - e), cnts) for t, cnts in mine if abs(t - st - e) <= 3.5]
+            if near:
+                cnts = min(near, key=lambda x: x[0])[1]
+                tl[label] = {str(tm): dict(c) for tm, c in cnts.items() if c}
+        rt["timeline"] = tl
+        plant = rt.get("plant")
+        rt["plant_site"] = None
+        if plant is not None:
+            after = [cnts for t, cnts in mine if float(plant) <= t <= float(plant) + 11]
+            atk_team = 1 if rt["side1"] == ATTACK else 2 if rt["side1"] == DEFENSE else None
+            if after and atk_team:
+                tot = Counter()
+                for cnts in after:
+                    tot.update({z: v for z, v in cnts[atk_team].items() if z in SITE_SUPERS})
+                if tot:
+                    rt["plant_site"] = tot.most_common(1)[0][0]
+                rt["plant_zones"] = {str(tm): dict(c) for tm, c in after[0].items() if c}
+        if rt["plant_site"]:
+            rt["site"] = rt["plant_site"]
+            rt["site_conf"] = max(rt["site_conf"], 0.8 if T.get("ok") else 0.5)
 
     top_callouts = [{"name": n, "count": c} for n, c in callouts_all.most_common(12)]
     top_sites = [{"site": s, "count": c} for s, c in sites_all.most_common()]
     mean_dots = sum(s["n_dots"] for s in samples) / len(samples)
-    confidence = round(min(1.0, mean_dots / 10.0), 2)
-    if score > 0.30:
-        confidence = round(confidence * 0.7, 2)
+    confidence = round(min(1.0, mean_dots / 10.0) * (T["confidence"] if T.get("ok") else 0.5), 2)
     return {
         "map": meta["name"],
         "background": str(bg_path) if bg_path and bg_path.exists() else None,
+        "fit_image": str(fit_path) if fit_path and fit_path.exists() else None,
         "samples": len(samples),
         "mean_dots": round(mean_dots, 2),
         "confidence": confidence,
+        "aligned": bool(T.get("ok")),
+        "transform": {k_: T[k_] for k_ in ("mirror", "theta", "scale", "tx", "ty", "aspect", "confidence")
+                      if k_ in T} if T.get("ok") else None,
         "orientation": k,
         "warm_team1": bool(warm1),
         "calibration": cal_msg,
-        "calibration_score": round(score, 3),
+        "calibration_score": round(float(score), 3),
+        "callouts_placed": [{"name": c["name"], "super": c["super"], "x": round(c["x"], 4), "y": round(c["y"], 4)}
+                            for c in placed],
         "sites": top_sites,
         "callouts": top_callouts,
         "grid": grid.tolist(),
@@ -414,6 +493,25 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         "rounds": {str(n): v for n, v in sorted(round_tac.items())},
         "positions": positions,
     }
+
+
+def _fit_overlay(bg: np.ndarray, placed: list[dict], dots: list[dict], path: Path) -> Path:
+    """確認用：ミニマップの背景に、合わせたコールアウトと点を重ねた画像。"""
+    img = cv2.resize(bg, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    h, w = img.shape[:2]
+    for d in dots[::7]:
+        col = (60, 60, 255) if d["color"] == "warm" else (255, 200, 60)
+        cv2.circle(img, (int(d["x"] * w), int(d["y"] * h)), 2, col, -1)
+    for c in placed:
+        x, y = int(c["x"] * w), int(c["y"] * h)
+        col = {"A": (0, 220, 255), "B": (255, 120, 255), "C": (120, 255, 120)}.get(c["super"], (255, 255, 255))
+        cv2.drawMarker(img, (x, y), col, cv2.MARKER_CROSS, 10, 2)
+        label = (c["super"] + " " if c["super"] in SITE_SUPERS else "") + c["name"]
+        cv2.putText(img, label[:18], (x + 4, y - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(img, label[:18], (x + 4, y - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.38, col, 1, cv2.LINE_AA)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(path), img, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    return path
 
 
 def _centroid(dots: list[dict]) -> tuple[float, float] | None:

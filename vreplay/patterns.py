@@ -23,7 +23,7 @@ def _zone(p) -> str:
     low = str(s).lower()
     if "mid" in low:
         return "Mid"
-    if "spawn" in low:
+    if "spawn" in low or "side" in low or s in ("攻撃側", "防衛側"):
         return "Spawn"
     return "Other"
 

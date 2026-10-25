@@ -56,7 +56,7 @@ warehouse:
 
 tactics:
   # ミニマップの点を拾う間隔（秒）。小さいほど細かいが、動画のデコードが増える。
-  sample_seconds: 6
+  sample_seconds: 5
   # ラウンド開始から何秒を「スポーンにいる」とみなして、向き・チーム色の補正に使うか
   spawn_window_seconds: 8
   # サイト集計を始めるまで（開始から何秒後以降の点を使うか）
