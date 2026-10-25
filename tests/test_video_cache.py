@@ -173,3 +173,52 @@ def test_range_getter_falls_back_to_query_and_uses_ytdlp(tmp_path):
             assert g.get(100, 4195) == data[100:4196]
     finally:
         srv.shutdown()
+
+
+def test_range_download_hls_segments(tmp_path, monkeypatch):
+    """DASH が使えないクライアントでも、HLS（m3u8）の必要な断片だけを並列に取ってつなげる。"""
+    import shutil
+    import subprocess
+    import threading
+    from functools import partial
+    from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+
+    import cv2
+    import pytest
+
+    from vreplay import video as V
+    from vreplay import ytrange
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg が必要")
+    src = tmp_path / "src.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "nullsrc=s=160x120:r=30,geq=lum='mod(N\\,200)+20':cb=128:cr=128", "-t", "90",
+                    "-c:v", "libx264", "-preset", "veryfast", "-g", "150", "-sc_threshold", "0", "-pix_fmt", "yuv420p",
+                    str(src)], check=True)
+    hls = tmp_path / "hls"
+    hls.mkdir()
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(src), "-c", "copy", "-f", "hls", "-hls_time", "5",
+                    "-hls_list_size", "0", "-hls_segment_filename", str(hls / "s%03d.ts"), str(hls / "v.m3u8")],
+                   check=True)
+
+    class H(SimpleHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), partial(H, directory=str(hls)))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    monkeypatch.setattr(V, "_RANGE_FAILS", 0)
+    monkeypatch.setattr(ytrange, "format_info", lambda *a, **k: {
+        "url": f"http://127.0.0.1:{srv.server_port}/v.m3u8", "headers": {}, "format_id": "96", "kind": "hls"})
+    try:
+        man = V.download_segment("vid", 32, 70, tmp_path / "out", method="range", range_threads=4)
+    finally:
+        srv.shutdown()
+    j = __import__("json").loads(man.read_text())
+    assert j["mode"] == "hls" and len(j["parts"]) == 1
+    lum = lambda f: cv2.cvtColor(f, cv2.COLOR_BGR2GRAY).mean()
+    ref = {round(t - 32, 2): lum(f) for t, f in V.iter_frames(src, 2, 32, 36, hwaccel=False)}
+    got = {round(t, 2): lum(f) for t, f in V.iter_frames(man, 2, 0, 36, hwaccel=False)}
+    common = sorted(set(ref) & set(got))
+    assert len(common) >= 70
+    assert all(abs(ref[t] - got[t]) < 3 for t in common)

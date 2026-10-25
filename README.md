@@ -330,8 +330,9 @@ powershell -ExecutionPolicy Bypass -File .\valorant-replay\scripts\fetch_windows
 **動画の取得**：YouTube は 1 本の接続を 1 MB/s 前後に絞るので、本数で稼ぎます。
 まず DASH の目次（sidx）から必要な時間帯のバイト範囲だけを 16 本同時に取ります（`video.download_method: range`）。
 URL の取得と通信はプロセス内の yt-dlp（区間取得と同じ cookies・クライアント・JS ランタイム）で行い、
-クライアント（既定・tv・visionos・web_safari・mweb・android_vr）ごとに 1KB だけ取ってみて、Range ヘッダーか `&range=` で
-通るものを使います。どれも通らなければ区間を 16 分割して yt-dlp で同時に取ります（2 回続けて失敗した実行では範囲取得を試しません）。
+クライアント（tv・web_safari・既定・visionos・mweb・android_vr）ごとに、DASH（mp4）なら 1KB だけ取ってみて Range ヘッダーか
+`&range=` で通るものを、DASH が無い・拒否されるクライアントでは HLS（m3u8）のプレイリストから必要な時間帯の断片だけを
+並列に取ります（既定クライアントの DASH は PO トークンが無いと 403 になり、tv などは HLS だけを返すため）。どれも通らなければ区間を 16 分割して yt-dlp で同時に取ります（2 回続けて失敗した実行では範囲取得を試しません）。
 ログに「必要な範囲だけを 16 本同時に取得しました（取得方法 tv・Range ヘッダー）」か、失敗した理由がクライアントごとに出ます。
 
 動画の解析は 2 段階です（`video.scan_mode`、既定 `auto`）。

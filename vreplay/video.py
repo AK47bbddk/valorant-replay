@@ -93,7 +93,7 @@ def find_cached(video_id: str, start: int, end: int, dirs) -> Path | None:
 # 一部の形式は数 MB 進むと 403 で切られる（ffmpeg exited with code 8）ため、順に試す
 CLIENTS = [None, "web_safari", "tv", "mweb", "web_embedded"]
 # 範囲取得で試すクライアント。tv・visionos の https 形式は Range でどこからでも取れることが多い
-RANGE_CLIENTS = [None, "tv", "visionos", "web_safari", "mweb", "android_vr"]
+RANGE_CLIENTS = ["tv", "web_safari", None, "visionos", "mweb", "android_vr"]
 
 
 def _err_lines(stderr: str, n: int = 6) -> str:
@@ -131,7 +131,8 @@ def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_hei
             if log:
                 try:
                     j = json.loads(Path(man).read_text(encoding="utf-8"))
-                    how = f"（取得方法 {j.get('client')}・{'Range ヘッダー' if j.get('mode') == 'header' else '&range='}）"
+                    mode = {"header": "Range ヘッダー", "query": "&range=", "hls": "HLS の断片"}.get(j.get("mode"), j.get("mode"))
+                    how = f"（取得方法 {j.get('client')}・{mode}・形式 {j.get('format')}）"
                 except Exception:
                     how = ""
                 log(f"    必要な範囲だけを {range_threads} 本同時に取得しました{how}")
@@ -172,7 +173,11 @@ def _download_range(video_id: str, start: int, end: int, out_dir: Path, max_heig
     1 本の動画ファイルと、区間の先頭とのずれを書いた parts.json を返す。"""
     from . import ytrange
     env = _ytdlp_env()
-    fmt = f"bv*[height<={max_height}][vcodec^=avc1][ext=mp4]/bv*[height<={max_height}][ext=mp4]"
+    h = max_height
+    # DASH（mp4・バイト範囲で取れる）を優先し、無ければ HLS（m3u8・断片ごとに取れる）。
+    # 既定クライアントの DASH は PO トークンが無いと 403 になることがあり、tv などは HLS しか返さない
+    fmt = (f"bv*[height<={h}][vcodec^=avc1][ext=mp4][protocol=https]/bv*[height<={h}][ext=mp4][protocol=https]"
+           f"/bv*[height<={h}][protocol^=m3u8]/b[height<={h}][protocol^=m3u8]")
     errors = []
     info = getter = None
     jar = None
@@ -188,7 +193,11 @@ def _download_range(video_id: str, start: int, end: int, out_dir: Path, max_heig
         try:
             info = ytrange.format_info(video_id, fmt, cookies, client, env)
             getter = ytrange.Getter(info["url"], info["headers"], info.get("opts"), cookies=jar)
-            mode = getter.probe()
+            if info.get("kind") == "hls":
+                getter.fetch(info["url"])            # プレイリストが取れるか（断片の取得は本番で）
+                mode = "hls"
+            else:
+                mode = getter.probe()
             info["client"], info["mode"] = client or "既定", mode
             break
         except Exception as e:
@@ -202,7 +211,10 @@ def _download_range(video_id: str, start: int, end: int, out_dir: Path, max_heig
     tmp = Path(tempfile.mkdtemp(prefix="vreplay_r_"))
     try:
         f = tmp / f"{stem}.range.mp4"
-        t0, t1 = ytrange.fetch_section(getter, start, end, f, threads=threads)
+        if info.get("kind") == "hls":
+            t0, t1 = ytrange.fetch_hls(getter, info["url"], start, end, f, threads=threads)
+        else:
+            t0, t1 = ytrange.fetch_section(getter, start, end, f, threads=threads)
         _, _, dur = probe(f)
         if dur < (min(end, t1) - max(start, t0)) - 10:
             raise RuntimeError(f"取れた長さが足りません（{dur:.0f} 秒）")

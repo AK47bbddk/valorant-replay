@@ -10,6 +10,7 @@ moof/mdat の断片…」という作りなので、
 """
 from __future__ import annotations
 
+import re
 import struct
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -137,6 +138,27 @@ class Getter:
         r = c.get(url, headers=h, timeout=60)
         return r.status_code, r.content
 
+    def fetch(self, url: str, tries: int = 4) -> bytes:
+        """URL を丸ごと取る（HLS のプレイリストと断片用）。"""
+        last = None
+        c = self._client()
+        for _ in range(tries):
+            try:
+                if self.opts is not None:
+                    from yt_dlp.networking import Request
+                    with c.urlopen(Request(url, headers=dict(self.headers))) as r:
+                        st, data = int(getattr(r, "status", 200)), r.read()
+                else:
+                    rr = c.get(url, headers=dict(self.headers), timeout=60)
+                    st, data = rr.status_code, rr.content
+                if st == 200 and data:
+                    return data
+                last = f"HTTP {st}・{len(data)} バイト"
+            except Exception as e:
+                st_ = getattr(getattr(e, "response", None), "status", None) or getattr(e, "status", None)
+                last = f"HTTP {st_}" if st_ else str(e)[:200]
+        raise RuntimeError(f"取れませんでした（{last}）：{url[:80]}")
+
     def get(self, a: int, b: int, tries: int = 4, exact: bool = True) -> bytes:
         last = None
         for _ in range(tries):
@@ -205,6 +227,60 @@ def fetch_section(getter: "Getter", start: float, end: float, out: Path, threads
     return segs[0][2], segs[-1][3]
 
 
+def parse_m3u8(text: str, base: str) -> dict:
+    """HLS のメディアプレイリストから、初期化部分（EXT-X-MAP）と各断片の (URL, 開始秒, 終了秒)。"""
+    from urllib.parse import urljoin
+    segs, t, dur, init = [], 0.0, None, None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("#EXT-X-MAP"):
+            m = re.search(r'URI="([^"]+)"', line)
+            if m:
+                init = urljoin(base, m.group(1))
+        elif line.startswith("#EXTINF:"):
+            dur = float(line[8:].split(",")[0])
+        elif line and not line.startswith("#"):
+            d = dur if dur is not None else 0.0
+            segs.append((urljoin(base, line), t, t + d))
+            t += d
+            dur = None
+    if not segs:
+        raise ValueError("プレイリストに断片がありません（マスタープレイリストかもしれません）")
+    return {"init": init, "segments": segs}
+
+
+def fetch_hls(getter: "Getter", playlist_url: str, start: float, end: float, out: Path, threads: int = 16,
+              margin: float = 1.0) -> tuple[float, float]:
+    """HLS（m3u8）の、[start, end] を含む断片だけを並列に取って 1 本の mp4 にする。返り値 (取った区間の開始秒, 終了秒)。
+    YouTube の tv・web_safari などのクライアントは、PO トークンの要らない HLS を返す（DASH の URL は 403 になる）。"""
+    text = getter.fetch(playlist_url).decode("utf-8", "replace")
+    p = parse_m3u8(text, playlist_url)
+    segs = [s for s in p["segments"] if s[2] > start - margin and s[1] < end]
+    if not segs:
+        raise ValueError("指定の時間帯が動画に含まれていません")
+    datas: list[bytes | None] = [None] * len(segs)
+
+    def one(i):
+        datas[i] = getter.fetch(segs[i][0])
+
+    with ThreadPoolExecutor(max_workers=threads) as ex:
+        list(ex.map(one, range(len(segs))))
+    ext = ".mp4" if p["init"] else ".ts"
+    tmp = out.with_suffix(".frag" + ext)
+    with open(tmp, "wb") as fh:
+        if p["init"]:
+            fh.write(getter.fetch(p["init"]))
+        for d in datas:
+            fh.write(d)
+    r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(tmp), "-map", "0:v:0", "-c", "copy", "-an",
+                        "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", str(out)],
+                       capture_output=True, text=True)
+    tmp.unlink(missing_ok=True)
+    if r.returncode != 0 or not out.exists():
+        raise RuntimeError(f"つなぎ直しに失敗：{r.stderr.strip()[-300:]}")
+    return segs[0][1], segs[-1][2]
+
+
 def ydl_options(fmt: str, cookies: str = "", client: str | None = None, deno: str | None = None) -> dict:
     """セクション取得（yt-dlp のコマンド）と同じ設定を、プロセス内の yt-dlp 用に作る。"""
     import yt_dlp
@@ -224,12 +300,23 @@ def format_info(video_id: str, fmt: str, cookies: str = "", client: str | None =
     import yt_dlp
     deno = shutil.which("deno", path=(env or {}).get("PATH")) if env else shutil.which("deno")
     opts = ydl_options(fmt, cookies, client, deno)
-    with yt_dlp.YoutubeDL({**opts, "quiet": True}) as ydl:
+    class _Quiet:                                    # エラーは例外で受け取るので、画面には出さない
+        def debug(self, msg):
+            pass
+
+        warning = info = error = debug
+
+    with yt_dlp.YoutubeDL({**opts, "quiet": True, "no_warnings": True, "ignoreerrors": False,
+                           "logger": _Quiet()}) as ydl:
         info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+    if not info:
+        raise RuntimeError("形式の情報を取れませんでした")
     f = info
     if "requested_formats" in info:
         f = next((x for x in info["requested_formats"] if x.get("vcodec") not in (None, "none")), info)
-    if f.get("protocol") not in ("https", "http") or not f.get("url"):
-        raise RuntimeError(f"範囲取得に向かない形式です（{f.get('protocol')}）")
+    proto = str(f.get("protocol") or "")
+    if not f.get("url") or not (proto in ("https", "http") or proto.startswith("m3u8")):
+        raise RuntimeError(f"範囲取得に向かない形式です（{proto}）")
     return {"url": f["url"], "headers": f.get("http_headers") or {}, "format_id": f.get("format_id"),
-            "height": f.get("height"), "ext": f.get("ext"), "opts": opts}
+            "height": f.get("height"), "ext": f.get("ext"), "opts": opts,
+            "kind": "hls" if proto.startswith("m3u8") else "dash"}
