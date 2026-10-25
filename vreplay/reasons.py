@@ -57,7 +57,7 @@ def analyze(r: dict, rep: dict) -> dict:
     for k in kills:
         victim_team = L if k["killer_team"] == W else W
         alive[victim_team] = max(0, alive[victim_team] - 1)
-        if k["killer_team"] == W:
+        if k["killer_team"] == W and k.get("killer"):
             kw[k["killer"]] = kw.get(k["killer"], 0) + 1
         diff = alive[L] - alive[W]
         worst = max(worst, diff)
@@ -84,7 +84,7 @@ def analyze(r: dict, rep: dict) -> dict:
     if kills:
         fk = kills[0]
         when = el(fk.get("t"))
-        who = f"{fk.get('killer')}→{fk.get('victim')}（{_clock(when)} 経過）"
+        who = f"{fk.get('killer') or '?'}→{fk.get('victim') or '?'}（{_clock(when)} 経過）"
         if fk["killer_team"] == W:
             tags["1ピック"] = who
         else:

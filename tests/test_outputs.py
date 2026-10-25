@@ -264,3 +264,15 @@ def test_killfeed_ocr_only_when_new_row(tmp_path, monkeypatch):
     X.kills_in_round(st, list(range(len(seq))), [i * 1.0 for i in range(len(seq))], ["-"] * len(seq),
                      X.Roster([("Derke", "A")]), None, tmp_path / "k.jpg")
     assert OCR.calls == 2
+
+
+def test_card_deaths_fill_missing_kills():
+    """キルフィードで読めなかったキルを、カードが灰色になった時刻で補う。"""
+    alive = np.ones((10, 10), bool)
+    alive[5:, 2] = False                  # スロット 2 が 5 フレーム目から死亡
+    alive[3, 7] = False                   # 1 フレームだけのちらつきは無視
+    deaths = X.card_deaths(alive, list(range(10)), [float(i) for i in range(10)])
+    assert deaths == [(2, 5.0)]
+    kills = [{"t": 2.0, "killer": "Derke", "killer_team": "A", "victim": "tkzin", "victim_team": "B"}]
+    out = X.merge_card_deaths(kills, [("Life", "A", "B", 5.0), ("tkzin", "B", "A", 2.5)], lambda t: "1:30")
+    assert [(k["victim"], k["killer_team"], k.get("source")) for k in out] == [("tkzin", "A", None), ("Life", "B", "card")]

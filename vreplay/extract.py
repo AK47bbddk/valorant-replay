@@ -244,6 +244,38 @@ def buy_image(store: FrameStore, idx: int | None, path: Path) -> Path | None:
     return path
 
 
+def card_deaths(alive: np.ndarray, idxs: list[int], times: list[float], need: int = 2) -> list[tuple[int, float]]:
+    """プレイヤーカードが「生存 → 死亡（灰色）」に変わった時刻。キルフィードで読めなかったキルを補う。
+    死亡が need フレーム以上続いたものだけ（1 フレームのちらつきは無視）。返り値 [(スロット 0..9, 時刻)]。"""
+    out = []
+    if alive is None or not len(idxs):
+        return out
+    for s in range(alive.shape[1]):
+        seq = [bool(alive[i, s]) for i in idxs]
+        if not any(seq[:4]):                       # 開始時から死亡（カードを取れていない）は使わない
+            continue
+        for j in range(1, len(seq)):
+            if seq[j - 1] and not seq[j] and all(not x for x in seq[j:j + need]) and len(seq[j:j + need]) == need:
+                out.append((s, float(times[j])))
+                break
+    return out
+
+
+def merge_card_deaths(kills: list[dict], deaths: list[tuple[str, str, str, float]], timer_of) -> list[dict]:
+    """キルフィードのキルに、カードの死亡から分かった「誰が・いつ倒されたか」を足す（キラーは不明、
+    チームは倒された側の相手）。deaths: [(倒された選手, そのチーム, 相手チーム, 時刻)]"""
+    seen = {norm_name(k.get("victim")) for k in kills}
+    out = list(kills)
+    for name, team, opp, t in deaths:
+        if norm_name(name) in seen or not name or name[:1] in ("左", "右"):
+            continue
+        out.append({"t": round(t, 1), "timer": timer_of(t), "killer": None, "killer_team": opp,
+                    "victim": name, "victim_team": team, "weapon": None, "source": "card"})
+        seen.add(norm_name(name))
+    out.sort(key=lambda k: k.get("t") or 0)
+    return out
+
+
 def ult_events(ult: np.ndarray, alive: np.ndarray, idxs: list[int], ready_th: float = 0.75, empty_th: float = 0.45):
     """ライブ区間で「溜まっている → 空」になった瞬間を ULT 使用とする。
 
@@ -500,7 +532,9 @@ def find_killfeed(ocr, frames: list, roster: Roster, search=(0.55, 0.04, 1.0, 0.
     if len(keep) < 2:
         return None, hits
     lh = median(b[3] - b[1] for _, b in keep)
-    x0 = min(min(b[0] for _, b in keep) - 0.03, right - 0.2)
+    # キルフィードは右揃えで、長い名前どうし（「100T Timotino → G2 JAWGEMO」など）だと左へ大きく伸びる。
+    # 見つかった行が短くても左端が切れないよう、右端から画面幅の 28% までは必ず含める
+    x0 = min(min(b[0] for _, b in keep) - 0.03, right - 0.28)
     y0 = min(b[1] for _, b in keep) - lh * 0.8
     y1 = max(max(b[3] for _, b in keep) + lh, y0 + lh * 2.2 * 6)   # 6 件ぶん程度まで伸ばす
     roi = [max(0.0, x0), max(0.0, y0), min(1.0, right + 0.035), min(0.5, y1)]   # 右端は倒された側の顔アイコンまで

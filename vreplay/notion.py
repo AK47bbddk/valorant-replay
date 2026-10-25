@@ -295,8 +295,9 @@ def round_blocks(rep: dict, r: dict, uploads: dict[str, str | None]) -> list[dic
         rt = [_rt("キル　", bold=True)]
         for i, k in enumerate(kills):
             w = f"［{k['weapon_ja']}］" if k.get("weapon_ja") else ""
+            who = k.get("killer") or f"（{S.tag(rep, k.get('killer_team'))}・キル不明）"
             rt += [_rt(("\n" if i else "") + f"{k.get('timer') or '--:--'} "),
-                   _rt(k.get("killer") or "?", bold=True, color="blue" if k.get("killer_team") == rep["team1"] else "red"),
+                   _rt(who, bold=True, color="blue" if k.get("killer_team") == rep["team1"] else "red"),
                    _rt(f"{w} → {k.get('victim') or '?'}")]
         out.append(_para(*rt))
     if r.get("ults") or r.get("ult_ready"):

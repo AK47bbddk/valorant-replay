@@ -519,6 +519,19 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
             names_live = slot_names(store, name_idxs, geo, roster, team_left, team_right) if geo else []
             names = names_live
             kills, strip = X.kills_in_round(store, fidx, times, labels, roster, book, out_dir / f"r{r.n:02d}_kills.jpg")
+            n_feed = len(kills)
+            if geo and names and r.live:
+                # キルフィードで読めなかったキルを、カードが灰色になった時刻で補う（キラーは不明）
+                after = [i for i in r.live if t[i] >= r.t_drop + 2]
+                deaths = X.card_deaths(obs["alive"], after, [t[i] for i in after])
+                other = {m.team1: m.team2, m.team2: m.team1}
+
+                def timer_of(tt):
+                    j = min(range(len(times)), key=lambda q: abs(times[q] - tt)) if times else None
+                    return labels[j] if j is not None else None
+                kills = X.merge_card_deaths(kills, [(names[s_][0], names[s_][1], other.get(names[s_][1]), tt)
+                                                    for s_, tt in deaths if s_ < len(names)], timer_of)
+            rr["kill_sources"] = {"feed": n_feed, "card": len(kills) - n_feed}
             for k in kills:
                 k["weapon_ja"] = wja(k["weapon"]) if k.get("weapon") else None
             a["kill_strip"] = str(strip) if strip else None
@@ -553,6 +566,10 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
             f"｜{perf.fmt_resources(st_assets['resources'])}")
         found = {r.n for r in det}
         add_reasons(rep)
+        ks = [rr.get("kill_sources") or {} for rr in rep["rounds"]]
+        n_feed, n_card = sum(k.get("feed", 0) for k in ks), sum(k.get("card", 0) for k in ks)
+        if n_feed or n_card:
+            stats["kills_note"] = f"キル キルフィード {n_feed}・カードで補完 {n_card}"
         for rr in rep["rounds"]:
             if rr["n"] not in found:
                 rr["notes"].append("動画からこのラウンドを特定できませんでした（放送が別画面だった可能性）")
@@ -567,6 +584,7 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
         rep["analysis_note"] = (f"{msg}／{linfo}／タイマー読取 {stats['timer_ok']:.0%}・スコア読取 {stats['score_ok']:.0%}"
                                 f"／検出ラウンド {len(det)}/{md.total_rounds or '?'}／VLR との勝敗一致 {agree:.0%}"
                                 + (f"／{drop_note}" if drop_note else "")
+                                + (f"／{stats['kills_note']}" if stats.get("kills_note") else "")
                                 + (f"／{tac_note}" if tac_note else "")
                                 + f"／解析 {perf.fmt_seconds(time.time() - t_start)}")
         log(f"    {rep['analysis_note']}")
