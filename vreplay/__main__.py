@@ -8,7 +8,8 @@
   python -m vreplay fetch                     # 自宅 PC 用：動画の該当区間だけ Drive に保存（Colab のボット判定回避）
   python -m vreplay backfill --from 2024-01-01 --to 2026-12-31  # 過去試合のメタデータを DB に入れる
   python -m vreplay batch --limit 20          # DB の未処理マップを動画解析（再開可能）
-  python -m vreplay playbook                  # チーム別・構成別の HTML を作る
+  python -m vreplay playbook                  # チーム × マップ × 構成ごとのプレイブック（スライド HTML）
+  python -m vreplay playbook --sync --team G2 --map Split   # report.json を取り込んでから、G2 の Split だけ
   python -m vreplay sync                      # 既存の report.json を DB に取り込む
   python -m vreplay stats                     # DB の件数
 """
@@ -64,6 +65,9 @@ def main():
     pb = sub.add_parser("playbook", help="DB からチーム別・構成別の HTML を作る")
     pb.add_argument("--out", help="出力先（既定 output.dir/playbook）")
     pb.add_argument("--min-maps", type=int, default=1, help="このマップ数未満のチーム/構成を省く")
+    pb.add_argument("--team", help="このチームだけ（名前の一部かタグ）")
+    pb.add_argument("--map", help="このマップだけ")
+    pb.add_argument("--sync", action="store_true", help="先に output.dir の report.json を DB に取り込む")
     pb.add_argument("--config")
 
     sy = sub.add_parser("sync", help="既存の report.json をまとめて DB に入れる")
@@ -93,9 +97,17 @@ def main():
         batch(cfg, start=a.start, end=a.end, limit=a.limit, retry_failed=not a.no_retry,
               shard=a.shard, force=a.force, out_root=Path(a.out) if a.out else None)
     elif a.cmd == "playbook":
+        from . import db, deck
         from .playbook import build
         out = Path(a.out) if a.out else Path(cfg["output"]["dir"]) / "playbook"
-        build(cfg, out, min_maps=a.min_maps)
+        if a.sync:
+            conn = db.connect(db.warehouse_path(cfg))
+            n = db.sync_reports(conn, Path(cfg["output"]["dir"]))
+            print(f"{n} 件の report.json を DB に取り込みました")
+            conn.close()
+        deck.build(cfg, out, team=a.team, map_name=a.map, min_maps=a.min_maps)
+        if not a.team and not a.map:
+            build(cfg, out / "stats", min_maps=a.min_maps)      # 以前の集計ページ（ヒートマップ・型の表）
     elif a.cmd == "sync":
         from . import db
         conn = db.connect(db.warehouse_path(cfg))

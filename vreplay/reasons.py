@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 ATTACK, DEFENSE = "攻撃", "防衛"
-BUY_RANK = {"pistol": 0, "eco": 1, "semi-eco": 2, "semi-buy": 3, "full": 4}
+BUY_RANK = {"pistol": 0, "eco": 1, "semi-eco": 2, "half": 3, "semi-buy": 3, "full": 4}
 PRIORITY = ["エース", "クラッチ", "リテイク", "ポストプラント成功", "ラッシュ", "カウンター", "数的不利から逆転",
             "エコ勝ち", "1ピック", "先制されて逆転", "時間切れまで守り切り", "設置前に全滅",
             "設置させずに守り勝ち", "アンチエコ", "ピストル"]

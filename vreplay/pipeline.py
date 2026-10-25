@@ -599,6 +599,50 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
             shutil.rmtree(store.root, ignore_errors=True)
 
 
+class _Warehouse:
+    """毎日の実行で、試合のメタデータ（VLR）と解析結果（report.json）をウェアハウスに入れる。
+    失敗しても本体（Notion・HTML）は止めない。"""
+
+    def __init__(self, cfg: dict, log=print):
+        self.log, self.conn, self.n = log, None, 0
+        if (cfg.get("warehouse") or {}).get("enabled", True) is False:
+            return
+        try:
+            self.conn = db.connect(db.warehouse_path(cfg))
+        except Exception as e:
+            log(f"ウェアハウスを開けませんでした（プレイブック用のデータはためません）: {e}")
+
+    def match(self, m):
+        if self.conn is None:
+            return
+        try:
+            db.upsert_match(self.conn, m)
+            self.conn.commit()
+        except Exception as e:
+            self.log(f"  ウェアハウスへの試合登録に失敗: {e}")
+
+    def report(self, rep: dict):
+        if self.conn is None or not rep or "match_id" not in rep:
+            return
+        try:
+            db.ingest_report(self.conn, rep)
+            self.conn.commit()
+            self.n += 1
+        except Exception as e:
+            self.log(f"  ウェアハウスへの取り込みに失敗: {e}")
+
+    def close(self):
+        if self.conn is None:
+            return
+        try:
+            st = db.stats(self.conn)
+            self.log(f"ウェアハウス: 今回 {self.n} マップを取り込み（累計 {st['maps_done']} マップ・{st['rounds']} ラウンド、"
+                     f"設置サイトあり {st.get('rounds_with_plant_site', 0)}R）→ `vreplay playbook` でプレイブックを作れます")
+            self.conn.close()
+        except Exception:
+            pass
+
+
 def select_matches(cfg: dict, day: date, match_urls: list[str] | None, log=print):
     """対象試合（vlr.Match）を順に返す。日付は試合ページの日時（JST）で確定する。"""
     if match_urls:
@@ -703,11 +747,15 @@ def _run_body(cfg: dict, day, match_urls, no_video, force, upsert_only, log, t0)
         log("NOTION_TOKEN が空なので Notion には書かず、HTML レポートだけ作ります"
             "（Colab の 🔑 に NOTION_TOKEN を登録し「ノートブックからのアクセス」をオンにしてください）")
 
+    # プレイブック用のウェアハウス（SQLite）。毎日の実行でも試合と解析結果をためていく
+    wh = _Warehouse(cfg, log)
+
     # 1) 対象マップを決めて Notion の行を作る
     todo, reports = [], []
     with perf.stage("matches", label="試合の選択・Notion 行更新") as st_match:
         for m in select_matches(cfg, day, match_urls, log):
             log(f"● {m.title}  [{m.event} / {m.stage}]  {m.map_count}")
+            wh.match(m)
             pages = {}
             if nt:
                 try:
@@ -726,6 +774,7 @@ def _run_body(cfg: dict, day, match_urls, no_video, force, upsert_only, log, t0)
                     log(f"  {md.order}. {md.name}: 作成済みのためスキップ（--force で作り直し）")
                     if prev:
                         reports.append(prev)
+                        wh.report(prev)
                     continue
                 todo.append((m, md, map_dir, page))
     log(f"  試合の選択・Notion 行更新 {perf.fmt_seconds(st_match['seconds'])}"
@@ -775,6 +824,7 @@ def _run_body(cfg: dict, day, match_urls, no_video, force, upsert_only, log, t0)
         rep["perf_note"] = perf.note(rep["timings"])
         map_dir.mkdir(parents=True, exist_ok=True)
         (map_dir / "report.json").write_text(json.dumps(rep, ensure_ascii=False, indent=1), encoding="utf-8")
+        wh.report(rep)
         if nt and page:
             # Notion への書き込み（画像のアップロード）は通信待ちが中心なので、裏で進めて次のマップの解析に移る
             def write(rep=rep, page=page, tag=tag, name=f"{m.title} {md.order}. {md.name}"):
@@ -791,6 +841,7 @@ def _run_body(cfg: dict, day, match_urls, no_video, force, upsert_only, log, t0)
     for w in writes:
         w.result()
     writer.shutdown()
+    wh.close()
 
     summary = perf.build_summary(total_sec=time.time() - t0)
     perf.write_json(summary, out_root / "perf.json")

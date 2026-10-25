@@ -31,7 +31,6 @@ def _canon(side: str | None) -> str | None:
     return None
 
 SCHEMA = """
-PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 
 CREATE TABLE IF NOT EXISTS matches (
@@ -122,11 +121,23 @@ CREATE INDEX IF NOT EXISTS idx_matches_date ON matches(dt_jst);
 """
 
 
+# プレイブック用に後から足した列（ラウンドの開始・設置の時刻、設置サイト、勝因、タイマーの節目ごとの配置など）
+ROUND_EXTRA = [("t_drop", "REAL"), ("plant_t", "REAL"), ("plant_site", "TEXT"), ("yt_url", "TEXT"),
+               ("eco1", "TEXT"), ("eco2", "TEXT"), ("reason_main", "TEXT"), ("reason_json", "TEXT"),
+               ("timeline_json", "TEXT"), ("kill_sources_json", "TEXT")]
+
+
 def connect(path: str | Path) -> sqlite3.Connection:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=60)
     conn.row_factory = sqlite3.Row
+    # Google Drive（/content/drive）は共有メモリを使う WAL に向かないので、そこでは通常のジャーナルにする
+    mode = "DELETE" if "/drive/" in str(path.resolve()) else "WAL"
+    try:
+        conn.execute(f"PRAGMA journal_mode={mode}")
+    except sqlite3.DatabaseError:
+        conn.execute("PRAGMA journal_mode=DELETE")
     conn.executescript(SCHEMA)
     _migrate(conn)
     return conn
@@ -137,6 +148,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(maps)")}
     if "tactics_json" not in cols:
         conn.execute("ALTER TABLE maps ADD COLUMN tactics_json TEXT")
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(rounds)")}
+    for name, typ in ROUND_EXTRA:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE rounds ADD COLUMN {name} {typ}")
 
 
 def warehouse_path(cfg: dict) -> Path:
@@ -299,6 +314,19 @@ def ingest_report(conn: sqlite3.Connection, rep: dict, status: str | None = None
              json.dumps(rr.get("notes") or [], ensure_ascii=False),
              (rr.get("tactics") or {}).get("site"), (rr.get("tactics") or {}).get("site_conf"),
              json.dumps(rr.get("tactics"), ensure_ascii=False) if rr.get("tactics") else None))
+        tac = rr.get("tactics") or {}
+        reason = rr.get("reason") or {}
+        conn.execute(
+            """UPDATE rounds SET t_drop=?, plant_t=?, plant_site=?, yt_url=?, eco1=COALESCE(?, eco1),
+                                 eco2=COALESCE(?, eco2), reason_main=?, reason_json=?, timeline_json=?,
+                                 kill_sources_json=?
+               WHERE match_id=? AND map_order=? AND n=?""",
+            (rr.get("t_drop"), rr.get("plant_t"), tac.get("plant_site"), rr.get("yt_url"),
+             rr.get("eco1"), rr.get("eco2"), reason.get("main"),
+             json.dumps(reason, ensure_ascii=False) if reason else None,
+             json.dumps(tac.get("timeline"), ensure_ascii=False) if tac.get("timeline") else None,
+             json.dumps(rr.get("kill_sources"), ensure_ascii=False) if rr.get("kill_sources") else None,
+             mid, order, rr.get("n")))
     for p in rep.get("players") or []:
         team = p.get("team")
         if team in (1, 2):
@@ -374,6 +402,7 @@ def stats(conn: sqlite3.Connection) -> dict:
         "rounds": one("SELECT COUNT(*) FROM rounds"),
         "rounds_with_kills": one("SELECT COUNT(*) FROM rounds WHERE kills_json IS NOT NULL"),
         "rounds_with_site": one("SELECT COUNT(*) FROM rounds WHERE site IS NOT NULL"),
+        "rounds_with_plant_site": one("SELECT COUNT(*) FROM rounds WHERE plant_site IS NOT NULL"),
     }
 
 
