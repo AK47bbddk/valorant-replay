@@ -76,3 +76,58 @@ def test_split_video_reads_like_one(tmp_path):
     assert V.probe(man)[2] == 40 and V.find_cached("v", 0, 40, [tmp_path]) == man
     V.remove_video(man)
     assert not any(tmp_path.glob("p*.mp4")) and not man.exists()
+
+
+def test_range_download_matches_source(tmp_path, monkeypatch):
+    """YouTube の DASH と同じ作り（ftyp・moov・sidx・moof/mdat）の動画から、必要な時間帯だけをバイト範囲で取ると、
+    元の動画と同じフレームが同じ時刻（区間の先頭から）に出る。"""
+    import re
+    import shutil
+    import subprocess
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    import cv2
+    import pytest
+
+    from vreplay import video as V
+    from vreplay import ytrange
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg が必要")
+    src = tmp_path / "src.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "nullsrc=s=160x120:r=30,geq=lum='mod(N\\,200)+20':cb=128:cr=128", "-t", "90",
+                    "-c:v", "libx264", "-preset", "veryfast", "-g", "150", "-sc_threshold", "0", "-pix_fmt", "yuv420p",
+                    "-movflags", "+frag_keyframe+empty_moov+global_sidx+default_base_moof", "-f", "mp4", str(src)],
+                   check=True)
+    data = src.read_bytes()
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            m = re.match(r"bytes=(\d+)-(\d+)", self.headers.get("Range", ""))
+            a, b = (int(m.group(1)), min(int(m.group(2)), len(data) - 1)) if m else (0, len(data) - 1)
+            body = data[a:b + 1]
+            self.send_response(206 if m else 200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    monkeypatch.setattr(ytrange, "CHUNK", 30000)
+    monkeypatch.setattr(ytrange, "format_info", lambda *a, **k: {"url": f"http://127.0.0.1:{srv.server_port}/v",
+                                                                  "headers": {}, "format_id": "137"})
+    try:
+        man = V.download_segment("vid", 32, 70, tmp_path / "out", method="range", range_threads=4)
+    finally:
+        srv.shutdown()
+    assert man.name.endswith(V.PARTS)
+    lum = lambda f: cv2.cvtColor(f, cv2.COLOR_BGR2GRAY).mean()
+    ref = {round(t - 32, 2): lum(f) for t, f in V.iter_frames(src, 2, 32, 36, hwaccel=False)}
+    got = {round(t, 2): lum(f) for t, f in V.iter_frames(man, 2, 0, 36, hwaccel=False)}
+    common = sorted(set(ref) & set(got))
+    assert len(common) >= 70
+    assert all(abs(ref[t] - got[t]) < 3 for t in common)

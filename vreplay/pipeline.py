@@ -104,7 +104,9 @@ def download(cfg: dict, m: vlr.Match, md: vlr.MapData, log=print) -> Path:
         p = download_segment(md.vod_id, start, end, _work_root(cfg), cfg["video"]["max_height"],
                              resolve_cookies(cfg), cache_dirs=[video_cache_dir(cfg)], log=log,
                              fragments=int(cfg["video"].get("download_fragments") or 4),
-                             parts=int(cfg["video"].get("download_parts") or 1))
+                             parts=int(cfg["video"].get("download_parts") or 1),
+                             method=str(cfg["video"].get("download_method") or "range"),
+                             range_threads=int(cfg["video"].get("download_threads") or 8))
         st["bytes"] = video_size(p)
     size = video_size(p)
     mbps = size / 1e6 / st["seconds"] if st["seconds"] > 0.05 else 0
@@ -657,7 +659,9 @@ def _fetch_body(cfg: dict, day, match_urls, log, t0) -> list[Path]:
                 with perf.stage("download", tag=f"{m.id}:{md.order}", label="動画の取得") as st:
                     p = download_segment(md.vod_id, start, end, cache, cfg["video"]["max_height"],
                                          cookies, log=log, fragments=fragments,
-                                         parts=int(cfg["video"].get("download_parts") or 1))
+                                         parts=int(cfg["video"].get("download_parts") or 1),
+                                         method=str(cfg["video"].get("download_method") or "range"),
+                                         range_threads=int(cfg["video"].get("download_threads") or 8))
                     st["bytes"] = video_size(p)
                 mbps = video_size(p) / 1e6 / st["seconds"] if st["seconds"] > 0.05 else 0
                 speed = f", {mbps:.1f} MB/s" if mbps else ""

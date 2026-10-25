@@ -102,7 +102,7 @@ def _err_lines(stderr: str, n: int = 6) -> str:
 
 def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_height: int = 1080,
                      cookies: str = "", cache_dirs=(), log=None, fragments: int = 4, parts: int = 1,
-                     overlap: int = 12) -> Path:
+                     overlap: int = 12, method: str = "range", range_threads: int = 8) -> Path:
     """[start, end] 秒の区間をダウンロードする。
 
     YouTube は 1 本の接続を実時間程度の速さ（1 MB/s 前後）に絞るので、parts > 1 なら区間を parts 個に分けて
@@ -116,8 +116,19 @@ def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_hei
         return hit
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    parts = max(1, int(parts or 1))
-    if parts == 1 or end - start < 300 * parts:
+    if method == "range":
+        try:
+            man = _download_range(video_id, start, end, out_dir, max_height, cookies, threads=range_threads)
+            if log:
+                log(f"    必要な範囲だけを {range_threads} 本同時に取得しました")
+            return man
+        except Exception as e:                       # 取れなければ従来の分割取得へ
+            if "Sign in to confirm" in str(e):
+                raise RuntimeError(COOKIE_HELP + f"\n  yt-dlp: {e}")
+            if log:
+                log(f"    範囲の取得ができなかったので分割取得に切り替えます（{str(e).splitlines()[0][:120]}）")
+    parts = max(1, min(int(parts or 1), int((end - start) // 120) or 1))      # 1 本 2 分以上
+    if parts == 1:
         return _download_one(video_id, start, end, out_dir, max_height, cookies, cache_dirs, log, fragments)
     from concurrent.futures import ThreadPoolExecutor
     bounds = [int(round(start + (end - start) * k / parts)) for k in range(parts + 1)]
@@ -137,6 +148,53 @@ def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_hei
                               ensure_ascii=False, indent=1), encoding="utf-8")
     if log:
         log(f"    {parts} 分割で同時に取得しました")
+    return man
+
+
+def _download_range(video_id: str, start: int, end: int, out_dir: Path, max_height: int, cookies: str,
+                    threads: int = 8) -> Path:
+    """YouTube の DASH 形式から、[start, end] を含む断片のバイト範囲だけを並列に取る（vreplay.ytrange）。
+    1 本の動画ファイルと、区間の先頭とのずれを書いた parts.json を返す。"""
+    from . import ytrange
+    env = _ytdlp_env()
+    fmt = f"bv*[height<={max_height}][vcodec^=avc1][ext=mp4]/bv*[height<={max_height}][ext=mp4]"
+    errors = []
+    info = None
+    for client in CLIENTS:
+        try:
+            info = ytrange.format_info(video_id, fmt, cookies, client, env)
+            break
+        except Exception as e:
+            errors.append(f"[{client or '既定'}] {str(e).splitlines()[-1][:160] if str(e) else e}")
+            if "Sign in to confirm" in str(e):
+                raise
+    if info is None:
+        raise RuntimeError("形式の情報を取れません：" + " / ".join(errors))
+    jar = None
+    if cookies and Path(cookies).exists():
+        import http.cookiejar
+        jar = http.cookiejar.MozillaCookieJar(cookies)
+        try:
+            jar.load(ignore_discard=True, ignore_expires=True)
+        except Exception:
+            jar = None
+    stem = f"{video_id}_{start}_{end}"
+    tmp = Path(tempfile.mkdtemp(prefix="vreplay_r_"))
+    try:
+        f = tmp / f"{stem}.range.mp4"
+        t0, t1 = ytrange.fetch_section(info["url"], info["headers"], start, end, f, threads=threads, cookies=jar)
+        _, _, dur = probe(f)
+        if dur < (min(end, t1) - max(start, t0)) - 10:
+            raise RuntimeError(f"取れた長さが足りません（{dur:.0f} 秒）")
+        dst = out_dir / f.name
+        shutil.move(str(f), dst)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    man = out_dir / f"{stem}{PARTS}"
+    man.write_text(json.dumps({"video_id": video_id, "start": start, "end": end, "method": "range",
+                               "format": info.get("format_id"),
+                               "parts": [{"file": dst.name, "offset": round(t0 - start, 3), "length": round(dur, 3)}]},
+                              ensure_ascii=False, indent=1), encoding="utf-8")
     return man
 
 

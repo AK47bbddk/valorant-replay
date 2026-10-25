@@ -34,7 +34,9 @@ video:
   fast_keyframe_interval: 2.5
   max_keyframe_interval: 6
   download_workers: 1    # 同時にダウンロードするマップ数。1 なら 1 マップずつ全力で取り、解析中に次のマップを取る
-  download_parts: 8      # 1 マップの区間をいくつに分けて同時に取るか（YouTube は 1 本の接続を 1 MB/s 前後に絞るため）
+  download_method: range # range：必要な時間帯のバイト範囲だけを並列に取る（速い）／sections：yt-dlp の区間ダウンロード
+  download_threads: 8    # range のときの同時接続数
+  download_parts: 8      # sections のとき（range が使えないとき）に区間をいくつに分けて同時に取るか
   download_fragments: 4  # 1 本の動画を yt-dlp が分割して並列取得する数（回線が速いなら 8 などに）
 
 hud:
