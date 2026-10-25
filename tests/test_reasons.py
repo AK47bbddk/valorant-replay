@@ -72,3 +72,15 @@ def test_reason_variations_zone_operator_trade_ult():
     assert "初動Aファイト勝ち" in out["tags"] and "オペレーターで1ピック" in out["tags"]
     assert "Aエントリー成功" in out["tags"] and "トレード勝ち" in out["tags"] and "ULTで攻め切り" in out["tags"]
     assert "1ピック" not in out["tags"]
+
+
+def test_caption_intents():
+    from vreplay import captions as CC
+    caps = [(100, 103, "G2 are going to run it down B main here"), (104, 108, "that's a fake, they rotate to A"),
+            (300, 305, "unrelated later round")]
+    txt = CC.for_round(caps, 95, 120)
+    it = CC.intents(txt, ["G2"])
+    assert "ラッシュ" in it["tags"] and "フェイク" in it["tags"] and "ローテ" in it["tags"]
+    assert "B" in it["sites"] and it["teams"] == ["G2"] and all(len(q) <= 102 for q in it["quotes"])
+    raw = {"events": [{"tStartMs": 1000, "dDurationMs": 2000, "segs": [{"utf8": "retake"}, {"utf8": " A"}]}]}
+    assert CC._parse_json3(raw) == [(1.0, 3.0, "retake A")]

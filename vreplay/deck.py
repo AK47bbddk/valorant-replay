@@ -190,6 +190,8 @@ def records(rep: dict) -> list[dict]:
                 "setup": (rt.get("setups") or {}).get(str(no)) if aligned else None,
                 "opp_setup": (rt.get("setups") or {}).get(str(3 - no)) if aligned else None,
                 "first_fight": rt.get("first_fight") if aligned else None,
+                "caster": rr.get("caster") or {},
+                "reason_main": reason.get("main"), "dur_clock": rr.get("duration"),
             })
     return out
 
@@ -404,6 +406,20 @@ def points(metrics: list[dict], strong: bool, k: int = 3) -> list[dict]:
         out.append({"title": m["good"] if strong else m["bad"], "lines": _evidence(m), "metric": m["id"]})
         if len(out) >= k:
             break
+    if len(out) < k:
+        # 試合が少ないと平均との差がはっきりしない。差の向きが合う指標を「参考」として足す（回数 3 以上）
+        rest = [m for m in metrics if m["edge"] is not None and m["n"] >= 3 and m["id"] not in {o["metric"] for o in out}
+                and ((m["edge"] > 0.01) if strong else (m["edge"] < -0.01))]
+        rest.sort(key=lambda m: -abs(m["edge"]) * math.sqrt(m["n"]))
+        for m in rest:
+            fam = family.get(m["id"], m["id"].split("_")[0] if m["id"].startswith(("retake_", "pp_")) else m["id"])
+            if fam in used:
+                continue
+            used.add(fam)
+            out.append({"title": (m["good"] if strong else m["bad"]) + "（参考）", "lines": _evidence(m),
+                        "metric": m["id"], "weak_evidence": True})
+            if len(out) >= k:
+                break
     return out
 
 
@@ -506,6 +522,44 @@ def _jaccard(a: list[str], b: list[str]) -> float:
     inter = sum((ca & cb).values())
     union = sum((ca | cb).values())
     return inter / union if union else 0.0
+
+
+def intent_summary(rows: list[dict]) -> dict:
+    """解説の字幕から拾った意図のタグを、攻守ごとに数える。"""
+    out = {}
+    for side in (DEFENSE, ATTACK):
+        c = Counter()
+        quotes = []
+        for r in rows:
+            if r["side"] != side:
+                continue
+            cs = r.get("caster") or {}
+            if cs.get("teams") and r["team"] not in cs["teams"] and r["tag"] not in cs["teams"]:
+                continue                        # 相手チームの名前だけが出ている字幕は数えない
+            c.update(cs.get("tags") or [])
+            quotes += [f"{r['opp_tag']} R{r['n']}：{q}" for q in (cs.get("quotes") or [])[:1]]
+        if c:
+            out[side] = {"tags": c.most_common(8), "quotes": quotes}
+    return out
+
+
+def summary_data(rows: list[dict], base: list[dict]) -> dict:
+    """Claude に渡す集計（数字・型の名前・解説の一節）。"""
+    out = {"team": rows[0]["team"] if rows else None, "map": rows[0]["map"] if rows else None,
+           "comp": list(rows[0]["comp"]) if rows else [], "maps": len({(r["match_id"], r["order"]) for r in rows})}
+    for side in (DEFENSE, ATTACK):
+        srows = [r for r in rows if r["side"] == side]
+        ms = evaluate(rows, base, side)
+        out[side] = {
+            "rounds": len(srows),
+            "metrics": [{"name": m["label"], "team": f"{m['w']}/{m['n']}", "league": _pct(m["base"])}
+                        for m in ms if m["n"]],
+            "setups": [{"name": g["name"], "n": g["n"], "win": g["w"], "shape": g["shape"], "callouts": g["callouts"]}
+                       for g in setup_clusters(srows)],
+            "sets": [{"name": g["name"], "n": g["n"], "win": g["w"]} for g in sets(srows)] if side == ATTACK else [],
+            "caster": intent_summary(rows).get(side, {}),
+        }
+    return out
 
 
 def setup_clusters(rows: list[dict], th: float = 0.5, k: int = 6) -> list[dict]:
@@ -918,6 +972,44 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
                         f'<div>{_fig(fig, "設置後 10 秒の自チームの位置")}</div></div>')
                 slides.append(_slide(en, f"{s} Site PostPlant", body, foot))
 
+    # ラウンドの流れ（試合が少ないときはこれがいちばん役に立つ）と、解説から拾った意図
+    for side in (DEFENSE, ATTACK):
+        srows = sorted([r for r in rows if r["side"] == side], key=lambda r: (str(r["date"]), r["match_id"], r["n"]))
+        if not srows:
+            continue
+        for k0 in range(0, len(srows), 13):
+            part = srows[k0:k0 + 13]
+            trs = "".join(
+                f"<tr><td>{_e(r['opp_tag'])} R{r['n']}</td><td>{_e(r['buy'])}</td>"
+                f"<td>{_e((r.get('setup') or {}).get('name') or '-')}</td><td>{_e(r.get('first_fight') or '-')}</td>"
+                f"<td>{_e((r['plant_site'] or '') + (' ' + _clock(100 - r['plant_e']) if r['plant_e'] is not None else '') if r['planted'] else '-')}</td>"
+                f"<td>{'〇' if r['win'] else '✕'} {_e(r.get('reason_main') or '')}</td>"
+                f"<td>{_e('・'.join((r.get('caster') or {}).get('tags', [])[:3]))}</td>"
+                f"<td>{('<a href=' + chr(34) + _e(r['yt']) + chr(34) + '>▶</a>') if r['yt'] else ''}</td></tr>"
+                for r in part)
+            slides.append(_slide(SIDE_EN[side], f"ラウンドの流れ（{side}）" + (f" {k0 // 13 + 1}" if len(srows) > 13 else ""),
+                                 f'<table><thead><tr><th>ラウンド</th><th>購入</th><th>初動の配置</th><th>初動ファイト</th>'
+                                 f'<th>設置（残り）</th><th>結果・勝因</th><th>解説の言及</th><th></th></tr></thead>'
+                                 f'<tbody>{trs}</tbody></table>', foot))
+    intent = intent_summary(rows)
+    if intent:
+        cols = []
+        for side in (DEFENSE, ATTACK):
+            it = intent.get(side)
+            if not it:
+                continue
+            tags = "".join(f"<span>{_e(t)} {c}</span>" for t, c in it["tags"])
+            qs = "".join(f"<li>{_e(q)}</li>" for q in it["quotes"][:4])
+            cols.append(f'<div><h3>{side}</h3><p class="chips">{tags}</p><ul class="plain sub">{qs}</ul></div>')
+        slides.append(_slide("Intent", "解説から読み取れる意図", f'<div class="cols">{"".join(cols)}</div>'
+                             '<p class="sub">放送の自動字幕から、ラウンド中に解説が口にした言葉（ラッシュ・フェイク・ラーク・'
+                             'リテイクなど）を数えています。相手チームの話のこともあるので目安です。</p>', foot))
+    if key.get("llm"):
+        body = "".join(f"<p>{_e(line)}</p>" if not line.startswith(("-", "・", "*"))
+                       else f"<li>{_e(line.lstrip('-・* '))}</li>" for line in key["llm"].splitlines() if line.strip())
+        slides.insert(1, _slide("Summary", "ATK / DEF summary（Claude が数字から書いた叩き台）",
+                                f'<div class="sub" style="font-size:15px">{body}</div>', foot))
+
     # ULT・選手・経済
     cards = []
     for side in (DEFENSE, ATTACK):
@@ -974,8 +1066,13 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
     return f
 
 
+def tactics_meta(cfg: dict, map_name: str) -> list[dict]:
+    from . import tactics
+    return (tactics.load_map(map_name, cfg, log=None) or {}).get("callouts") or []
+
+
 def build(cfg: dict, out_dir: Path, team: str | None = None, map_name: str | None = None,
-          min_maps: int = 1, log=print) -> list[Path]:
+          min_maps: int = 1, log=print, use_llm: bool = True, notion=None, notion_parent: str | None = None) -> list[Path]:
     """DB のマップから、チーム × マップ × 構成 と 構成 × マップ のプレイブックを作る。"""
     conn = db.connect(db.warehouse_path(cfg))
     reps = load_reports(conn)
@@ -998,8 +1095,11 @@ def build(cfg: dict, out_dir: Path, team: str | None = None, map_name: str | Non
     index = defaultdict(list)
     for (kind, tname, mp, comp), rs in sorted(groups.items(), key=lambda kv: (kv[0][0], str(kv[0][1]), str(kv[0][2]))):
         n_maps = len({(r["match_id"], r["order"]) for r in rs})
-        if n_maps < (min_maps if kind == "team" else max(2, min_maps)) or not comp:
+        n_teams = len({r["team"] for r in rs})
+        if not comp or n_maps < min_maps:
             continue
+        if kind == "comp" and n_maps < 2 and n_teams < 2:
+            continue                       # 1 チーム・1 マップの構成はチーム別の冊子と同じ中身になるので作らない
         cl = " / ".join(comp)
         if kind == "team":
             tag = rs[0]["tag"] or tname
@@ -1009,12 +1109,22 @@ def build(cfg: dict, out_dir: Path, team: str | None = None, map_name: str | Non
             title = f"{mp} {cl} PlayBook"
             slug = f"comp_{_slug(mp)}_{_slug('-'.join(comp))}"
         key = {"kind": kind, "team": tname, "map": mp, "comp": list(comp), "title": title, "slug": slug}
+        if kind == "team" and use_llm:
+            from . import llm
+            key["llm"] = llm.summarize(cfg, summary_data(rs, by_map[mp]), log=log)
         try:
             p = build_deck(cfg, key, rs, by_map[mp], out_dir, log=log)
         except Exception as e:
             log(f"  {title}: 作れませんでした（{e}）")
             continue
         decks.append(p)
+        if notion is not None and notion_parent and kind == "team":
+            from .notion_playbook import export
+            try:
+                url = export(notion, cfg, key, rs, by_map[mp], notion_parent, out_dir / "img" / slug, log=log)
+                log(f"  Notion に書きました：{title} {url}")
+            except Exception as e:
+                log(f"  Notion への書き込みに失敗（{title}）：{e}")
         wins = sum(r["win"] for r in rs)
         index[(kind, tname or "構成別")].append((mp, cl, p.name, n_maps, wins, len(rs)))
     _write_index(out_dir, index)

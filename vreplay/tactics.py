@@ -277,7 +277,7 @@ def _wanted_times(rlist: list[dict], every: float) -> list[float]:
 
 
 def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
-                  out_dir: Path | None = None, log=print, store=None, obs=None) -> dict | None:
+                  out_dir: Path | None = None, log=print, store=None, obs=None, alive_fn=None) -> dict | None:
     """rounds: [{"n": 1, "start": 10.0, "end": 120.0, "side1": "攻撃"|"防御", "plant": 秒|None}, ...]"""
     from . import minimap as MM
     if not rounds or path is None:
@@ -363,7 +363,8 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         warm = [d for d in found if d["color"] == "warm"]
         cool = [d for d in found if d["color"] == "cool"]
         samples.append({"t": t, "n": int(r["n"]), "side1": _canon(r.get("side1")),
-                        "warm": _centroid(warm), "cool": _centroid(cool), "n_dots": len(found)})
+                        "warm": _centroid(warm), "cool": _centroid(cool), "n_dots": len(found),
+                        "n_warm": len(warm), "n_cool": len(cool)})
         for d in found:
             dots.append({"t": t, "n": int(r["n"]), "side1": _canon(r.get("side1")),
                          "color": d["color"], "x": d["x"], "y": d["y"]})
@@ -375,7 +376,7 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
     T = MM.fit_mask(mask, meta, bg=background) if mask is not None else {"ok": False, "msg": "床が見つかりません"}
     if T.get("ok"):
         placed = MM.place(T, meta["callouts"])
-        warm1, votes = _warm_team1(samples, placed, start_by_n)
+        warm1, votes = _warm_team1(samples, placed, start_by_n, alive_fn)
         T["warm1"] = warm1
         T["msg"] += f"・暖色={'チーム1' if warm1 else 'チーム2'}（スポーンで {votes}）"
     else:
@@ -592,14 +593,34 @@ def fight_zone(tac: dict, n: int, t: float, window: float = 4.0) -> str | None:
     return zs[0] if zs else None
 
 
-def _warm_team1(samples: list[dict], placed: list[dict], starts: dict) -> tuple[bool, str]:
-    """ラウンド開始直前、攻撃側の色の重心は攻撃側スポーンに近い。暖色がチーム1かを多数決で決める。"""
+def _warm_team1(samples: list[dict], placed: list[dict], starts: dict, alive_fn=None) -> tuple[bool, str]:
+    """暖色がチーム1か。2 つの手がかりの多数決：
+    ① 生き残りの人数：カードから分かるチームごとの生存人数と、ミニマップの色ごとの点の数が合う方（人数に差があるときだけ）
+    ② ラウンド開始直前、攻撃側の色の重心は攻撃側スポーンに近い"""
+    yes = no = 0
+    cy = cn = 0
+    if alive_fn is not None:
+        for s in samples:
+            try:
+                a1, a2 = alive_fn(s["t"])
+            except Exception:
+                continue
+            if a1 is None or abs(a1 - a2) < 2 or s.get("n_warm") is None:
+                continue
+            nw, nc = s["n_warm"], s["n_cool"]
+            same = abs(nw - a1) + abs(nc - a2)
+            swap = abs(nw - a2) + abs(nc - a1)
+            if same < swap:
+                cy += 1
+            elif swap < same:
+                cn += 1
+        if cy + cn >= 6 and max(cy, cn) >= 0.65 * (cy + cn):
+            return cy >= cn, f"生存人数で {max(cy, cn)}/{cy + cn}"
     sp = {("攻" if "attacker" in c["super"].lower() else "防"): (c["x"], c["y"]) for c in placed
           if c["name"].lower() == "spawn"}
     if "攻" not in sp:
-        return True, "材料なし"
+        return cy >= cn, f"生存人数で {max(cy, cn)}/{cy + cn}" if cy + cn else "材料なし"
     ax, ay = sp["攻"]
-    yes = no = 0
     for s in samples:
         st = starts.get(s["n"])
         if st is None or not (st - 6 <= s["t"] <= st + 2) or not s.get("warm") or not s.get("cool"):
@@ -614,7 +635,8 @@ def _warm_team1(samples: list[dict], placed: list[dict], starts: dict) -> tuple[
             yes += 1
         else:
             no += 1
-    return yes >= no, f"{max(yes, no)}/{yes + no}"
+    yes, no = yes + cy, no + cn
+    return yes >= no, f"スポーンと生存人数で {max(yes, no)}/{yes + no}"
 
 
 def _fit_overlay(bg: np.ndarray, placed: list[dict], dots: list[dict], path: Path) -> Path:

@@ -149,6 +149,7 @@ def _map_section(rep: dict, base: Path) -> str:
                       + "".join(f'<br>{_e(x)}' for x in rs.get("lines") or [])
                       + (f'<br><span class="sub">{_e(rs["caveat"])}</span>' if rs.get("caveat") else "")
                       + (f'<br><span class="sub">初動：{_e(S.setup_line(rep, r))}</span>' if S.setup_line(rep, r) else "")
+                      + (f'<br><span class="sub">解説：{_e(S.caster_line(r))}</span>' if S.caster_line(r) else "")
                       + '</div>')
         rt = r.get("tactics") or {}
         site = (f'　推定サイト <b>{_e(rt["site"])}</b>'

@@ -277,6 +277,8 @@ def round_blocks(rep: dict, r: dict, uploads: dict[str, str | None]) -> list[dic
             extra.append(f"ラウンド時間 {r['duration']}")
         if S.setup_line(rep, r):
             extra.append("初動：" + S.setup_line(rep, r))
+        if S.caster_line(r):
+            extra.append("解説：" + S.caster_line(r))
         if extra:
             rt.append(_rt("\n" + "　".join(extra), color="gray"))
         out.append({"type": "callout", "callout": {"rich_text": rt,

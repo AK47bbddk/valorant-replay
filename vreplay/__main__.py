@@ -68,6 +68,9 @@ def main():
     pb.add_argument("--team", help="このチームだけ（名前の一部かタグ）")
     pb.add_argument("--map", help="このマップだけ")
     pb.add_argument("--sync", action="store_true", help="先に output.dir の report.json を DB に取り込む")
+    pb.add_argument("--notion", nargs="?", const="config", default=None,
+                    help="Notion にも書く。親ページの URL を渡す（省略時は config の playbook.notion_parent）")
+    pb.add_argument("--no-llm", action="store_true", help="ANTHROPIC_API_KEY があっても Claude に要約を書かせない")
     pb.add_argument("--config")
 
     sy = sub.add_parser("sync", help="既存の report.json をまとめて DB に入れる")
@@ -105,7 +108,18 @@ def main():
             n = db.sync_reports(conn, Path(cfg["output"]["dir"]))
             print(f"{n} 件の report.json を DB に取り込みました")
             conn.close()
-        deck.build(cfg, out, team=a.team, map_name=a.map, min_maps=a.min_maps)
+        nt, parent = None, None
+        if a.notion:
+            import os
+            from .notion import Notion
+            from .notion_playbook import page_id
+            parent = page_id(a.notion if a.notion != "config" else str((cfg.get("playbook") or {}).get("notion_parent") or ""))
+            if not os.environ.get("NOTION_TOKEN") or not parent:
+                print("Notion に書くには NOTION_TOKEN と親ページ（--notion <URL> か config の playbook.notion_parent）が必要です")
+            else:
+                nt = Notion(os.environ["NOTION_TOKEN"])
+        deck.build(cfg, out, team=a.team, map_name=a.map, min_maps=a.min_maps, use_llm=not a.no_llm,
+                   notion=nt, notion_parent=parent)
         if not a.team and not a.map:
             build(cfg, out / "stats", min_maps=a.min_maps)      # 以前の集計ページ（ヒートマップ・型の表）
     elif a.cmd == "sync":

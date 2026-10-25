@@ -34,9 +34,9 @@ video:
   fast_keyframe_interval: 2.5
   max_keyframe_interval: 6
   download_workers: 1    # 同時にダウンロードするマップ数。1 なら 1 マップずつ全力で取り、解析中に次のマップを取る
-  download_method: range # range：必要な時間帯のバイト範囲だけを並列に取る（速い）／sections：yt-dlp の区間ダウンロード
+  download_method: sections # sections：区間を分けて yt-dlp で同時に取る（Colab で安定）／range：DASH・HLS の必要な範囲だけを取る（PO トークンの要らない形式が返るときだけ速い）
   download_threads: 16   # range のときの同時接続数（YouTube は 1 本を 1 MB/s 前後に絞るので本数で稼ぐ）
-  download_parts: 16     # sections のとき（range が使えないとき）に区間をいくつに分けて同時に取るか
+  download_parts: 24     # sections のとき（range が使えないとき）に区間をいくつに分けて同時に取るか
   download_fragments: 4  # 1 本の動画を yt-dlp が分割して並列取得する数（回線が速いなら 8 などに）
 
 hud:
@@ -49,6 +49,15 @@ hud:
     table:       [0.000, 0.520, 1.000, 1.000]   # 購入フェーズの装備表を探す範囲（画面下部）
   buy_phase_max_sec: 30
   round_timer_sec: 100
+
+captions:
+  enabled: true         # 放送の自動字幕から、解説が口にした意図（ラッシュ・フェイク…）をラウンドごとに拾う
+
+llm:
+  model: claude-sonnet-5-5   # ANTHROPIC_API_KEY があるとき、プレイブックの ATK/DEF summary を書かせるモデル
+
+playbook:
+  notion_parent: ""     # Notion に書くときの親ページ URL（vreplay playbook --notion でも指定できる）
 
 warehouse:
   # 空なら output.dir/warehouse.sqlite3。大量の試合メタデータと解析結果を 1 つにまとめる。

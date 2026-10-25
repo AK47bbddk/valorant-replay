@@ -263,11 +263,8 @@ def test_killfeed_ocr_only_when_new_row(tmp_path, monkeypatch):
     monkeypatch.setattr(X, "_ocr", lambda: OCR())
     args = (st, list(range(len(seq))), [i * 1.0 for i in range(len(seq))], ["-"] * len(seq),
             X.Roster([("Derke", "A")]), None, tmp_path / "k.jpg")
-    X.kills_in_round(*args, every=60)
-    assert OCR.calls == 2                 # 新しい行が出た 2 回だけ
-    OCR.calls = 0
     X.kills_in_round(*args)
-    assert OCR.calls == 4                 # 既定では行が映っている間 2 秒おきにも読む（見落とし対策）
+    assert OCR.calls == 4                 # 行は 2 つ。それぞれ初めて見たときと、1 秒後の確認の 1 回だけ（行がずれても読み直さない）
 
 
 def test_parse_killfeed_tags_and_teams():

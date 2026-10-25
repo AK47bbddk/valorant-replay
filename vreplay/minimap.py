@@ -58,7 +58,7 @@ def _scores(off: np.ndarray, scales: np.ndarray, trans: np.ndarray, dots: np.nda
     return score
 
 
-def _search(uv, a_uv, d_uv, a_px, d_px, dots, aspect, mirrors=(False, True),
+def _search(uv, a_uv, d_uv, a_px, d_px, dots, aspect, mirrors=(False,),
             thetas=None, scales=None, shift=None):
     thetas = np.deg2rad(np.arange(0, 360, 6)) if thetas is None else thetas
     scales = np.geomspace(0.45, 2.2, 22) if scales is None else scales
@@ -196,22 +196,22 @@ def nearest(placed: list[dict], x: float, y: float, aspect: float) -> tuple[dict
 
 
 # ---------------------------------------------------------------- 背景（地形）による位置合わせ
-def map_mask(bg: np.ndarray) -> np.ndarray | None:
-    """ミニマップの背景（何枚かの中央値＝点が消えた画像）から、歩ける場所（明るい灰色の床）の 2 値画像。
-    放送のミニマップは暗い半透明の地に明るい床が描かれる。サイトの四角（黄みがかった床）も床に含める。"""
+def _outline(bg: np.ndarray) -> np.ndarray:
+    """ミニマップの床の縁（白い細い線）。周りより明るく、色の薄い細い線を top-hat で拾う。"""
     import cv2
-    if bg is None or bg.size == 0:
-        return None
+    g = cv2.cvtColor(bg, cv2.COLOR_BGR2GRAY)
     hsv = cv2.cvtColor(bg, cv2.COLOR_BGR2HSV)
-    v = cv2.GaussianBlur(hsv[..., 2], (3, 3), 0)
-    t, _ = cv2.threshold(v, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    m = ((v >= max(t, 95)) & (hsv[..., 1] <= 110)).astype(np.uint8)
-    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    th = cv2.morphologyEx(g, cv2.MORPH_TOPHAT, np.ones((7, 7), np.uint8))
+    return (th >= 35) & (hsv[..., 1] <= 60) & (g >= 150)
+
+
+def _keep_main(m: np.ndarray) -> np.ndarray:
+    import cv2
+    m = cv2.morphologyEx(m.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
     m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    # いちばん大きなまとまり（マップ本体）と、それに近い塊だけ残す（スコアや UI の明るい部分を除く）
     n, lab, st, _ = cv2.connectedComponentsWithStats(m, 8)
     if n <= 1:
-        return None
+        return np.zeros(m.shape, bool)
     big = int(np.argmax(st[1:, 4])) + 1
     keep = np.zeros_like(m)
     x0, y0, w0, h0 = st[big, :4]
@@ -219,20 +219,93 @@ def map_mask(bg: np.ndarray) -> np.ndarray | None:
         x, y, w, h, a = st[i]
         if i == big or (a >= 30 and x + w >= x0 - 10 and x <= x0 + w0 + 10 and y + h >= y0 - 10 and y <= y0 + h0 + 10):
             keep[lab == i] = 1
-    frac = keep.mean()
-    if not 0.05 <= frac <= 0.7:
-        return None
     return keep.astype(bool)
 
 
-def site_squares(bg: np.ndarray, mask: np.ndarray | None = None) -> list[tuple[float, float]]:
-    """ミニマップのサイト（A/B/C の文字が入った、黄みがかった四角）の中心。高さ 1 の単位 (x, y)。"""
+def _edge_agreement(m: np.ndarray, line: np.ndarray) -> float:
+    """床の 2 値画像の縁が、白い縁の線とどれだけ重なるか（0..1）。"""
+    import cv2
+    mm = m.astype(np.uint8)
+    edge = (mm - cv2.erode(mm, np.ones((3, 3), np.uint8))).astype(bool)
+    near = cv2.dilate(line.astype(np.uint8), np.ones((7, 7), np.uint8)).astype(bool)
+    return float((edge & near).sum() / max(1, edge.sum()))
+
+
+def map_mask(bg: np.ndarray) -> np.ndarray | None:
+    """ミニマップの背景（何枚かの中央値＝点が消えた画像）から、歩ける場所（灰色の床）の 2 値画像。
+
+    床は半透明なので、後ろの試合画面の明るさで色が変わる（赤っぽい地・明るい地）。そこで
+      ① 明るさの大津の二値化（暗い地の上の明るい床）
+      ② 白い縁の線のすぐ内側の色から床の色を推定し、それに近い無彩色の画素
+    の 2 通りを作り、床の縁が白い線と重なる方を選ぶ。サイトの四角（黄みがかった床）も足す。"""
+    import cv2
+    if bg is None or bg.size == 0:
+        return None
+    hsv = cv2.cvtColor(bg, cv2.COLOR_BGR2HSV)
+    lab = cv2.cvtColor(cv2.GaussianBlur(bg, (3, 3), 0), cv2.COLOR_BGR2LAB).astype(np.int16)
+    line = _outline(bg)
+    sq = ((hsv[..., 0] >= 10) & (hsv[..., 0] <= 35) & (hsv[..., 1] >= 35) & (hsv[..., 2] >= 100))
+    cands = []
+    v = cv2.GaussianBlur(hsv[..., 2], (3, 3), 0)
+    t, _ = cv2.threshold(v, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    cands.append(_keep_main(((v >= max(t, 95)) & (hsv[..., 1] <= 110)) | sq))
+    neutral = (np.abs(lab[..., 1] - 128) <= 6) & (np.abs(lab[..., 2] - 128) <= 7)
+    ring = (cv2.dilate(line.astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
+            & ~cv2.dilate(line.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool))
+    Ls = lab[..., 0][ring & neutral & (lab[..., 0] >= 95) & (lab[..., 0] <= 185)]
+    if len(Ls) >= 50:
+        hist = np.bincount(Ls.astype(int), minlength=256)
+        hist = np.convolve(hist, np.ones(7), mode="same")
+        fl = int(np.argmax(hist))
+        cands.append(_keep_main((neutral & (np.abs(lab[..., 0] - fl) <= 20)) | sq))
+    best = None
+    for m in cands:
+        frac = float(m.mean())
+        if not 0.08 <= frac <= 0.6:
+            continue
+        agree = _edge_agreement(m, line)
+        if best is None or agree > best[0]:
+            best = (agree, m)
+    if best is None or best[0] < 0.25:
+        return None
+    return best[1]
+
+
+def _letter(crop) -> str | None:
+    """サイトの四角の中の文字（A/B/C）。二値化したものと元の色の 2 通りを OCR し、1 文字に決まれば返す。"""
+    import cv2
+    try:
+        from .extract import _ocr
+        g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        _, bw = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        big = cv2.copyMakeBorder(cv2.resize(bw, None, fx=4, fy=4, interpolation=cv2.INTER_NEAREST),
+                                 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255)
+        res = _ocr().rec([cv2.cvtColor(big, cv2.COLOR_GRAY2BGR), cv2.resize(crop, None, fx=4, fy=4)])
+    except Exception:
+        return None
+    from collections import Counter
+    votes = Counter()
+    for tx, _ in res:
+        t = (tx or "").upper()
+        for ch in set(t) & set("ABC"):
+            votes[ch] += 2 if len(t.strip()) == 1 else 1      # 1 文字だけ読めたものを重く
+    if not votes:
+        return None
+    top = votes.most_common(2)
+    return top[0][0] if len(top) == 1 or top[0][1] > top[1][1] else None
+
+
+def site_squares(bg: np.ndarray, mask: np.ndarray | None = None, read: bool = True) -> list[dict]:
+    """ミニマップのサイト（A/B/C の文字が入った、黄みがかった四角）。[{x, y（高さ 1 の単位）, letter}]"""
     import cv2
     if bg is None or bg.size == 0:
         return []
     H = bg.shape[0]
     hsv = cv2.cvtColor(bg, cv2.COLOR_BGR2HSV)
-    m = ((hsv[..., 0] >= 10) & (hsv[..., 0] <= 35) & (hsv[..., 1] >= 35) & (hsv[..., 2] >= 100)).astype(np.uint8)
+    # サイトの四角は黄みがかった明るい床（H 20〜34・S 35〜75・V 130 以上）。赤茶色の地（H 10〜17・S 70〜）とは分ける
+    m = ((hsv[..., 0] >= 20) & (hsv[..., 0] <= 34) & (hsv[..., 1] >= 35) & (hsv[..., 1] <= 75)
+         & (hsv[..., 2] >= 130)).astype(np.uint8)
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
     m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     n, _, st, cen = cv2.connectedComponentsWithStats(m, 8)
     out = []
@@ -241,7 +314,12 @@ def site_squares(bg: np.ndarray, mask: np.ndarray | None = None) -> list[tuple[f
         cx, cy = int(cen[i][0]), int(cen[i][1])
         on_floor = mask is None or bool(mask[min(cy, mask.shape[0] - 1), min(cx, mask.shape[1] - 1)])
         if a >= 0.002 * m.size and 0.4 <= w / max(1, h) <= 2.5 and a >= 0.35 * w * h and on_floor:
-            out.append((float(cen[i][0] / H), float(cen[i][1] / H)))
+            out.append({"x": float(cen[i][0] / H), "y": float(cen[i][1] / H),
+                        "letter": _letter(bg[y:y + h, x:x + w]) if read else None})
+    letters = [q["letter"] for q in out if q["letter"]]
+    for q in out:                                  # 同じ文字が 2 つ以上なら、どれも信用しない
+        if q["letter"] and letters.count(q["letter"]) > 1:
+            q["letter"] = None
     return out
 
 
@@ -278,18 +356,18 @@ def fit_mask(mask: np.ndarray, meta: dict, max_pts: int = 500, seed: int = 0, bg
         return d_in * 2.0 + cover
 
     best = []
-    scales = np.geomspace(0.5, 2.2, 26)
-    for m in (False, True):
-        for th in np.deg2rad(np.arange(0, 360, 4)):
+    # 放送のミニマップは鏡映しない。向きはマップ画像からほぼ 90 度単位（±12 度）、大きさは切り抜きいっぱい前後
+    scales = np.geomspace(0.6, 1.45, 18)
+    thetas = sorted({(base + d) % 360 for base in (0, 90, 180, 270) for d in range(-12, 13, 3)})
+    for m in (False,):
+        for th in np.deg2rad(thetas):
             off = _offsets(uv, m, th)
             tr = cen[None] - scales[:, None] * off.mean(axis=0)[None]
             sc = score(m, th, scales, tr)
             i = int(np.argmin(sc))
             best.append((float(sc[i]), m, float(th), float(scales[i]), tr[i].copy()))
     best.sort(key=lambda b: b[0])
-    # 上位いくつかを細かく詰める
-    refined = []
-    for sc0, m, th, s, tr in best[:6]:
+    def refine(sc0, m, th, s, tr):
         cur = (sc0, th, s, tr)
         for step_t, step_s, step_x in ((np.deg2rad(2), 0.04, 0.03), (np.deg2rad(1), 0.02, 0.012), (np.deg2rad(0.5), 0.01, 0.006)):
             improved = True
@@ -307,18 +385,65 @@ def fit_mask(mask: np.ndarray, meta: dict, max_pts: int = 500, seed: int = 0, bg
                 if vals[k] < cur[0] - 1e-6:
                     cur = (vals[k], *cands[k])
                     improved = True
-        refined.append((cur[0], m, cur[1], cur[2], cur[3]))
+        return (cur[0], m, cur[1], cur[2], cur[3])
+
+    # 上位いくつかを細かく詰める
+    refined = [refine(*b) for b in best[:6]]
     # サイトの四角が見つかっていれば、サイトのコールアウトがその近くに来る候補を優先する
-    squares = site_squares(bg, mask) if bg is not None else []
-    site_uv = np.array([(c["x"], c["y"]) for c in calls if c.get("super") in ("A", "B", "C")
-                        and c.get("name", "").lower() == "site"], float)
+    squares = site_squares(bg, None) if bg is not None else []
+    site_calls = [c for c in calls if c.get("super") in ("A", "B", "C") and c.get("name", "").lower() == "site"]
+    site_uv = np.array([(c["x"], c["y"]) for c in site_calls], float)
+    site_lt = [c["super"] for c in site_calls]
+    # 2 サイトのマップで片方の文字だけ読めたら、もう片方は残りの文字
+    if len(site_lt) == 2 and len(squares) == 2:
+        known = [q["letter"] for q in squares if q["letter"] in site_lt]
+        if len(known) == 1:
+            for q in squares:
+                if not q["letter"]:
+                    q["letter"] = next(x for x in site_lt if x != known[0])
     if len(squares) >= 2 and len(site_uv) >= 2:
-        sq = np.array(squares)
+        sq = np.array([(q["x"], q["y"]) for q in squares])
+        sq_lt = [q["letter"] for q in squares]
+        anchored = []
+        # 四角 2 つとサイト 2 つの対応ごとに相似変換を決めて候補に足す（向き・倍率が妥当なものだけ）
+        for i in range(len(sq)):
+            for j in range(len(sq)):
+                if i == j:
+                    continue
+                for p in range(len(site_uv)):
+                    for q in range(len(site_uv)):
+                        if p == q:
+                            continue
+                        # 文字が読めた四角は、そのサイトとしか対応させない
+                        if (sq_lt[i] and sq_lt[i] != site_lt[p]) or (sq_lt[j] and sq_lt[j] != site_lt[q]):
+                            continue
+                        du = site_uv[q] - site_uv[p]
+                        dp = sq[j] - sq[i]
+                        if np.linalg.norm(du) < 1e-6:
+                            continue
+                        sc_ = float(np.linalg.norm(dp) / np.linalg.norm(du))
+                        th_ = math.atan2(dp[1], dp[0]) - math.atan2(du[1], du[0])
+                        dev = abs((math.degrees(th_) + 45) % 90 - 45)
+                        if not (0.6 <= sc_ <= 1.45) or dev > 15:
+                            continue
+                        off = _offsets(site_uv[p][None], False, th_)[0]
+                        tr_ = sq[i] - sc_ * off
+                        v_ = float(score(False, th_, np.array([sc_]), tr_[None])[0])
+                        anchored.append((v_, False, th_, sc_, tr_))
+        anchored.sort(key=lambda b: b[0])
+        refined += [refine(*b) for b in anchored[:6]]
 
         def site_pen(b):
             T_ = {"mirror": b[1], "theta": b[2], "scale": b[3], "tx": float(b[4][0]), "ty": float(b[4][1])}
             P = np.array([apply(T_, u, v) for u, v in site_uv])
-            return float(np.minimum(np.linalg.norm(P[:, None] - sq[None], axis=2).min(axis=1), 0.15).mean())
+            pen = []
+            for k_, lt in enumerate(site_lt):
+                same = [n_ for n_, x in enumerate(sq_lt) if x == lt]
+                if same:                                    # 文字が読めた四角との距離（強め）
+                    pen.append(2 * min(0.2, float(np.linalg.norm(P[k_] - sq[same[0]]))))
+                else:
+                    pen.append(min(0.15, float(np.linalg.norm(P[k_][None] - sq, axis=1).min())))
+            return float(np.mean(pen))
         refined = [(b[0] + 0.5 * site_pen(b), *b[1:]) for b in refined]
     refined.sort(key=lambda b: b[0])
     sc, m, th, s, tr = refined[0]
@@ -333,6 +458,6 @@ def fit_mask(mask: np.ndarray, meta: dict, max_pts: int = 500, seed: int = 0, bg
     T.update({"score": round(sc, 4), "inside": round(inside, 2), "margin": round(margin, 2),
               "confidence": round(conf, 2), "ok": conf >= 0.5, "method": "mask", "span": round(span, 3)})
     T["msg"] = (f"ミニマップ合わせ（地形）：回転 {math.degrees(th) % 360:.0f}°{'・鏡映' if m else ''}・倍率 {s:.2f}"
-                f"（コールアウトが床の上 {inside:.0%}・2 位との差 ×{margin:.2f}）→ 信頼度 {conf:.0%}"
+                f"（コールアウトが床の上 {inside:.0%}・サイトの四角 {len(squares)}（文字 {''.join(sorted(q['letter'] for q in squares if q['letter'])) or 'なし'}）・2 位との差 ×{margin:.2f}）→ 信頼度 {conf:.0%}"
                 + ("" if T["ok"] else "（低い）"))
     return T

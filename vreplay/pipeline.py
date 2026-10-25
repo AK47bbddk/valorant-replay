@@ -338,6 +338,13 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
     tag = f"{m.id}:{md.order}"
     t_start = time.time()
     start, _ = _segment_bounds(m, md, cfg)
+    # 解説の字幕（意図の手がかり）は通信だけなので、解析と並行して取っておく
+    cap_ex = ThreadPoolExecutor(max_workers=1)
+    cap_fut = None
+    if (cfg.get("captions") or {}).get("enabled", True) and md.vod_id:
+        from . import captions as CC
+        from .video import _ytdlp_env, resolve_cookies
+        cap_fut = cap_ex.submit(CC.fetch, md.vod_id, video_cache_dir(cfg), resolve_cookies(cfg), _ytdlp_env())
     roster = X.Roster([(p.name, m.team1 if p.team == 1 else m.team2) for p in md.players])
     agent = {p.name: p.agent for p in md.players}
     with perf.stage("calibrate", tag=tag, label="キャリブレーション") as st_cal:
@@ -428,8 +435,19 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
             } for r in det]
             from . import tactics
             with perf.stage("tactics", tag=tag, label="サイト・位置の解析") as st_tac:
+                t_arr = np.asarray(t, float)
+
+                def alive_fn(tt, _det=det):
+                    """その時刻のチーム1・チーム2 の生存人数（カードから）。"""
+                    rr_ = next((r for r in _det if r.t_drop - 6 <= tt <= r.t_end), None)
+                    if rr_ is None:
+                        return None, None
+                    i = int(np.argmin(np.abs(t_arr - tt)))
+                    al = obs["alive"][i]
+                    nl, nr = int(np.sum(al[:5])), int(np.sum(al[5:]))
+                    return (nl, nr) if orient.get(rr_.n, True) else (nr, nl)
                 tac = tactics.analyze_video(cfg, path, md.name, tac_rounds, out_dir=out_dir, log=log,
-                                            store=store, obs=obs)
+                                            store=store, obs=obs, alive_fn=alive_fn if geo else None)
             if tac:
                 rep["tactics"] = tac
                 for rr in rep["rounds"]:
@@ -631,6 +649,26 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
         log(f"    ラウンドごとの素材 {len(det)} ラウンド {perf.fmt_seconds(st_assets['seconds'])}"
             f"｜{perf.fmt_resources(st_assets['resources'])}")
         found = {r.n for r in det}
+        if cap_fut is not None:
+            try:
+                caps = cap_fut.result(timeout=120)
+            except Exception:
+                caps = []
+            if caps:
+                from . import captions as CC
+                ends = {r.n: (r.t_drop, r.t_end) for r in det}
+                n_int = 0
+                for rr in rep["rounds"]:
+                    if rr["n"] not in ends:
+                        continue
+                    a_, b_ = ends[rr["n"]]
+                    txt = CC.for_round(caps, start + a_ - 25, start + b_ + 4)
+                    it = CC.intents(txt, [m.team1, m.team2, m.tag1, m.tag2])
+                    if it["tags"] or it["sites"]:
+                        rr["caster"] = it
+                        n_int += 1
+                stats["caster_note"] = f"解説の字幕 {len(caps)} 行・意図の手がかり {n_int}R"
+        cap_ex.shutdown(wait=False)
         if rep.get("tactics", {}).get("aligned"):
             from .tactics import fight_zone
             for rr in rep["rounds"]:
@@ -659,6 +697,7 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                                 f"／検出ラウンド {len(det)}/{md.total_rounds or '?'}／VLR との勝敗一致 {agree:.0%}"
                                 + (f"／{drop_note}" if drop_note else "")
                                 + (f"／{stats['kills_note']}" if stats.get("kills_note") else "")
+                                + (f"／{stats['caster_note']}" if stats.get("caster_note") else "")
                                 + (f"／{tac_note}" if tac_note else "")
                                 + f"／解析 {perf.fmt_seconds(time.time() - t_start)}")
         log(f"    {rep['analysis_note']}")

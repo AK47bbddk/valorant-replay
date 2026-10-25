@@ -316,7 +316,7 @@ def advice(stages: list[dict], total: float) -> list[str]:
     out = []
     if dl and total > 0 and dl["seconds"] / total >= 0.25:
         out.append(f"動画の取得が全体の {dl['seconds'] / total:.0%} を占めています。"
-                   "YouTube は 1 本の接続を 1 MB/s 前後に絞るので、config の video.download_parts（既定 8）を増やす、"
+                   "YouTube は 1 本の接続を 1 MB/s 前後に絞るので、config の video.download_parts（既定 24）を増やす、"
                    "または自宅 PC の `vreplay fetch` で先に落とすと短縮できます（取得は解析と並行して進みます）。")
     if scan and scan.get("cpu_avg") is not None and scan["seconds"] >= 30 and scan["cpu_avg"] < 50:
         out.append(f"スキャン中の CPU は平均 {scan['cpu_avg']:.0f}% で余っています。"

@@ -129,3 +129,16 @@ def setup_line(rep: dict, r: dict) -> str:
         side = "攻め" if su.get("side") == "攻撃" else "守り" if su.get("side") == "防衛" else ""
         out.append(f"{tg}（{side}）{su.get('name')} {su.get('shape') or ''}".strip())
     return " ／ ".join(out)
+
+
+def caster_line(r: dict) -> str:
+    """解説の字幕から拾った意図の手がかり：'ラッシュ・フェイク（B）「…going for the B split…」'"""
+    c = r.get("caster") or {}
+    if not c.get("tags"):
+        return ""
+    out = "・".join(c["tags"][:4])
+    if c.get("sites"):
+        out += f"（{'・'.join(c['sites'][:3])}）"
+    if c.get("quotes"):
+        out += f"「{c['quotes'][0]}」"
+    return out

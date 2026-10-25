@@ -536,13 +536,19 @@ def _bands_changed(cur, prev, tol: float = 0.08) -> bool:
     return False
 
 
+def _row_sig(crop) -> np.ndarray:
+    return cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), (128, 12), interpolation=cv2.INTER_AREA).astype(np.float32)
+
+
 def kills_in_round(store: FrameStore, idxs: list[int], times: list[float], labels: list[str], roster: Roster,
-                   book, out_path: Path, min_gap: float = 0.4, every: float = 2.0) -> tuple[list[dict], Path | None]:
+                   book, out_path: Path, min_gap: float = 0.4, every: float = 2.0,
+                   row_tol: float = 14.0, keep: float = 8.0) -> tuple[list[dict], Path | None]:
     """ライブ区間のキルフィードから、新しく出た行をキルとして記録する。
 
-    OCR（文字の検出＋認識）は、白い名前の帯に「新しい行」が出たフレームと、行が映っている間は every 秒おきに行う
-    （キルフィードの行は 4〜5 秒残るので、変化を見落としても次の定期の読みで拾える）。
-    帯が 1 つも見つからない放送では、見た目の変化＋2 秒おきに読む。
+    行（白い名前の帯）ごとに見た目（行全体の縮小画像）を覚えておき、初めて見た行だけを、その行の高さだけ
+    切り出して OCR する（画面全体より小さいので速い）。読み違い対策に、同じ行を 1 秒ほど後にもう 1 回だけ読む。
+    行が下にずれても見た目は同じなので読み直さない。帯が 1 つも見つからない放送では、画面全体を
+    見た目の変化＋2 秒おきに読む。
     """
     events, crops, seen, victims = [], [], {}, set()
     frames = []
@@ -551,29 +557,45 @@ def kills_in_round(store: FrameStore, idxs: list[int], times: list[float], label
         if img is not None:
             frames.append((j, img, killfeed_bands(img)))
     use_bands = any(b for _, _, b in frames)
-    prev_bands, prev_small, last_t, pending = [], None, -1e9, False
-    todo = []
-    for j, img, bands in frames:
-        t = times[j]
-        if use_bands:
-            if _bands_changed(bands, prev_bands):
-                pending = True
-            prev_bands = bands
-            due = bool(bands) and t - last_t >= every
-            if not ((pending and t - last_t >= min_gap) or due):
-                continue
-        else:
+    jobs = []                                   # (j, 画像)
+    if use_bands:
+        rows: list[dict] = []
+        for j, img, bands in frames:
+            t = times[j]
+            H = img.shape[0]
+            for y0, y1, _ in bands:
+                ya, yb = max(0, y0 - 6), min(H, y1 + 6)
+                crop = img[ya:yb]
+                sig = _row_sig(crop)
+                best, bd = None, 1e9
+                for r in rows:
+                    if t - r["last"] > keep:
+                        continue
+                    d = float(np.mean(np.abs(r["sig"] - sig)))
+                    if d < bd:
+                        best, bd = r, d
+                if best is None or bd > row_tol:
+                    rows.append({"sig": sig, "first": t, "last": t, "reads": 1})
+                    jobs.append((j, crop))
+                else:
+                    best["last"], best["sig"] = t, sig
+                    if best["reads"] < 2 and t - best["first"] >= 0.9:
+                        best["reads"] += 1
+                        jobs.append((j, crop))
+    else:
+        prev_small, last_t = None, -1e9
+        for j, img, _ in frames:
+            t = times[j]
             small = cv2.resize(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), (96, 64))
-            if prev_small is not None and (float(np.mean(cv2.absdiff(small, prev_small))) < 1.5 or t - last_t < 2.0):
+            if prev_small is not None and (float(np.mean(cv2.absdiff(small, prev_small))) < 1.5 or t - last_t < every):
                 continue
-            prev_small = small
-        pending, last_t = False, t
-        todo.append((j, img))
+            prev_small, last_t = small, t
+            jobs.append((j, img))
     ocr = _ocr()
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=2) as ex:
-        dets = list(ex.map(lambda x: ocr.detect(x[1], min_score=0.3), todo))
-    for (j, img), det in zip(todo, dets):
+        dets = list(ex.map(lambda x: ocr.detect(x[1], min_score=0.3), jobs))
+    for (j, img), det in sorted(zip(jobs, dets), key=lambda x: x[0][0]):
         t = times[j]
         for row in parse_killfeed(det, img, roster, book):
             vkey = norm_name(row["victim"])
@@ -588,6 +610,9 @@ def kills_in_round(store: FrameStore, idxs: list[int], times: list[float], label
             events.append({"t": round(t, 1), "timer": labels[j], **row})
     strip = None
     if crops:
+        w = max(c.shape[1] for c in crops)
+        crops = [c if c.shape[1] == w else cv2.copyMakeBorder(c, 0, 0, 0, w - c.shape[1], cv2.BORDER_CONSTANT)
+                 for c in crops]
         cv2.imwrite(str(out_path), vstack(crops), [cv2.IMWRITE_JPEG_QUALITY, 90])
         strip = out_path
     return events, strip

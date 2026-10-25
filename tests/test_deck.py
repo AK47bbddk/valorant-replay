@@ -58,3 +58,55 @@ def test_setup_clusters_group_similar_callouts():
     cl = deck.setup_clusters(rows)
     sizes = sorted((g["name"], g["n"]) for g in cl)
     assert ("A スタック", 1) in sizes and ("MID 2 #1", 2) in sizes and ("MID 2 #2", 1) in sizes
+
+
+def test_notion_playbook_export(tmp_path, monkeypatch):
+    """Notion への書き出し：概要 → ATK のデータベース（型ごとの行）→ DEF → メモ。"""
+    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
+    from vreplay import notion_playbook as NP
+
+    class FakeNotion:
+        def __init__(self):
+            self.calls, self.n = [], 0
+
+        def _id(self):
+            self.n += 1
+            return f"id{self.n}"
+
+        def req(self, method, path, json=None, files=None):
+            self.calls.append((method, path, json))
+            if path == "/databases":
+                return {"id": self._id(), "data_sources": [{"id": self._id()}]}
+            return {"id": self._id()}
+
+        def create_page(self, ds, props):
+            self.calls.append(("ROW", ds, props))
+            return {"id": self._id()}
+
+        def append(self, bid, blocks, batch=20):
+            self.calls.append(("APPEND", bid, blocks))
+
+        def children(self, bid):
+            return []
+
+        def clear(self, bid):
+            pass
+
+        def upload(self, path):
+            return "fu1" if path else None
+
+    reps = [report(str(i), "G2", "SEN", i) for i in range(2)]
+    rows = [r for rep in reps for r in deck.records(rep)]
+    g2 = [r for r in rows if r["team"] == "G2"]
+    nt = FakeNotion()
+    key = {"title": "Split G2 Comp PlayBook", "map": "Split", "comp": list(g2[0]["comp"])}
+    url = NP.export(nt, {"output": {"dir": str(tmp_path)}}, key, g2, rows, "parent", tmp_path / "img")
+    assert url.startswith("https://www.notion.so/")
+    dbs = [c for c in nt.calls if c[1] == "/databases"]
+    assert [d[2]["title"][0]["text"]["content"] for d in dbs] == ["ATK", "DEF"]
+    names = [c[2]["名前"]["title"][0]["text"]["content"] for c in nt.calls if c[0] == "ROW"]
+    assert any(n.startswith("1-3-1") for n in names) and any("retake" in n for n in names)
+    videos = [b for c in nt.calls if c[0] == "APPEND" for b in c[2] if b.get("type") == "column_list"]
+    assert videos
+    assert NP.page_id("https://app.notion.com/p/delight-split-vyse-comp-14fd54a7c90b806b967ed86afa4f4e8e") == \
+        "14fd54a7c90b806b967ed86afa4f4e8e"

@@ -43,7 +43,7 @@ def _synthetic(seed, mirror, deg, scale, aspect=1.05, noise=0.02, junk=0.1):
     return meta, samples, dots, starts, T, aspect
 
 
-@pytest.mark.parametrize("mirror,deg,scale", [(False, 213, 0.8), (True, 37, 1.3)])
+@pytest.mark.parametrize("mirror,deg,scale", [(False, 213, 0.8), (False, 37, 1.3)])
 def test_fit_recovers_rotation_scale_mirror(mirror, deg, scale):
     meta, samples, dots, starts, truth, asp = _synthetic(1, mirror, deg, scale)
     T = M.fit(samples, dots, meta, asp, starts)
@@ -77,3 +77,21 @@ def test_fit_mask_on_real_broadcast_minimap():
     assert abs(a["x"] - 0.86) < 0.06 and abs(a["y"] - 0.34) < 0.06       # 画面右の「A」の四角
     assert abs(b["x"] - 0.24) < 0.06 and abs(b["y"] - 0.34) < 0.06       # 画面左の「B」の四角
     assert placed[("Defender Side", "Spawn")]["y"] < 0.3 < 0.7 < placed[("Attacker Side", "Spawn")]["y"]
+
+
+def test_fit_mask_reads_site_letters_on_symmetric_map():
+    """Sunset（左右がほぼ対称）。床の形だけでは A と B を取り違えるので、サイトの四角の文字で決める。"""
+    import json
+    from pathlib import Path
+
+    import cv2
+    fx = Path(__file__).parent / "fixtures"
+    m = json.loads((fx / "sunset_callouts.json").read_text())
+    calls = [{"name": n, "super": s, "x": y * m["xMultiplier"] + m["xScalarToAdd"],
+              "y": x * m["yMultiplier"] + m["yScalarToAdd"]} for n, s, x, y in m["callouts"]]
+    bg = cv2.imread(str(fx / "minimap_sunset_riot.jpg"))
+    mask = M.map_mask(bg)
+    assert mask is not None
+    T = M.fit_mask(mask, {"callouts": calls}, bg=bg)
+    placed = {(c["super"], c["name"]): c for c in M.place(T, calls)}
+    assert placed[("A", "Site")]["x"] > 0.6 and placed[("B", "Site")]["x"] < 0.35, T["msg"]
