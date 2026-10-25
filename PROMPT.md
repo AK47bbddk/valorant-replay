@@ -9,7 +9,7 @@
 
 VALORANT のプロ試合を、翌朝ページを1枚見るだけでふり返れるようにするパイプラインを Python で実装してください。
 重い処理（動画デコード・OCR）は Google Colab の CPU（並列プロセス）と GPU（デコード）で動かし、コードは GitHub に置いて Colab からは `git pull` して実行するだけにします。
-**Colab のノートブックは 2 セル程度に収め、ロジックはすべてリポジトリ側の Python パッケージに置くこと。**
+**Colab のノートブックは 2 セル（＋プレイブック用の 1 セル）程度に収め、ロジックはすべてリポジトリ側の Python パッケージに置くこと。**
 
 ## 既存の資産（必ず活かす）
 
@@ -73,27 +73,38 @@ Notion に次の 2 つのデータソースがすでにある。新しい DB は
 
 1. **ウェアハウス（SQLite）**：`vreplay/db.py`。`matches` / `maps` / `players` / `rounds` / `comps` / `failures`。
    - `maps.status` は `meta`（メタだけ）→ `done`（動画解析済み）/ `failed`。
-   - `backfill` は VLR の結果一覧を日付でさかのぼり、試合ページからマップ・ラウンド・選手・VOD 秒を入れる。Tier1 以外（Challengers / GC / Game Changers など）は既定で除外。
-   - `batch` は DB の `meta`（必要なら `failed`）を拾って通常の動画解析を回し、`report.json` と画像を日付フォルダに書き、DB に反映する。`status='done'` は飛ばすので再開できる。`--shard 1/4` で分割、`--limit`、`--force`、`--no-retry` に対応。
-2. **サイト・位置（`vreplay/tactics.py`）**：各ラウンドの開始から一定時間、ミニマップのチーム色の点を一定間隔（既定 6 秒）で検出する。
-   - valorant-api.com のマップ・コールアウトを取得して 0〜1 に正規化し、最寄りのコールアウトと A/B/C サイトに割り当てる。
-   - スポーン付近の点の偏りから、90 度単位の回転・反転と「暖色がチーム1か」を自動補正する。
-   - 出力は 16×16 の `grid` / `grid_team` / `grid_side`、サイト別回数、コールアウト別回数、代表位置（最大 12000 点）、ラウンド開始/終了/プラント時刻、信頼度。画像は `_tactics/<slug>.jpg`。positions は `[round, t, x, y, team, side, site, callout]`。
-   - スキャン時に保存したミニマップ画像（`frames_*/*_minimap.jpg`）を再利用し、動画の二度デコードを避ける。
-   - サイト名は近似。`confidence` / `site_conf` が低い場合は断定しない。
-3. **ラウンドの型（`vreplay/patterns.py`）**：positions とラウンド時刻・キルフィードから、防衛の初期配置/ローテーション/リテイク、攻撃のデフォルト/中盤/最終セット/ポストプラント、1ピック後を分類する。
-   - 人数は 1 サンプルあたりの平均で、`A2 B2 Mid1` のように表示する。個人 ID は取れないためチーム単位の重心・分布として扱う。
-   - プラント時刻は `scan.obs["spike"]` から、最初の設置後カウントダウンで判定する。
-4. **プレイブック（`vreplay/playbook.py`）**：DB からチーム×マップ、構成×マップの HTML を作る。
-   - 攻撃/防御の勝率、サイト別回数、コールアウト、ヒートマップ、構成ごとの勝率に加え、`patterns.py` の型別回数・勝率・例ラウンドを出す。
-   - 出力は `output.dir/playbook/index.html`、`team_<slug>.html`、`comp_<slug>.html`、`data.json`、`img/`。
+   - **毎日の `run` でも**、試合のメタデータ（VLR）と各マップの `report.json` を取り込む（失敗しても本体は止めない）。以前の分は `vreplay sync` か `playbook --sync`。
+   - `rounds` にはプレイブック用に `t_drop`（開始）・`plant_t`（設置）・`plant_site`・`yt_url`・`eco1/eco2`・`reason_main/reason_json`（勝因）・`timeline_json`（節目ごとの配置）・`kill_sources_json` を持つ（既存 DB には列を後から足す）。
+   - Drive（/content/drive）上では WAL を使わず通常のジャーナルにする。
+   - `backfill` は VLR の結果一覧を日付でさかのぼり、試合ページからマップ・ラウンド・選手・VOD 秒を入れる。Tier1 以外は既定で除外。
+   - `batch` は DB の `meta`（必要なら `failed`）を拾って通常の動画解析を回し、DB に反映する。`--shard 1/4`・`--limit`・`--force`・`--no-retry`。
+2. **ミニマップの位置合わせ（`vreplay/minimap.py`）**：放送のミニマップは切り抜き位置・倍率・向きが放送ごとに違う。
+   - valorant-api のコールアウト座標は **x と y を入れ替えて** 変換する（画像の横 = ゲームの y）。外接矩形での引き伸ばしはしない。
+   - 変換 P = s・R(θ)・M・(u − 0.5) + t（M は鏡映）を試合中の点だけから推定：各ラウンド開始直前に攻撃側が固まるスポーンを錨にし、
+     点→コールアウト・コールアウト→点の両方向の距離（上限つき）＋はみ出し＋防衛側の初期重心で総当たり → 細かく探索。
+     「暖色＝チーム1」は攻撃側の色の重心がまとまる方。2 位（鏡映違い・30 度以上違う回転）との差と一致率で信頼度。
+   - 確認用に、背景（中央値）にコールアウトを重ねた `_tactics/<map>_fit.jpg` を保存し、HTML レポートに出す。合わせられないときは従来の 90 度単位の補正で目安だけ。
+3. **サイト・位置（`vreplay/tactics.py`）**：各ラウンドの開始直前・タイマーの節目（1:30/1:15/1:00/0:40/0:20）・一定間隔（既定 5 秒）・設置直後の時刻のミニマップから点を検出する。
+   - スキャン時に保存したミニマップ画像を再利用し、動画の二度デコードを避ける。
+   - 出力：16×16 の `grid` / `grid_team` / `grid_side`、サイト別・コールアウト別回数、positions（`[round, t, x, y, team, side, site, callout]`、開始前の点は除く）、
+     ラウンドごとの `timeline`（節目ごとのチーム別ゾーン人数）・`plant_site`（設置直後 10 秒の攻撃側の位置）・`plant_zones`、`transform`、`aligned`、信頼度。
+4. **ラウンドの型（`vreplay/patterns.py`）**：positions から防衛の初期配置/ローテーション/リテイク、攻撃のデフォルト/中盤/最終セット/ポストプラント、1ピック後を分類する。
+5. **プレイブック（`vreplay/deck.py`、スライド HTML）**：お手本は「Split G2 Comp PlayBook」。**チーム × マップ × 構成** ごと（と 2 マップ以上の **構成 × マップ**）に作る。
+   - 表紙 → Defender Strategy（**strong point ①②③ / weak point ①②**）→ Defenders Concept（節目ごとのゾーン人数・方針文・位置の重ね合わせ画像）→ Default 一覧 → How to Retake A/B
+     → Attacker Strategy → Attackers Concept → Default 一覧 → Sets（サイト × Rush/Split/Site Set/Late Set）→ A/B Site PostPlant → ULT → 選手と経済 → 元データ。
+   - strong / weak point は同マップの全チーム平均と比べ、平均へ 3 ラウンドぶん寄せた値で差が 7 ポイント以上の指標から選ぶ（同じ系統は 1 つ）。
+     指標：ラウンド勝率・購入ラウンド・先制キル率・先制後/先制された後・20 秒以内の先制（カウンター）・設置させず勝つ・リテイク（サイト別）・設置率・ポストプラント（サイト別）・ラッシュ・遅めのセット・時間切れ負け・終盤・ULT 使用時・ピストル・エコ・アンチエコ。
+     根拠（回数/平均）・関わった選手・設置時点の位置・ULT・例のラウンド（YouTube の該当秒）を添える。
+   - 位置は `transform` の逆変換でミニマップ画像の座標に戻し、試合をまたいで valorant-api のマップ画像に重ねる。画像は HTML に埋め込む（1 ファイルで開ける・印刷で 1 スライド 1 ページ）。
+   - デザインはデジタル庁デザインシステム（Noto Sans JP、キーカラー #0017C1、コントラスト、フォーカス）。
+   - 以前の集計ページ（`vreplay/playbook.py`、ヒートマップと型の表）は `playbook/stats/` に出す。
 
 コマンド例：
 
 ```powershell
 vreplay backfill --from 2024-01-01 --to 2026-12-31
 vreplay batch --limit 20
-vreplay playbook --min-maps 3
+vreplay playbook --sync --team G2 --map Split
 ```
 
 規模の現実：全期間の動画は数 TB・解析に数週間かかる。まず `backfill` で全メタデータを入れ、`playbook` で傾向を見てから、必要なチーム・期間に `batch --from ... --to ...` を絞る。
@@ -101,19 +112,19 @@ vreplay playbook --min-maps 3
 ## 非機能要件
 
 - HUD の位置は放送で変わるので、レイアウトのプリセット選択・カードの円検出・キルフィードの選手名検出で自動で合わせる。
+  キルフィードの枠は長い名前・武器が入るよう左へ広めに取り、読めなかったキルはカードが灰色になった時刻で補う（キラー不明）。
   `vreplay calibrate` で検出結果を描いた画像（rois.jpg / panels.jpg）と、カードごとの判定結果を出せるようにする。
-- 速さ：キーフレーム中心の 2 段階スキャン、並列プロセス（OCR のスレッド数は CPU 数 ÷ プロセス数）、HUD の OCR は見た目キャッシュで使い回し、
-  GPU はデコード（NVDEC）に使い、次のマップの動画は裏で先にダウンロードする。
-  動画は yt-dlp の分割並列取得（`video.download_fragments`）と複数マップ同時取得（`video.download_workers`）で短縮する。
-- 計測：動画取得・キャリブレーション・スキャン・素材づくり・Notion 書き込みなどの所要時間と、そのときの CPU・GPU・RAM を 1 秒ごとに記録し、
-  ログ・`perf.json`・HTML レポート・Notion に表示する（`vreplay/perf.py`）。余っているリソースに応じた短縮のヒントも出す。
+- 速さ：キーフレーム中心の 2 段階スキャン、並列プロセス、HUD の OCR は見た目キャッシュで使い回し、GPU はデコード（NVDEC）と OCR（onnxruntime-gpu）に使い、
+  次のマップの動画は裏で先にダウンロードする。動画は DASH の sidx から必要な時間帯のバイト範囲だけを並列に取る（`video.download_method: range`、取れなければ区間の分割取得）。
+- 計測：動画取得・キャリブレーション・スキャン・素材づくり・Notion 書き込みなどの所要時間と、そのときの CPU・GPU・RAM を記録し、ログ・`perf.json`・HTML レポート・Notion に表示する。
 - どこかの解析が失敗しても、VLR 由来のデータとスクリーンショットだけでページは出す（部分失敗を許す）。
 - 秘密情報（Notion トークン、YouTube cookies）は Colab のシークレット／Drive に置き、リポジトリに入れない。
 - テストは実際の放送から切り出した HUD 部分（`tests/fixtures`）と合成データで、ネットワークなしで通ること（`pytest`）。
 
 ## 受け入れ条件
 
-- Colab で「セル1：clone/pull＋インストール」「セル2：実行」の 2 セルで、前日の対象試合のマップページが Notion に埋まる。
-- 各ラウンドに：開始ミニマップ画像・ミニマップ GIF・購入パネル画像＋エコ区分・各選手の武器・キルログ・ULT 使用・YouTube リンクがある。
-- ラウンド一覧表は 1 ラウンド 1 行：R（▶ リンク）・スコア・勝者・勝ち方（攻守）・両チームの購入と武器・先制キル・キル数・ULT 使用・時間。
+- Colab で「セル1：clone/pull＋インストール」「セル2：実行」の 2 セルで、前日の対象試合のマップページが Notion に埋まる（プレイブックは別セル）。
+- 各ラウンドに：開始ミニマップ画像・ミニマップ GIF・購入パネル画像＋エコ区分・各選手の武器・キルログ・ULT 使用・YouTube リンク・勝因がある。
+- ラウンド一覧表は 1 ラウンド 1 行：R（▶ リンク）・スコア・勝者・勝ち方（攻守）・勝因・両チームの購入と武器・先制キル・キル数・ULT 使用・時間。
 - リプレイ映像のキルがキルログに重複して入らない。
+- `vreplay playbook` で、チーム × マップ × 構成ごとに strong / weak point つきのスライドができる。
