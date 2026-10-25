@@ -32,8 +32,9 @@ API = "https://valorant-api.com/v1/maps"
 CACHE_DAYS = 30
 GRID = 16
 
-WARM_RANGES = [((0, 120, 140), (35, 255, 255)), ((165, 120, 140), (179, 255, 255))]
-COOL_RANGES = [((80, 90, 120), (140, 255, 255))]
+# 放送のミニマップのアイコンの縁（赤系・青緑系）。くすんでも拾えるよう彩度・明度は低めから
+WARM_RANGES = [((0, 70, 90), (14, 255, 255)), ((160, 70, 90), (179, 255, 255))]
+COOL_RANGES = [((78, 70, 70), (130, 255, 255))]
 SITE_SUPERS = {"A", "B", "C"}
 
 
@@ -137,30 +138,39 @@ def _mask(hsv, ranges):
     return out
 
 
+ICON_FRAC = 0.058          # ミニマップのアイコンの直径（切り抜きの高さに対する比）。1080p の放送で約 24px
+
+
 def detect_dots(img, min_area: int = 4, max_area: int = 450, per_color: int = 5) -> list[dict]:
-    """暖色・寒色の小さな点を検出する。UI の大きな色面は面積で落とす。"""
+    """選手のアイコン（チーム色の縁のついた丸い顔アイコン）を検出する。
+
+    縁の色は試合画面の明るさでくすむので色の範囲は広めに取り、アイコン 1 つが縁の切れ目で何個にも割れないよう、
+    アイコンの大きさに合わせて塊をつなげてから数える。重なった 2〜3 人は 1 つの大きな塊になるので、大きさから
+    人数（k）も見積もる。床から離れた点（試合画面の色）は呼び出し側で床の 2 値画像を使って捨てる。"""
     if img is None or img.size == 0:
         return []
     h, w = img.shape[:2]
+    D = ICON_FRAC * h
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     out = []
     for color, ranges in (("warm", WARM_RANGES), ("cool", COOL_RANGES)):
         mask = _mask(hsv, ranges)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+        k = max(3, int(D * 0.4)) | 1
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
         n, _, stats, cents = cv2.connectedComponentsWithStats(mask, 8)
         found = []
         for i in range(1, n):
             x, y, ww, hh, area = (int(v) for v in stats[i])
-            if area < min_area or area > max_area or ww <= 0 or hh <= 0:
+            side = max(ww, hh)
+            if area < min_area or side < 0.45 * D or side > 3.2 * D or area < 0.12 * D * D:
                 continue
-            if not (0.35 <= ww / hh <= 2.8):
+            if area > max(max_area, 12 * D * D):            # 大きな色面（UI・背景）
                 continue
-            if ww > w * 0.12 or hh > h * 0.12:      # 長いバー・枠
-                continue
-            found.append((area, float(cents[i][0] / w), float(cents[i][1] / h)))
+            kk = int(min(3, max(1, round(side / (D * 1.15)))))
+            found.append((area, float(cents[i][0] / w), float(cents[i][1] / h), kk, ww, hh))
         found.sort(reverse=True)
-        for area, fx, fy in found[:per_color]:
-            out.append({"color": color, "x": fx, "y": fy, "area": area})
+        for area, fx, fy, kk, ww, hh in found[:per_color]:
+            out.append({"color": color, "x": fx, "y": fy, "area": area, "k": kk, "w": ww, "h": hh})
     return out
 
 
@@ -277,7 +287,8 @@ def _wanted_times(rlist: list[dict], every: float) -> list[float]:
 
 
 def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
-                  out_dir: Path | None = None, log=print, store=None, obs=None, alive_fn=None) -> dict | None:
+                  out_dir: Path | None = None, log=print, store=None, obs=None, alive_fn=None,
+                  agent_teams: dict | None = None) -> dict | None:
     """rounds: [{"n": 1, "start": 10.0, "end": 120.0, "side1": "攻撃"|"防御", "plant": 秒|None}, ...]"""
     from . import minimap as MM
     if not rounds or path is None:
@@ -334,10 +345,18 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
     raw: list = []
     bgs: list[np.ndarray] = []
     aspect = 1.0
+    # エージェントのアイコン照合に使う、タイマーの節目のミニマップ（ラウンド・節目ごとに 1 枚）
+    keep: dict = {}
     for t, mm in scan_source():
         r = round_of(t)
         if r is None or mm is None or mm.size == 0:
             continue
+        if agent_teams:
+            st_ = float(r["start"])
+            for label, e in MARKS.items():
+                d_, key = abs(t - st_ - e), (int(r["n"]), label)
+                if d_ <= 2.0 and (key not in keep or d_ < keep[key][0]):
+                    keep[key] = (d_, t, mm.copy())
         h, w = mm.shape[:2]
         aspect = w / max(1, h)
         if len(bgs) < 40 and (not bgs or len(samples) % 7 == 0) and (not bgs or bgs[0].shape == mm.shape):
@@ -367,9 +386,17 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
                         "n_warm": len(warm), "n_cool": len(cool)})
         for d in found:
             dots.append({"t": t, "n": int(r["n"]), "side1": _canon(r.get("side1")),
-                         "color": d["color"], "x": d["x"], "y": d["y"]})
+                         "color": d["color"], "x": d["x"], "y": d["y"], "area": d.get("area", 0),
+                         "k": int(d.get("k") or 1)})
     if not samples:
         return None
+    # 重なったアイコン（同じ場所に 2〜3 人）は 1 つの塊になる。検出時に塊の大きさから見積もった人数（k）を使う
+    cnt = {}
+    for d in dots:
+        key = (d["t"], d["color"])
+        cnt[key] = min(5, cnt.get(key, 0) + d["k"])
+    for smp in samples:
+        smp["n_warm"], smp["n_cool"] = cnt.get((smp["t"], "warm"), 0), cnt.get((smp["t"], "cool"), 0)
 
     start_by_n = {int(r["n"]): float(r["start"]) for r in rlist}
     # まず地形（床の形）でコールアウトを重ねる。だめなら試合中の点で合わせる
@@ -419,6 +446,24 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
     positions = []
     by_sample: dict[tuple[int, float], dict[int, Counter]] = {}
 
+    reg = MM.region_labels(mask, placed) if (mask is not None and T.get("ok")) else None
+    # 生存人数より多く数えないように、重なりの人数（k）を減らす
+    if alive_fn is not None:
+        by_t: dict = {}
+        for d in dots:
+            by_t.setdefault((d["t"], color_team.get(d["color"])), []).append(d)
+        for (tt, team), ds in by_t.items():
+            try:
+                al = alive_fn(tt)
+            except Exception:
+                al = (None, None)
+            lim = al[0] if team == 1 else al[1] if team == 2 else None
+            if lim is None:
+                continue
+            ds.sort(key=lambda d: -d["k"])
+            while sum(d["k"] for d in ds) > max(lim, len(ds)) and ds[0]["k"] > 1:
+                ds[0]["k"] -= 1
+                ds.sort(key=lambda d: -d["k"])
     for d in dots:
         x, y = d["x"], d["y"]
         n = int(d["n"])
@@ -431,13 +476,16 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         side = d.get("side1") if team == 1 else _opp(d.get("side1"))
         if side in grid_side:
             grid_side[side][gy, gx] += 1
-        c, dist = MM.nearest(placed, x, y, aspect)
-        if dist > 0.18:
-            c = None
+        c = MM.region_of(reg, placed, x, y) if reg else None
+        if c is None:
+            c, dist = MM.nearest(placed, x, y, aspect)
+            if dist > 0.18:
+                c = None
         site = zone_of(c)
         callout = f"{site} {c['name']}" if c and site in SITE_SUPERS else (c["name"] if c else "?")
-        callouts_all[callout] += 1
-        by_sample.setdefault((n, float(d["t"])), {1: Counter(), 2: Counter()})[team][site] += 1
+        k = int(d.get("k") or 1)
+        callouts_all[callout] += k
+        by_sample.setdefault((n, float(d["t"])), {1: Counter(), 2: Counter()})[team][site] += k
         rt = round_tac.get(n)
         if rt is None:
             continue
@@ -447,9 +495,10 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         rt["teams"][team][site] += 1
         if d["t"] >= start_by_n.get(n, 0.0) + site_after:
             sites_all[site] += 1
-        if len(positions) < 15000:
-            positions.append([n, round(float(d["t"]), 1), round(x, 3), round(y, 3), int(team),
-                              1 if side == ATTACK else 2, site, callout])
+        for _ in range(k):
+            if len(positions) < 20000:
+                positions.append([n, round(float(d["t"]), 1), round(x, 3), round(y, 3), int(team),
+                                  1 if side == ATTACK else 2, site, callout])
 
     for n, rt in round_tac.items():
         rt["samples"] = sum(1 for s in samples if s["n"] == n and s["t"] >= start_by_n.get(n, 0.0))
@@ -493,6 +542,12 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
             rt["site"] = rt["plant_site"]
             rt["site_conf"] = max(rt["site_conf"], 0.8 if T.get("ok") else 0.5)
 
+    # エージェントごとの位置（アイコン照合）と、Valotactics のような配置図
+    agent_info = None
+    if agent_teams and keep:
+        agent_info = _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed, aspect,
+                                      T if T.get("ok") else None, background, out_dir, round_tac, log)
+        _agent_setups(agent_info, round_tac)
     top_callouts = [{"name": n, "count": c} for n, c in callouts_all.most_common(12)]
     top_sites = [{"site": s, "count": c} for s, c in sites_all.most_common()]
     mean_dots = sum(s["n_dots"] for s in samples) / len(samples)
@@ -520,6 +575,7 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         "grid_side": {s: g.tolist() for s, g in grid_side.items()},
         "rounds": {str(n): v for n, v in sorted(round_tac.items())},
         "positions": positions,
+        "agents": agent_info,
     }
 
 
@@ -637,6 +693,155 @@ def _warm_team1(samples: list[dict], placed: list[dict], starts: dict, alive_fn=
             no += 1
     yes, no = yes + cy, no + cn
     return yes >= no, f"スポーンと生存人数で {max(yes, no)}/{yes + no}"
+
+
+def _agent_setups(agent_info: dict | None, round_tac: dict) -> None:
+    """アイコンで 4 人以上を読めたチームは、初動の配置（型・形）をエージェントの位置で上書きする。
+    点の数え方（重なり・スモークの誤検出）より確か。誰がどこにいるか（'A: Sova・Jett'）も付ける。"""
+    if not agent_info:
+        return
+    for n, rt in round_tac.items():
+        marks = agent_info.get(str(n)) or {}
+        for tm in (1, 2):
+            best = None
+            for label in ("1:15", "1:30", "1:00"):
+                ents = [e for e in marks.get(label) or [] if e.get("team") == tm]
+                if len(ents) >= 4 and (best is None or len(ents) > len(best[1])):
+                    best = (label, ents)
+            if not best:
+                continue
+            label, ents = best
+            zones = Counter(e["zone"] for e in ents if e.get("zone") and e["zone"] != "?")
+            if sum(zones.values()) < 4:
+                continue
+            side = ATTACK if (rt.get("side1") == ATTACK) == (tm == 1) else DEFENSE
+            who = {}
+            for e in sorted(ents, key=lambda e: e["agent"]):
+                who.setdefault(e.get("zone") or "?", []).append(e["agent"])
+            old_su = (rt.get("setups") or {}).get(str(tm)) or {}
+            rt.setdefault("setups", {})[str(tm)] = {
+                **old_su, "name": setup_name(zones, side),
+                "shape": " ".join(f"{z}{zones[z]}" for z in CORE_ZONES if zones.get(z)),
+                "zones": dict(zones), "callouts": sorted(e["callout"] for e in ents if e.get("callout") != "?"),
+                "side": side, "n": len(ents), "source": "agents", "mark": label,
+                "who": {z: v for z, v in who.items() if z in CORE_ZONES},
+                "dots_shape": old_su.get("shape")}
+
+
+def map_icon(cfg: dict, map_name: str, size: int = 512):
+    """valorant-api のマップ画像（ミニマップの絵）。透過部分は明るい灰色にして size×size で返す。"""
+    from urllib.request import urlopen
+    d = Path(cfg["output"]["dir"]) / "_cache" / "map_icons"
+    p = d / f"{_norm(map_name)}.png"
+    if not p.exists():
+        meta = load_map(map_name, cfg, log=None) or {}
+        url = meta.get("icon")
+        if url:
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+                with urlopen(url, timeout=30) as r:
+                    p.write_bytes(r.read())
+            except Exception:
+                return None
+    if not p.exists():
+        return None
+    img = cv2.imread(str(p), cv2.IMREAD_UNCHANGED)
+    if img is None:
+        return None
+    if img.ndim == 3 and img.shape[2] == 4:
+        a = img[:, :, 3:4].astype(np.float32) / 255.0
+        img = (img[:, :, :3].astype(np.float32) * a + 245 * (1 - a)).astype(np.uint8)
+    return cv2.resize(img, (size, size), interpolation=cv2.INTER_AREA)
+
+
+def _uv(T: dict, x: float, y: float, aspect: float = 1.0) -> tuple[float, float]:
+    """切り抜きの正規化座標（横 0..1）→ マップ画像の座標（minimap.apply の逆）。"""
+    px, py = x * aspect - T["tx"], y - T["ty"]
+    c, s_ = math.cos(-T["theta"]), math.sin(-T["theta"])
+    a, b = (c * px - s_ * py) / T["scale"], (s_ * px + c * py) / T["scale"]
+    if T.get("mirror"):
+        a, b = b, a
+    return a + 0.5, b + 0.5
+
+
+def board_png(base: np.ndarray, entries: list[dict], icons: dict, path: Path, to_xy, title: str = "") -> Path:
+    """Valotactics のような配置図：地図の上に各エージェントのアイコン（チーム色の縁つき）を置く。
+    to_xy(entry) → 画像上の (x, y) ピクセル。"""
+    img = base.copy()
+    S = img.shape[0]
+    R = max(9, int(S * 0.028))
+    for e in entries:
+        xy = to_xy(e)
+        if xy is None:
+            continue
+        x, y = int(xy[0]), int(xy[1])
+        col = (60, 60, 230) if e.get("color") == "warm" else (210, 190, 40)
+        ic = icons.get(e.get("agent"))
+        if ic is not None:
+            t = cv2.resize(ic, (2 * R, 2 * R))
+            m = np.zeros((2 * R, 2 * R), np.uint8)
+            cv2.circle(m, (R, R), R - 1, 255, -1)
+            y0, x0 = y - R, x - R
+            if 0 <= y0 and 0 <= x0 and y0 + 2 * R <= S and x0 + 2 * R <= img.shape[1]:
+                roi = img[y0:y0 + 2 * R, x0:x0 + 2 * R]
+                roi[m > 0] = t[m > 0]
+        cv2.circle(img, (x, y), R, col, 3, cv2.LINE_AA)
+    if title:
+        cv2.putText(img, title, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(img, title, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(path), img, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    return path
+
+
+def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed, aspect, T, background,
+                     out_dir, round_tac, log):
+    """節目ごとのミニマップでエージェントのアイコンを照合し、位置・ゾーンと配置図を作る。"""
+    from . import agents as AG
+    from . import minimap as MM
+    names = [a for ags in agent_teams.values() for a in ags if a]
+    icons = AG.load_icons(cfg, names, log=log)
+    if not icons:
+        return None
+    team_color = {v: k for k, v in color_team.items()}
+    base = map_icon(cfg, meta.get("name") or "", 512) if T else None
+    out = {}
+    first = None
+    n_found = n_try = 0
+    for (n, label), (_, t, mm) in sorted(keep.items()):
+        found = AG.match(mm, icons, agent_teams, color_team, mask=mask)
+        n_try += 1
+        n_found += len(found)
+        if first is None and found:
+            first = (mm, found)
+        ents = []
+        for f in found:
+            c = MM.region_of(reg, placed, f["x"], f["y"]) if reg else None
+            if c is None:
+                c, dist = MM.nearest(placed, f["x"], f["y"], aspect)
+                if dist > 0.18:
+                    c = None
+            zone = zone_of(c)
+            ents.append({"agent": f["agent"], "team": f["team"], "x": round(f["x"], 4), "y": round(f["y"], 4),
+                         "zone": zone, "callout": (f"{zone} {c['name']}" if c and zone in SITE_SUPERS else
+                                                    (c["name"] if c else "?")),
+                         "score": round(f["score"], 2), "color": team_color.get(f["team"])})
+        out.setdefault(str(n), {})[label] = ents
+        rt = round_tac.get(n)
+        if rt is not None and ents and out_dir and label in ("1:30", "1:15"):
+            p = Path(out_dir) / "_tactics" / f"board_r{n:02d}_{label.replace(':', '')}.jpg"
+            if base is not None:
+                to_xy = (lambda e: tuple(v * 512 for v in _uv(T, e["x"], e["y"], aspect)))
+                board_png(base, ents, icons, p, to_xy, f"R{n} {label}")
+            else:
+                bg = cv2.resize(background, (512, int(512 * background.shape[0] / background.shape[1])))
+                board_png(bg, ents, icons, p, lambda e: (e["x"] * bg.shape[1], e["y"] * bg.shape[0]), f"R{n} {label}")
+            rt.setdefault("boards", {})[label] = str(p)
+    if first is not None and out_dir:
+        AG.contact_sheet(first[0], first[1], icons, Path(out_dir) / "_tactics" / "agents_check.jpg")
+    if log:
+        log(f"    エージェントの位置：{n_try} 枚で平均 {n_found / max(1, n_try):.1f} 人を照合（アイコン {len(icons)} 種）")
+    return out
 
 
 def _fit_overlay(bg: np.ndarray, placed: list[dict], dots: list[dict], path: Path) -> Path:

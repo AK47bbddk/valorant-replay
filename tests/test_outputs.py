@@ -306,3 +306,27 @@ def test_card_death_at_round_end_counts():
     alive = np.ones((6, 10), bool)
     alive[5, 4] = False                    # 最後のフレームで倒れた（直後にラウンドが終わる）
     assert X.card_deaths(alive, list(range(6)), [float(i) for i in range(6)]) == [(4, 5.0)]
+
+
+def test_killfeed_reads_kills_with_real_ocr(tmp_path):
+    """実際の OCR で、キルフィードの新しい行からキルを読む（行だけを切り出すと文字の検出が効かず 0 件になった不具合の再発防止）。"""
+    import cv2
+    st = X.FrameStore(tmp_path / "kf")
+
+    def feed(rows):
+        img = np.full((180, 600, 3), 40, np.uint8)
+        for k, (a, b) in enumerate(rows):
+            y = 50 + 60 * k
+            cv2.rectangle(img, (20, y - 25), (590, y + 10), (60, 60, 160), -1)
+            cv2.putText(img, a, (30, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            cv2.putText(img, b, (380, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        return img
+
+    seq = [[], [("JAWGEMO", "Timotino")], [("JAWGEMO", "Timotino")], [("JAWGEMO", "Timotino")],
+           [("JAWGEMO", "Timotino"), ("Asuna", "trent")], [("Asuna", "trent")], [("Asuna", "trent")]]
+    for i, rows in enumerate(seq):
+        st.put(i, "killfeed", feed(rows))
+    roster = X.Roster([("JAWGEMO", "G2"), ("trent", "G2"), ("Timotino", "100T"), ("Asuna", "100T")])
+    ev, strip = X.kills_in_round(st, list(range(len(seq))), [i * 1.0 for i in range(len(seq))], ["-"] * len(seq),
+                                 roster, None, tmp_path / "k.jpg")
+    assert [(e["killer"], e["victim"]) for e in ev] == [("JAWGEMO", "Timotino"), ("Asuna", "trent")]

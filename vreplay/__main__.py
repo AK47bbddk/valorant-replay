@@ -83,7 +83,7 @@ def main():
     pb.add_argument("--sync", action="store_true", help="先に output.dir の report.json を DB に取り込む")
     pb.add_argument("--notion", nargs="?", const="config", default=None,
                     help="Notion にも書く。親ページの URL を渡す（省略時は config の playbook.notion_parent）")
-    pb.add_argument("--no-llm", action="store_true", help="ANTHROPIC_API_KEY があっても Claude に要約を書かせない")
+    pb.add_argument("--no-llm", action="store_true", help="LLM の API キーがあっても要約を書かせない")
     pb.add_argument("--config")
 
     sy = sub.add_parser("sync", help="既存の report.json をまとめて DB に入れる")

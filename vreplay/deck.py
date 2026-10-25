@@ -192,6 +192,7 @@ def records(rep: dict) -> list[dict]:
                 "first_fight": rt.get("first_fight") if aligned else None,
                 "caster": rr.get("caster") or {},
                 "reason_main": reason.get("main"), "dur_clock": rr.get("duration"),
+                "board": (rr.get("assets") or {}).get("board"),
             })
     return out
 
@@ -554,12 +555,23 @@ def summary_data(rows: list[dict], base: list[dict]) -> dict:
             "rounds": len(srows),
             "metrics": [{"name": m["label"], "team": f"{m['w']}/{m['n']}", "league": _pct(m["base"])}
                         for m in ms if m["n"]],
-            "setups": [{"name": g["name"], "n": g["n"], "win": g["w"], "shape": g["shape"], "callouts": g["callouts"]}
+            "setups": [{"name": g["name"], "n": g["n"], "win": g["w"], "shape": g["shape"], "callouts": g["callouts"],
+                        "roles": g.get("roles") or ""}
                        for g in setup_clusters(srows)],
             "sets": [{"name": g["name"], "n": g["n"], "win": g["w"]} for g in sets(srows)] if side == ATTACK else [],
             "caster": intent_summary(rows).get(side, {}),
         }
     return out
+
+
+def _roles(rs: list[dict]) -> str:
+    """型の中で、各エージェントがいちばんよく立っていたゾーン：'Sova→A・Jett→Mid'（アイコン照合できたラウンドだけ）。"""
+    by = defaultdict(Counter)
+    for r in rs:
+        for z, ags in ((r.get("setup") or {}).get("who") or {}).items():
+            for a in ags:
+                by[a][z] += 1
+    return "・".join(f"{a}→{c.most_common(1)[0][0]}" for a, c in sorted(by.items()))
 
 
 def setup_clusters(rows: list[dict], th: float = 0.5, k: int = 6) -> list[dict]:
@@ -590,7 +602,8 @@ def setup_clusters(rows: list[dict], th: float = 0.5, k: int = 6) -> list[dict]:
                     "callouts": [c for c, n in calls.most_common(6) if n >= max(1, len(rs) * 0.4)],
                     "buys": Counter(r["buy"] for r in rs),
                     "sites": Counter(r["plant_site"] for r in rs if r["plant_site"]),
-                    "fights": Counter(r["first_fight"] for r in rs if r.get("first_fight"))})
+                    "fights": Counter(r["first_fight"] for r in rs if r.get("first_fight")),
+                    "roles": _roles(rs), "boards": [r["board"] for r in rs if r.get("board")][:3]})
     out.sort(key=lambda g: (-g["n"], g["name"]))
     # 同じ名前の型が複数あれば番号をつける
     seen, dup = Counter(), Counter(g["name"] for g in out)
@@ -910,7 +923,8 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
                 cards.append(f'<div class="card"><h3>{_e(g["name"])}</h3>'
                              f'<p>{g["w"]}/{g["n"]} 勝（{_pct(_rate(g["w"], g["n"]))}）・{_e(g["shape"])}</p>'
                              f'<p class="sub">{_e("・".join(g["callouts"]) or "-")}</p>'
-                             f'<p class="sub">{_e(buys)}' + (f'／初動のファイト：{_e(fights)}' if fights else "")
+                             + (f'<p class="sub">担当：{_e(g["roles"])}</p>' if g.get("roles") else "")
+                             + f'<p class="sub">{_e(buys)}' + (f'／初動のファイト：{_e(fights)}' if fights else "")
                              + (f'／設置：{_e(sites)}' if side == ATTACK and sites else "") + '</p>'
                              f'<p class="sub">{_ex_links(g["rows"])}</p></div>')
             slides.append(_slide(en, "初動の配置（似た配置をまとめた型）", f'<div class="cols3">{"".join(cards)}</div>'

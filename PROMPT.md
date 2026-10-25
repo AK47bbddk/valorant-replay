@@ -121,13 +121,30 @@ vreplay playbook --sync --team G2 --map Split
 - **解説の字幕**（`vreplay/captions.py`）：放送の自動字幕を yt-dlp で取り、各ラウンドの購入フェーズ〜終了の字幕から
   意図のキーワード（ラッシュ・スプリット・フェイク・ラーク・リテイク・ローテ・スタック・デフォルト・ミッドコントロール・エコ・フォース・
   オペレーター・ポストプラント・遅延・エントリー・クラッチ・ULT・タイムアウト）と根拠の一節（100 文字以内）を `rr["caster"]` に残す。数字とは分けて「言及」として表示。
-- **Claude の要約**（`vreplay/llm.py`、任意）：ANTHROPIC_API_KEY があれば、集計（指標・型・セット・解説の言及）から
-  ATK / DEF summary と対策メモを書かせる。データにないことは「推測：」と分けさせ、結果はキャッシュする。
+- **LLM の要約**（`vreplay/llm.py`、任意）：Claude の API は使わない（`llm.provider: anthropic` と明示したときだけ）。
+  無料の OpenAI 互換 API を順に試す：`OPENROUTER_API_KEY`（`deepseek/deepseek-v4-flash:free`）→ `GEMINI_API_KEY`（`gemini-flash-latest`、
+  無料枠）→ `DEEPSEEK_API_KEY`（有料）。429 は待ってやり直し、失敗したら次へ。集計（指標・型・担当・セット・解説の言及）から
+  ATK / DEF summary と対策メモを書かせる。データにないことは「推測：」と分けさせ、`<think>` は落とし、結果はキャッシュする。
 - **Notion 版**（`vreplay/notion_playbook.py`）：親ページの下に「{map} {tag} Comp PlayBook」。`# 概要` → ATK summary → ATK のデータベース →
   DEF summary → DEF のデータベース → メモ。行 = 型（「1-3-1 MID 3 default」「A Site Rush」「B retake」、種類・回数・勝率・購入・タグ）、
   行のページは左に説明と例のラウンドの動画、右に位置の画像。
 - 1 マップしかない構成でも冊子を作り、strong / weak は平均との差が小さくても「（参考）」で出す。ラウンドの流れのスライドを足す。
 - チーム色（暖色＝チーム1）はカードの生存人数とミニマップの色ごとの点の数の一致で決める。
+
+## ミニマップの配置とキルの正確さ
+
+- **点の数え方**（`tactics.detect_dots`）：アイコン 1 つ（直径 ≈ 切り抜きの高さ × 0.058）の単位で塊をつなぎ、重なった 2〜3 人は
+  大きさから人数 k を見積もる。生存人数（カード）で上限をかける。「4-1 なのに 3-2」の主因は重なりとスモークの誤検出。
+- **ゾーン**（`minimap.region_labels / region_of`）：床の上を歩いた距離で最寄りのコールアウト（壁越しの A メイン／MID の取り違えを防ぐ）。
+- **エージェントの照合**（`vreplay/agents.py`）：VLR の 10 人のエージェントの displayIconSmall を、節目（1:30/1:15/1:00/0:40/0:20）の
+  ミニマップに `TM_CCOEFF_NORMED`（円形マスク・3 倍率）で照合。チームはアイコンの縁の色。4 人以上読めたチームは初動の配置を
+  アイコンの位置で上書き（`source: agents`、`who: {A: [Sova, Jett]}`、点の形は `dots_shape` に残す）。
+  配置図 `_tactics/board_rNN_115.jpg`（Valotactics 風：マップ画像にアイコン）をラウンドの Notion とプレイブックの型の画像に使い、
+  型ごとに「担当（Sova→A・Jett→Mid）」をまとめる。確認用に `_tactics/agents_check.jpg`。`tactics.agents: false` で止める。
+- **キルフィード**：行の白文字の形（署名）で新しい行を見つけたときだけ全画面で OCR（行だけを切り抜くと名前が 1 つの箱に溶けて読めない）。
+  行の数が増えたとき・4 秒ごとにも読む。片側の名前だけの行は「キラー未読」として残し、8 秒以内に両方読めたら差し替える。
+- **スパイクの爆発**（`pipeline.spike_deaths`）：爆発で終わったラウンドで、爆発（設置+45 秒とラウンドの終わりの早い方）の
+  3 秒前以降にあるキラーの分からない死亡は「💥 スパイクの爆発」にして、ファイトのキルと分ける。
 
 ## 非機能要件
 

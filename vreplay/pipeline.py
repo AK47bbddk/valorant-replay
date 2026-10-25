@@ -325,6 +325,23 @@ def save_table_crops(path: Path, det, cfg: dict, store, hw: bool, pre: float = 9
 
 
 # ---------------------------------------------------------------- 動画解析
+def spike_deaths(kills: list[dict], plant: float | None, t_end: float | None, tol: float = 3.0) -> int:
+    """スパイクの爆発で終わったラウンドで、爆発（設置の 45 秒後。設置が読めなければラウンドの終わり）の
+    前後にあるキラーの分からない死亡を「スパイクの爆発に巻き込まれた」にする。ファイトのキルとは分けて数える。
+    設置の検出は数秒遅れることがあるので、爆発の時刻は早い方（設置+45 と終わり）を使う。返り値は付け替えた数。"""
+    cands = [x for x in ((plant + 45.0) if plant is not None else None, t_end) if x is not None]
+    if not cands:
+        return 0
+    boom_t = min(cands)
+    n = 0
+    for k in kills:
+        if not k.get("killer") and k.get("t") is not None and float(k["t"]) >= boom_t - tol:
+            k["cause"], k["killer_team"] = "spike", None
+            k["source"] = k.get("source") or "feed"
+            n += 1
+    return n
+
+
 def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: Path, path: Path, log=print):
     from . import extract as X
     from .rounds import agreement, assign_rounds, liveness, orientation, repair_rounds, segment
@@ -446,8 +463,15 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                     al = obs["alive"][i]
                     nl, nr = int(np.sum(al[:5])), int(np.sum(al[5:]))
                     return (nl, nr) if orient.get(rr_.n, True) else (nr, nl)
+                # 両チームのエージェント（ミニマップのアイコン照合で、誰がどこにいるかを読む）
+                agent_teams = None
+                if (cfg.get("tactics") or {}).get("agents", True):
+                    agent_teams = {1: [p.agent for p in md.players if p.team == 1 and p.agent],
+                                   2: [p.agent for p in md.players if p.team == 2 and p.agent]}
+                    agent_teams = agent_teams if agent_teams[1] or agent_teams[2] else None
                 tac = tactics.analyze_video(cfg, path, md.name, tac_rounds, out_dir=out_dir, log=log,
-                                            store=store, obs=obs, alive_fn=alive_fn if geo else None)
+                                            store=store, obs=obs, alive_fn=alive_fn if geo else None,
+                                            agent_teams=agent_teams)
             if tac:
                 rep["tactics"] = tac
                 for rr in rep["rounds"]:
@@ -461,8 +485,13 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                         "callouts": dict(top), "timeline": rt.get("timeline") or {},
                         "plant_site": rt.get("plant_site"), "plant_zones": rt.get("plant_zones"),
                         "setups": rt.get("setups") or {},
+                        "agents": ((tac.get("agents") or {}).get(str(rr["n"])) or {}),
+                        "boards": rt.get("boards") or {},
                         "aligned": bool(tac.get("aligned")),
                     }
+                    bd = (rt.get("boards") or {})
+                    if bd.get("1:15") or bd.get("1:30"):
+                        rr.setdefault("assets", {})["board"] = bd.get("1:15") or bd.get("1:30")
                 bits = "・".join(f"{x['site']}{x['count']}" for x in (tac.get("sites") or [])[:3])
                 n_ps = sum(1 for v in tac["rounds"].values() if v.get("plant_site"))
                 tac_note = (f"サイト {bits or '-'}・点 {tac['mean_dots']:.1f}/枚"
@@ -628,6 +657,8 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                 rr["ult_ready"] = [names[s_][0] for s_ in ready0 if s_ < len(names)]
             # スパイクの設置：開始 5 秒以降で、タイマー欄が設置後の表示（赤いアイコン・赤い秒数）になった最初のフレーム
             plant = next((float(t[i]) for i in r.live if obs["spike"][i] and t[i] > r.t_drop + 5), None)
+            if rr.get("how") == "boom":
+                spike_deaths(kills, plant, r.t_end)
             rr.update({
                 "kills": kills,
                 "yt_url": f"https://youtu.be/{md.vod_id}?t={int(start + max(0, r.t_drop - 5))}",

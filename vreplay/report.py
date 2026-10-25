@@ -129,9 +129,11 @@ def _map_section(rep: dict, base: Path) -> str:
     gif_cap = "ラウンド中のミニマップ（%s倍速・リプレイ除外）" % rep.get("gif_speed", 4)
     for r in rep["rounds"]:
         a = r.get("assets") or {}
-        kills = "".join(f'<li>{_e(k.get("timer"))}　<b>{_e(k.get("killer") or "キル不明")}</b>（{_e(S.tag(rep, k.get("killer_team")))}）'
-                        + (f'［{_e(k["weapon_ja"])}］' if k.get("weapon_ja") else "")
-                        + f' → {_e(k.get("victim"))}</li>' for k in r.get("kills") or [])
+        kills = "".join((f'<li>{_e(k.get("timer"))}　<b>💥 スパイクの爆発</b> → {_e(k.get("victim"))}</li>'
+                         if k.get("cause") == "spike" else
+                         f'<li>{_e(k.get("timer"))}　<b>{_e(k.get("killer") or S.unknown_killer(k))}</b>（{_e(S.tag(rep, k.get("killer_team")))}）'
+                         + (f'［{_e(k["weapon_ja"])}］' if k.get("weapon_ja") else "")
+                         + f' → {_e(k.get("victim"))}</li>') for k in r.get("kills") or [])
         ults = "".join(f'<li>{_e(u.get("timer"))}　{_e(u.get("player"))}'
                        + (f'（{_e(u["agent"])}）' if u.get("agent") else "")
                        + f' が使用（{_e(S.tag(rep, u.get("team")))}）</li>' for u in r.get("ults") or [])

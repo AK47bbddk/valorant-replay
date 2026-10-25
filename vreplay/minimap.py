@@ -461,3 +461,67 @@ def fit_mask(mask: np.ndarray, meta: dict, max_pts: int = 500, seed: int = 0, bg
                 f"（コールアウトが床の上 {inside:.0%}・サイトの四角 {len(squares)}（文字 {''.join(sorted(q['letter'] for q in squares if q['letter'])) or 'なし'}）・2 位との差 ×{margin:.2f}）→ 信頼度 {conf:.0%}"
                 + ("" if T["ok"] else "（低い）"))
     return T
+
+
+# ---------------------------------------------------------------- 床の上の「歩いた距離」でゾーンを決める
+def region_labels(mask: np.ndarray, placed: list[dict], size: int = 160) -> dict | None:
+    """床の上で、各点から歩いて一番近いコールアウトの番号を持つ格子（壁越しの最寄りを避ける）。
+
+    直線距離の最寄りだと、壁 1 枚向こうの別エリア（A メインと MID など）に割り当ててしまう。
+    床（少し太らせて細い隙間をつなぐ）の上で、コールアウトを起点に幅優先で広げた「歩いた距離」の最寄りにする。
+    返り値 {"grid": (h,w) int16（-1 は床の外）, "sx", "sy"}。placed のコールアウトは切り抜きの正規化座標。"""
+    import cv2
+    from collections import deque
+    if mask is None or not placed:
+        return None
+    H, W = mask.shape
+    sc = size / max(H, W)
+    h, w = max(8, int(H * sc)), max(8, int(W * sc))
+    m = cv2.resize(mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
+    m = cv2.dilate(m, np.ones((3, 3), np.uint8)).astype(bool)
+    lab = np.full((h, w), -1, np.int16)
+    dist = np.full((h, w), 1e9, np.float32)
+    q = deque()
+    ys, xs = np.nonzero(m)
+    if not len(xs):
+        return None
+    for k, c in enumerate(placed):
+        x, y = int(c["x"] * w), int(c["y"] * h)
+        if not (0 <= x < w and 0 <= y < h) or not m[y, x]:
+            d2 = (xs - x) ** 2 + (ys - y) ** 2                 # 床の外なら最寄りの床から
+            i = int(np.argmin(d2))
+            if d2[i] > (0.06 * size) ** 2:
+                continue
+            x, y = int(xs[i]), int(ys[i])
+        if dist[y, x] > 0:
+            dist[y, x], lab[y, x] = 0, k
+            q.append((y, x))
+    nb = [(-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0), (-1, -1, 1.41), (-1, 1, 1.41), (1, -1, 1.41), (1, 1, 1.41)]
+    while q:                                   # 重みつきだが格子が小さいので、改善があれば何度でも入れ直す
+        y, x = q.popleft()
+        d0 = dist[y, x]
+        for dy, dx, c in nb:
+            yy, xx = y + dy, x + dx
+            if 0 <= yy < h and 0 <= xx < w and m[yy, xx] and d0 + c < dist[yy, xx] - 1e-6:
+                dist[yy, xx], lab[yy, xx] = d0 + c, lab[y, x]
+                q.append((yy, xx))
+    return {"grid": lab, "sx": w, "sy": h}
+
+
+def region_of(reg: dict | None, placed: list[dict], x: float, y: float) -> dict | None:
+    """切り抜きの正規化座標 (x, y) のコールアウト（床の上を歩いて最寄り）。床の外なら None。"""
+    if not reg:
+        return None
+    gx, gy = int(x * reg["sx"]), int(y * reg["sy"])
+    g = reg["grid"]
+    if not (0 <= gx < g.shape[1] and 0 <= gy < g.shape[0]):
+        return None
+    k = int(g[gy, gx])
+    if k < 0:
+        # 点の中心が床の縁から少し外れていることがあるので、周り 2 マスを見る
+        win = g[max(0, gy - 2):gy + 3, max(0, gx - 2):gx + 3]
+        vals = win[win >= 0]
+        if not len(vals):
+            return None
+        k = int(np.bincount(vals).argmax())
+    return placed[k] if 0 <= k < len(placed) else None

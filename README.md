@@ -180,7 +180,7 @@ Notion にも書きます（親ページをインテグレーションに共有�
   種類（Default / Set / Retake）・回数・勝率・購入・タグ（形・解説の言及）つき
 - 各行のページは左に説明（回数・勝率・よく映る場所・その後の設置・初動ファイト・解説の言及）と例のラウンドの動画（該当秒から再生）、
   右にその型のときの位置をマップ画像に重ねたもの
-- シークレットに `ANTHROPIC_API_KEY` があれば、ATK / DEF summary の文章を Claude が集計から書きます（`--no-llm` で止める）。
+- シークレットに `OPENROUTER_API_KEY`（DeepSeek V4 Flash の無料版）か `GEMINI_API_KEY`（Gemini の無料枠）があれば、ATK / DEF summary の文章を LLM が集計から書きます（`--no-llm` で止める）。どちらも無料で取れ、クレジットカードは要りません。
   渡すのは数字・型の名前・解説の一節だけで、データにないことは「推測：」と分けて書かせます
 
 ### 意図の読み取り（解説の字幕）
@@ -354,7 +354,7 @@ powershell -ExecutionPolicy Bypass -File .\valorant-replay\scripts\fetch_windows
 
 ## 速さについて
 
-**動画の取得**：YouTube は 1 本の接続を 1 MB/s 前後に絞るので、本数で稼ぎます。既定は区間を 24 に分けて yt-dlp で同時に取る方法です
+**動画の取得**：YouTube は 1 本の接続を 1 MB/s 前後に絞るので、本数で稼ぎます。既定は区間を 16 に分けて yt-dlp で同時に取る方法です
 （Colab で 12〜16 MB/s。次のマップの取得は解析と並行して進むので、待つのは最初のマップだけ）。
 Colab では範囲取得（下）に使える形式が返らないことが多かったので、`video.download_method: range` は試したいときだけにしています。
 まず DASH の目次（sidx）から必要な時間帯のバイト範囲だけを 16 本同時に取ります（`video.download_method: range`）。
@@ -450,7 +450,7 @@ pytest -q        # ネットワーク・GPU なしで通る（実放送の HUD �
 | `vreplay/minimap.py` | 放送のミニマップとコールアウト座標の位置合わせ（回転・倍率・位置・鏡映） |
 | `vreplay/patterns.py` | 初期配置・ローテ・リテイク・最終セットなどの型を推定 |
 | `vreplay/captions.py` | 放送の自動字幕から、解説が口にした意図のキーワードと一節をラウンドごとに拾う |
-| `vreplay/llm.py` | （任意）集計から ATK / DEF summary の文章を Claude に書かせる |
+| `vreplay/llm.py` | （任意）集計から ATK / DEF summary の文章を無料の LLM（OpenRouter の DeepSeek V4 Flash / Gemini）に書かせる |
 | `vreplay/notion_playbook.py` | プレイブックを Notion に（ATK / DEF のデータベース・型ごとのページ） |
 | `vreplay/deck.py` | チーム × マップ × 構成ごとのプレイブック（スライド HTML、strong / weak point の自動生成） |
 | `vreplay/playbook.py` | 以前の集計ページ（チーム別・構成別のヒートマップと型の表） |

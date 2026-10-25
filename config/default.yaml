@@ -36,7 +36,7 @@ video:
   download_workers: 1    # 同時にダウンロードするマップ数。1 なら 1 マップずつ全力で取り、解析中に次のマップを取る
   download_method: sections # sections：区間を分けて yt-dlp で同時に取る（Colab で安定）／range：DASH・HLS の必要な範囲だけを取る（PO トークンの要らない形式が返るときだけ速い）
   download_threads: 16   # range のときの同時接続数（YouTube は 1 本を 1 MB/s 前後に絞るので本数で稼ぐ）
-  download_parts: 24     # sections のとき（range が使えないとき）に区間をいくつに分けて同時に取るか
+  download_parts: 16     # sections のとき（range が使えないとき）に区間をいくつに分けて同時に取るか
   download_fragments: 4  # 1 本の動画を yt-dlp が分割して並列取得する数（回線が速いなら 8 などに）
 
 hud:
@@ -54,7 +54,17 @@ captions:
   enabled: true         # 放送の自動字幕から、解説が口にした意図（ラッシュ・フェイク…）をラウンドごとに拾う
 
 llm:
-  model: claude-sonnet-5-5   # ANTHROPIC_API_KEY があるとき、プレイブックの ATK/DEF summary を書かせるモデル
+  # プレイブックの ATK/DEF summary を書かせる LLM。auto はキーのあるものを順に試す：
+  #   OPENROUTER_API_KEY（DeepSeek V4 Flash 無料版）→ GEMINI_API_KEY（Gemini Flash 無料枠）→ DEEPSEEK_API_KEY（有料）
+  # 1 つに決めるなら provider: openrouter / gemini / deepseek / anthropic と、必要なら model・base_url
+  provider: auto
+  model: ""
+  base_url: ""
+  # auto のときのモデルの上書き（無料モデルの名前が変わったとき用）
+  models:
+    openrouter: deepseek/deepseek-v4-flash:free
+    gemini: gemini-flash-latest
+  max_tokens: 1500
 
 playbook:
   notion_parent: ""     # Notion に書くときの親ページ URL（vreplay playbook --notion でも指定できる）
@@ -72,6 +82,8 @@ tactics:
   site_after_seconds: 20
   min_dot_area: 4
   max_dot_area: 450
+  # ミニマップのアイコンをエージェントの顔と照合して「誰がどこにいるか」を読む（配置図 _tactics/board_*.jpg）
+  agents: true
 
 output:
   dir: /content/drive/MyDrive/valorant-replay

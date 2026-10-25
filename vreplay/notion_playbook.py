@@ -151,11 +151,14 @@ def export(nt: Notion, cfg: dict, key: dict, rows: list[dict], base: list[dict],
             ct = _caster_tags(g["rows"])
             left = [_para(_rt(f"{g['n']} 回・勝ち {g['w']}（{D._pct(D._rate(g['w'], g['n']))}）・形 {g['shape']}", bold=True)),
                     _bullet(_rt("よく映る場所：" + ("・".join(g["callouts"]) or "-")))]
+            if g.get("roles"):
+                left.append(_bullet(_rt("担当（アイコン照合）：" + g["roles"])))
             left += [_bullet(_rt(x)) for x in follow]
             if ct:
                 left.append(_bullet(_rt("解説の言及：" + "・".join(ct))))
-            img = D.position_png(cfg, key["map"], g["rows"], "1:15", img_dir / f"np_{label}_{D._slug(g['name'])}.jpg",
-                                 meta)
+            # アイコン照合の配置図（Valotactics 風）があればそれ、無ければ点の位置の重ね描き
+            img = next((Path(b) for b in g.get("boards") or [] if Path(b).exists()), None) or D.position_png(
+                cfg, key["map"], g["rows"], "1:15", img_dir / f"np_{label}_{D._slug(g['name'])}.jpg", meta)
             _row(nt, ds, f"{_code(g['shape'])} {g['name']}".strip().replace("デフォルト", "default"), "Default", g["rows"],
                  [g["shape"]] + ct, left, img, _examples(g["rows"]))
         if side == ATTACK:

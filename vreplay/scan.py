@@ -63,6 +63,8 @@ def _init_worker(ocr_threads: int):
 
 
 def _save(store: Path, idx: int, name: str, img, q: int = 85):
+    if img is None or img.size == 0:                 # 枠が画面の外にはみ出したときなど
+        return
     cv2.imwrite(str(store / f"{idx:06d}_{name}.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, q])
 
 

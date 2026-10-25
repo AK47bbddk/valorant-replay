@@ -161,9 +161,30 @@ def test_analyze_video_aligns_minimap_and_reads_plant_site(tmp_path, monkeypatch
         def get(self, idx, name):
             return frames[idx]
 
+    # アイコン照合：チーム1 の 5 人を A サイトのコールアウトに置いた結果を返す（照合そのものは test_agents）
+    from vreplay import agents as AG
+    ags = ["Sova", "Jett", "Omen", "Viper", "Killjoy"]
+    monkeypatch.setattr(AG, "load_icons", lambda cfg, names, log=None: {a: np.zeros((64, 64, 3), np.uint8) for a in names})
+
+    def fake_match(img, icons, teams, color_team, mask=None, **kw):
+        out = []
+        for i, a in enumerate(ags):
+            c = a_sites[i % len(a_sites)]
+            x, y = M.apply(truth, c["x"], c["y"])
+            out.append({"agent": a, "team": 1, "x": x, "y": y, "score": 0.9})
+        return out
+    monkeypatch.setattr(AG, "match", fake_match)
+    monkeypatch.setattr(tactics, "map_icon", lambda cfg, name, size=512: None)
     obs = {"t": ts, "idx": list(range(len(ts)))}
     tac = tactics.analyze_video(_cfg(tmp_path), tmp_path / "v.mp4", "Test", rounds, out_dir=tmp_path / "o",
-                                log=lambda *a: None, store=Store(), obs=obs)
+                                log=lambda *a: None, store=Store(), obs=obs,
+                                agent_teams={1: ags, 2: ["Raze", "Brimstone", "Fade", "Cypher", "Chamber"]})
+    ag = tac["agents"]["1"]["1:15"]
+    assert len(ag) == 5 and sum(e["zone"] == "A" for e in ag) >= 4
+    su1 = tac["rounds"]["1"]["setups"]["1"]
+    assert su1["source"] == "agents" and su1["shape"].startswith("A") and su1["who"]
+    assert (tmp_path / "o" / "_tactics" / "board_r01_115.jpg").exists()
+    assert (tmp_path / "o" / "_tactics" / "agents_check.jpg").exists()
     assert tac["aligned"], tac["calibration"]
     assert tac["warm_team1"] is True
     sites = {n: tac["rounds"][str(n)]["plant_site"] for n in range(1, 17)}

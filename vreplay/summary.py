@@ -127,7 +127,10 @@ def setup_line(rep: dict, r: dict) -> str:
         if not su:
             continue
         side = "攻め" if su.get("side") == "攻撃" else "守り" if su.get("side") == "防衛" else ""
-        out.append(f"{tg}（{side}）{su.get('name')} {su.get('shape') or ''}".strip())
+        line = f"{tg}（{side}）{su.get('name')} {su.get('shape') or ''}".strip()
+        if su.get("who"):
+            line += "［" + " / ".join(f"{z}: {'・'.join(v)}" for z, v in su["who"].items()) + "］"
+        out.append(line)
     return " ／ ".join(out)
 
 
@@ -142,3 +145,7 @@ def caster_line(r: dict) -> str:
     if c.get("quotes"):
         out += f"「{c['quotes'][0]}」"
     return out
+
+
+def unknown_killer(k: dict) -> str:
+    return {"card": "キラー不明（カードで確認）", "implied": "キラー不明（全滅から推定）"}.get(k.get("source"), "キラーは読めず")

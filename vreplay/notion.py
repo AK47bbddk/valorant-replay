@@ -286,8 +286,9 @@ def round_blocks(rep: dict, r: dict, uploads: dict[str, str | None]) -> list[dic
 
     start = _img(uploads.get(a.get("minimap_start")), "開始時のミニマップ")
     gif = _img(uploads.get(a.get("minimap_gif")), f"ラウンド中（{rep.get('gif_speed', 4)}倍速・リプレイ除外）")
-    cl = _columns([start], [gif])
-    out += [cl] if cl else [b for b in (start, gif) if b]
+    board = _img(uploads.get(a.get("board")), "配置図（アイコン照合・1:15 前後）")
+    cl = _columns(*[[b] for b in (start, gif, board) if b])
+    out += [cl] if cl else [b for b in (start, gif, board) if b]
 
     for no, tg in (("1", t1), ("2", t2)):
         bank = r.get(f"bank{no}")
@@ -299,7 +300,12 @@ def round_blocks(rep: dict, r: dict, uploads: dict[str, str | None]) -> list[dic
         rt = [_rt("キル　", bold=True)]
         for i, k in enumerate(kills):
             w = f"［{k['weapon_ja']}］" if k.get("weapon_ja") else ""
-            who = k.get("killer") or f"（{S.tag(rep, k.get('killer_team'))}・キル不明）"
+            if k.get("cause") == "spike":
+                rt += [_rt(("\n" if i else "") + f"{k.get('timer') or '--:--'} "), _rt("💥 スパイクの爆発", bold=True),
+                       _rt(f" → {k.get('victim') or '?'}")]
+                continue
+            src = {"card": "カードで確認", "implied": "全滅から推定"}.get(k.get("source"), "キラーは読めず")
+            who = k.get("killer") or f"（{S.tag(rep, k.get('killer_team'))}・{src}）"
             rt += [_rt(("\n" if i else "") + f"{k.get('timer') or '--:--'} "),
                    _rt(who, bold=True, color="blue" if k.get("killer_team") == rep["team1"] else "red"),
                    _rt(f"{w} → {k.get('victim') or '?'}")]

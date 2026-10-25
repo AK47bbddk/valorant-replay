@@ -440,6 +440,18 @@ def parse_killfeed(dets, img, roster: Roster, book=None) -> list[dict]:
     teams = sorted({t for _, t in roster.by_norm.values() if t})
     rows = []
     for line in _group_lines([d for d in dets if len(norm_name(d[1])) >= 1]):
+        if len(line) == 1:
+            # 名前が右側に 1 つだけ：スパイクの爆発・落下などキラーのいない死亡か、キラーが読めなかった行
+            d = line[0]
+            if d[0][0] >= 0.4 * W:
+                victim, vteam = roster.snap(d[1])
+                if vteam:
+                    y0 = int(max(0, d[0][1] - 4))
+                    y1 = int(min(H, d[0][3] + 4))
+                    other = next((x for x in teams if x != vteam), None) if len(teams) == 2 else None
+                    rows.append({"killer": None, "killer_team": other, "victim": victim, "victim_team": vteam,
+                                 "weapon": None, "box": (y0, y1), "partial": True})
+            continue
         if len(line) < 2:
             continue
         left, right, gap = _split_line(line, W)
@@ -537,20 +549,23 @@ def _bands_changed(cur, prev, tol: float = 0.08) -> bool:
 
 
 def _row_sig(crop) -> np.ndarray:
-    return cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), (128, 12), interpolation=cv2.INTER_AREA).astype(np.float32)
+    """行の見た目：白い文字だけを 2 値にして縮小（背景のゲーム画面が動いても変わらない。名前が違えば変わる）。"""
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    wm = ((hsv[..., 2] >= 190) & (hsv[..., 1] <= 60)).astype(np.uint8) * 255
+    return (cv2.resize(wm, (192, 12), interpolation=cv2.INTER_AREA) > 80).astype(np.float32)
 
 
 def kills_in_round(store: FrameStore, idxs: list[int], times: list[float], labels: list[str], roster: Roster,
                    book, out_path: Path, min_gap: float = 0.4, every: float = 2.0,
-                   row_tol: float = 14.0, keep: float = 8.0) -> tuple[list[dict], Path | None]:
+                   row_tol: float = 0.015, keep: float = 8.0, safety: float = 4.0) -> tuple[list[dict], Path | None]:
     """ライブ区間のキルフィードから、新しく出た行をキルとして記録する。
 
-    行（白い名前の帯）ごとに見た目（行全体の縮小画像）を覚えておき、初めて見た行だけを、その行の高さだけ
-    切り出して OCR する（画面全体より小さいので速い）。読み違い対策に、同じ行を 1 秒ほど後にもう 1 回だけ読む。
+    行（白い名前の帯）ごとに見た目（行全体の縮小画像）を覚えておき、初めて見た行が出たフレームだけ
+    キルフィード全体を OCR する。読み違い対策に、同じ行が 1 秒ほど後にも映っていればもう 1 回だけ読む。
     行が下にずれても見た目は同じなので読み直さない。帯が 1 つも見つからない放送では、画面全体を
     見た目の変化＋2 秒おきに読む。
     """
-    events, crops, seen, victims = [], [], {}, set()
+    events, crops, seen, victims = [], [], {}, {}
     frames = []
     for j, i in enumerate(idxs):
         img = store.get(i, "killfeed")
@@ -560,9 +575,15 @@ def kills_in_round(store: FrameStore, idxs: list[int], times: list[float], label
     jobs = []                                   # (j, 画像)
     if use_bands:
         rows: list[dict] = []
+        prev_n, last_read = 0, -1e9
         for j, img, bands in frames:
             t = times[j]
             H = img.shape[0]
+            # 行の数が増えた／行が映っているのに safety 秒読んでいない、なら必ず読む（見た目の似た行の見落とし対策）
+            if bands and (len(bands) > prev_n or t - last_read >= safety) and (not jobs or jobs[-1][0] != j):
+                jobs.append((j, img))
+                last_read = t
+            prev_n = len(bands)
             for y0, y1, _ in bands:
                 ya, yb = max(0, y0 - 6), min(H, y1 + 6)
                 crop = img[ya:yb]
@@ -576,12 +597,18 @@ def kills_in_round(store: FrameStore, idxs: list[int], times: list[float], label
                         best, bd = r, d
                 if best is None or bd > row_tol:
                     rows.append({"sig": sig, "first": t, "last": t, "reads": 1})
-                    jobs.append((j, crop))
+                    want = True
                 else:
                     best["last"], best["sig"] = t, sig
+                    want = False
                     if best["reads"] < 2 and t - best["first"] >= 0.9:
                         best["reads"] += 1
-                        jobs.append((j, crop))
+                        want = True
+                # 行だけを切り出すと細すぎて文字の検出が効かない（Colab で 0 件になった）。読むのは画面全体、
+                # 読むタイミングだけを「新しい行が出た／1 秒後の確認」に絞る
+                if want and (not jobs or jobs[-1][0] != j):
+                    jobs.append((j, img))
+                    last_read = t
     else:
         prev_small, last_t = None, -1e9
         for j, img, _ in frames:
@@ -600,14 +627,22 @@ def kills_in_round(store: FrameStore, idxs: list[int], times: list[float], label
         for row in parse_killfeed(det, img, roster, book):
             vkey = norm_name(row["victim"])
             key = (norm_name(row["killer"]), vkey)
-            if (key in seen and t - seen[key] < 12) or vkey in victims:
+            if vkey in victims:
+                # 先にキラーが読めなかった行を、後のフレームでキラーまで読めたら上書きする
+                ev = victims[vkey]
+                if not ev.get("killer") and row.get("killer") and t - ev["t"] <= 8:
+                    ev.update({k_: v for k_, v in row.items() if k_ not in ("box", "partial")})
+                    ev.pop("partial", None)
+                seen[key] = t
+                continue
+            if key in seen and t - seen[key] < 12:
                 seen[key] = t
                 continue
             seen[key] = t
-            victims.add(vkey)
             y0, y1 = row.pop("box")
             crops.append(img[y0:y1, :])
             events.append({"t": round(t, 1), "timer": labels[j], **row})
+            victims[vkey] = events[-1]
     strip = None
     if crops:
         w = max(c.shape[1] for c in crops)
