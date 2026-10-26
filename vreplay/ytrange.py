@@ -216,7 +216,7 @@ def fetch_section(getter: "Getter", start: float, end: float, out: Path, threads
             fh.seek(len(init) + rg[0] - a)
             fh.write(data)
 
-    with ThreadPoolExecutor(max_workers=threads) as ex:
+    with ThreadPoolExecutor(max_workers=threads, thread_name_prefix="取得-範囲") as ex:
         list(ex.map(one, ranges))
     # 断片の時刻は元の動画の先頭からなので、0 始まりの普通の mp4 に直す（ffmpeg の -ss が速く効くように）
     r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(tmp), "-c", "copy", "-avoid_negative_ts", "make_zero",
@@ -263,7 +263,7 @@ def fetch_hls(getter: "Getter", playlist_url: str, start: float, end: float, out
     def one(i):
         datas[i] = getter.fetch(segs[i][0])
 
-    with ThreadPoolExecutor(max_workers=threads) as ex:
+    with ThreadPoolExecutor(max_workers=threads, thread_name_prefix="取得-範囲") as ex:
         list(ex.map(one, range(len(segs))))
     ext = ".mp4" if p["init"] else ".ts"
     tmp = out.with_suffix(".frag" + ext)

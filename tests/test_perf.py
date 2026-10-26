@@ -47,3 +47,31 @@ def test_stage_records_and_note(monkeypatch):
     text = perf.note(rows)
     assert text.startswith("処理時間：動画の取得")
     assert "秒" in text
+
+
+def test_cpu_breakdown_by_thread_and_child_process():
+    """CPU を使ったのがどのスレッド（素材・取得…）・どの子プロセス（ffmpeg…）かを集計する。"""
+    import subprocess
+    import sys
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    import pytest
+    pytest.importorskip("psutil")
+    from vreplay import perf
+
+    def busy(sec):
+        t = time.time()
+        while time.time() - t < sec:
+            sum(range(5000))
+    perf.start(interval=0.2)
+    try:
+        child = subprocess.Popen([sys.executable, "-c", "import time\nt=time.time()\nwhile time.time()-t<1.5: pass"])
+        with ThreadPoolExecutor(1, thread_name_prefix="素材") as ex:
+            ex.submit(busy, 1.6).result()
+        child.wait()
+        use = dict(perf.cpu_breakdown())
+    finally:
+        perf.stop()
+    assert use.get("ラウンド素材（装備表・名前・キルフィード・GIF）", 0) >= 0.5, use
+    assert any(k.startswith("スキャンの作業") for k in use)       # python の子プロセス

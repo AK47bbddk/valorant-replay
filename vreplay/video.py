@@ -160,7 +160,7 @@ def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_hei
             log(f"    部分 {se[0]}〜{se[1]} 秒に映像が無かったので取り直します")
         return get(se, retry=False)
 
-    with ThreadPoolExecutor(max_workers=parts) as ex:
+    with ThreadPoolExecutor(max_workers=parts, thread_name_prefix="取得-部分") as ex:
         files = list(ex.map(get, pieces))
     man = out_dir / f"{video_id}_{start}_{end}{PARTS}"
     entries = []
@@ -337,14 +337,25 @@ def probe(path: Path) -> tuple[int, int, float]:
         if not w:
             w, h, _ = probe(ps[0][0])
         return w, h, ps[-1][1] + ps[-1][2]
-    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-                          "stream=width,height:format=duration", "-of", "json", str(path)],
-                         capture_output=True, text=True, check=True).stdout
-    j = json.loads(out)
+    try:
+        st = Path(path).stat()
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = (0, 0)
+    j = _ffprobe(str(path), *key)
     if not j.get("streams"):
         raise RuntimeError(f"映像が入っていないファイルです（取得の途中で切れた可能性）: {Path(path).name}")
     s = j["streams"][0]
     return int(s["width"]), int(s["height"]), float(j.get("format", {}).get("duration") or 0)
+
+
+@lru_cache(maxsize=1024)
+def _ffprobe(path: str, mtime_ns: int, size: int) -> dict:
+    """ffprobe の結果（同じファイル・同じ更新時刻なら使い回す。取り直したファイルは読み直す）。"""
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                          "stream=width,height:format=duration", "-of", "json", path],
+                         capture_output=True, text=True, check=True).stdout
+    return json.loads(out)
 
 
 def has_video(path: Path) -> bool:
@@ -364,17 +375,27 @@ def _has_cuda() -> bool:
     return "cuda" in r.stdout
 
 
+_DECODE_USED: dict[str, str] = {}      # ファイル → 実際にフレームが出たデコードの方法（ログ用）
+DECODE_LABELS = ("GPU（GPU 上で間引き）", "GPU（全フレームを CPU へコピー）", "CPU")
+
+
 @lru_cache(maxsize=8)
 def gpu_decode_ok(path: str) -> bool:
     """GPU（NVDEC）でデコードできるか 1 秒だけ試す。"""
+    return decode_mode(path) != "CPU"
+
+
+@lru_cache(maxsize=8)
+def decode_mode(path: str) -> str:
+    """このファイルを 2fps で読むときに使えるデコードの方法（DECODE_LABELS のどれか）。"""
     if not _has_cuda():
-        return False
+        return "CPU"
     ps = parts_of(path)
     if ps:
         path = str(ps[0][0])
     for _ in iter_frames(Path(path), fps=1, start=0, duration=1.0, hwaccel=True, fallback=False):
-        return True
-    return False
+        return _DECODE_USED.get(str(path), DECODE_LABELS[0])
+    return "CPU"
 
 
 def iter_frames(path: Path, fps: float, start: float = 0.0, duration: float | None = None,
@@ -411,12 +432,13 @@ def iter_frames(path: Path, fps: float, start: float = 0.0, duration: float | No
     # （-hwaccel cuda だけだと 60fps の全フレームを毎回 CPU へコピーしていて、CPU を大きく使っていた）
     cmds = []
     if hwaccel:
-        cmds.append(base + ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"] + seek
-                    + ["-i", str(path), "-an", "-vf", f"fps={fps},hwdownload,format=nv12"] + out)
-        cmds.append(base + ["-hwaccel", "cuda"] + seek + ["-i", str(path), "-an", "-vf", f"fps={fps}"] + out)
+        cmds.append((DECODE_LABELS[0], base + ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"] + seek
+                     + ["-i", str(path), "-an", "-vf", f"fps={fps},hwdownload,format=nv12"] + out))
+        cmds.append((DECODE_LABELS[1], base + ["-hwaccel", "cuda"] + seek
+                     + ["-i", str(path), "-an", "-vf", f"fps={fps}"] + out))
     if fallback or not hwaccel:
-        cmds.append(base + seek + ["-i", str(path), "-an", "-vf", f"fps={fps}"] + out)
-    for cmd in cmds:
+        cmds.append((DECODE_LABELS[2], base + seek + ["-i", str(path), "-an", "-vf", f"fps={fps}"] + out))
+    for label, cmd in cmds:
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=w * h * 3 * 4)
         n, size = 0, w * h * 3
         try:
@@ -431,6 +453,7 @@ def iter_frames(path: Path, fps: float, start: float = 0.0, duration: float | No
             p.kill()
             p.wait()
         if n > 0:
+            _DECODE_USED[str(path)] = label
             return
         # GPU デコードで 1 枚も出なければ CPU でやり直す
 

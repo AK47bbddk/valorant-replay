@@ -385,7 +385,7 @@ def save_table_crops(path: Path, det, cfg: dict, store, hw: bool, pre: float = 9
         for tt, f in iter_frames(path, fps, max(0.0, r.t_drop - pre), pre + post, hwaccel=hw):
             store.put(int(round(tt * fps)), "table", crop(f, roi))
 
-    with ThreadPoolExecutor(max_workers=max(1, min(4, os.cpu_count() or 1))) as ex:
+    with ThreadPoolExecutor(max_workers=max(1, min(4, os.cpu_count() or 1)), thread_name_prefix="解析-装備表") as ex:
         list(ex.map(one, det))
     store._cache.pop("table", None)
 
@@ -413,7 +413,7 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
     from .rounds import agreement, assign_rounds, liveness, orientation, repair_rounds, segment
     from .loadout import add_weapons, find_table, merge_reads, read_table, table_image
     from .scan import merge_obs, scan
-    from .video import gpu_decode_ok, keyframe_interval
+    from .video import decode_mode, gpu_decode_ok, keyframe_interval
     from .weapons import PISTOLS
     from .weapons import ja as wja
     from .weapons import load_book
@@ -423,7 +423,7 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
     t_start = time.time()
     start, _ = _segment_bounds(m, md, cfg)
     # 解説の字幕（意図の手がかり）は通信だけなので、解析と並行して取っておく
-    cap_ex = ThreadPoolExecutor(max_workers=1)
+    cap_ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix="取得-字幕")
     cap_fut = None
     if (cfg.get("captions") or {}).get("enabled", True) and md.vod_id:
         from . import captions as CC
@@ -490,7 +490,7 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                 table_windows = []
                 scan_note = "全区間を密に" + (f"（キーフレーム間隔 {ki:.1f} 秒）" if ki else "")
         log(f"    スキャン {len(obs['t'])} 枚 {perf.fmt_seconds(st_scan['seconds'])}"
-            f"（{scan_note}・{obs['workers']} 並列・デコード {'GPU' if hw else 'CPU'}"
+            f"（{scan_note}・{obs['workers']} 並列・デコード {decode_mode(str(path)) if hw else 'CPU'}"
             f"・OCR {obs['ocr_calls']} 回 {'GPU' if obs.get('ocr_gpu') else 'CPU'}）"
             f"｜{perf.fmt_resources(st_scan['resources'])}")
         pf = obs.get("prof") or {}
@@ -815,7 +815,7 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                 rr["notes"].append(f"ラウンド開始時刻は推定値です（信頼度 {r.start_conf:.0%}）")
 
         with perf.stage("assets", tag=tag, label="ラウンド素材") as st_assets:
-            with ThreadPoolExecutor(max_workers=max(2, min(8, os.cpu_count() or 2))) as ex:
+            with ThreadPoolExecutor(max_workers=max(2, min(8, os.cpu_count() or 2)), thread_name_prefix="素材") as ex:
                 for fut in [ex.submit(work, r) for r in det]:
                     try:
                         fut.result()
@@ -1096,7 +1096,7 @@ def _run_body(cfg: dict, days, match_urls, no_video, force, upsert_only, log, t0
     # 2) 動画の取得は裏で先回り。取り過ぎてディスクを埋めないよう、解析中＋数マップ先までに限る
     dl_workers = max(1, int(cfg["video"].get("download_workers") or 1))
     ahead = max(dl_workers, map_workers) + int(pcfg.get("prefetch_maps") or 2)
-    dl = ThreadPoolExecutor(max_workers=dl_workers)
+    dl = ThreadPoolExecutor(max_workers=dl_workers, thread_name_prefix="取得")
     futs, dl_lock = {}, threading.Lock()
 
     def ensure_downloads(upto: int):
@@ -1130,7 +1130,7 @@ def _run_body(cfg: dict, days, match_urls, no_video, force, upsert_only, log, t0
 
     # 3) 解析（map_workers マップを同時に。Notion への書き込みも裏で 2 本まで並行）
     state = {"blocked": False}
-    writer = ThreadPoolExecutor(max_workers=2 if map_workers > 1 else 1)
+    writer = ThreadPoolExecutor(max_workers=2 if map_workers > 1 else 1, thread_name_prefix="Notion")
     writes, w_lock = [], threading.Lock()
 
     busy = []                                         # 各マップの解析にかかった秒（取得の待ちを含む）
@@ -1194,7 +1194,7 @@ def _run_body(cfg: dict, days, match_urls, no_video, force, upsert_only, log, t0
         return day, rep
 
     t_an = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=map_workers) as ex:
+    with ThreadPoolExecutor(max_workers=map_workers, thread_name_prefix="マップ") as ex:
         results = list(ex.map(process, range(len(todo))))
     if todo and not no_video:
         wall = time.perf_counter() - t_an

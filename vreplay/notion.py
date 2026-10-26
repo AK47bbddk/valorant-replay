@@ -366,7 +366,7 @@ def write_map_page(nt: Notion, page_id: str, rep: dict, force: bool = False) -> 
             print("  upload failed:", path, e)
             return path, None
 
-    with ThreadPoolExecutor(max_workers=4) as ex:      # 送信は並行、リクエストの開始は 3 回/秒に抑える
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="Notion-画像") as ex:  # 送信は並行、リクエストの開始は 3 回/秒に抑える
         uploads: dict[str, str | None] = dict(ex.map(up, paths))
     nt.append(page_id, build_blocks(rep, uploads), batch=10)
     return True

@@ -683,7 +683,7 @@ def kills_in_round(store: FrameStore, idxs: list[int], times: list[float], label
             jobs.append((j, img))
     ocr = _ocr()
     from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=2) as ex:
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="素材-キル") as ex:
         dets = list(ex.map(lambda x: ocr.detect(x[1], min_score=0.3), jobs))
     for (j, img), det in sorted(zip(jobs, dets), key=lambda x: x[0][0]):
         t = times[j]

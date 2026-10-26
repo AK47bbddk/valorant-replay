@@ -31,6 +31,8 @@ _STARTED_AT = 0.0
 _GPU_STATE: bool | None = None          # None=未確認 / False=なし・読めない / True=あり
 _GPU_NAME: str | None = None
 _PROC = None
+_DEC_FIELD: bool | None = None          # nvidia-smi で utilization.decoder（NVDEC の使用率）を読めるか
+_CPU_SEEN: dict = {}                    # (種類, pid/tid, 作成時刻) → これまでに使った CPU 秒
 
 STAGE_JA = {
     "matches": "試合の選択",
@@ -52,6 +54,7 @@ def reset():
         _SAMPLES = []
         _ENTRIES = []
         _STARTED_AT = time.time()
+        _CPU_SEEN.clear()
 
 
 def _gpu_name() -> str:
@@ -74,11 +77,20 @@ def _gpu_snapshot() -> dict:
     if _GPU_STATE is None and not shutil.which("nvidia-smi"):
         _GPU_STATE = False
         return {}
+    global _DEC_FIELD
     try:
-        r = subprocess.run(
-            ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=3)
+        fields = "utilization.gpu,memory.used,memory.total,temperature.gpu"
+        r = None
+        if _DEC_FIELD is not False:
+            r = subprocess.run(["nvidia-smi", f"--query-gpu={fields},utilization.decoder",
+                                "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=3)
+            if r.returncode != 0 or not r.stdout.strip():
+                _DEC_FIELD, r = False, None              # 古いドライバーは decoder を読めない
+            else:
+                _DEC_FIELD = True
+        if r is None:
+            r = subprocess.run(["nvidia-smi", f"--query-gpu={fields}", "--format=csv,noheader,nounits"],
+                               capture_output=True, text=True, timeout=3)
         if r.returncode != 0 or not r.stdout.strip():
             _GPU_STATE = False
             return {}
@@ -91,11 +103,75 @@ def _gpu_snapshot() -> dict:
                 return None
 
         _GPU_STATE = True
-        return {"gpu_util": num(0), "gpu_mem_used_mb": num(1),
-                "gpu_mem_total_mb": num(2), "gpu_temp_c": num(3)}
+        out = {"gpu_util": num(0), "gpu_mem_used_mb": num(1), "gpu_mem_total_mb": num(2), "gpu_temp_c": num(3)}
+        if _DEC_FIELD:
+            out["dec_util"] = num(4)
+        return out
     except Exception:
         _GPU_STATE = False
         return {}
+
+
+# ---------------------------------------------------------------- CPU の使い道
+def _thread_kind(name: str) -> str:
+    if name.startswith("取得"):
+        return "動画の取得"
+    if name.startswith("素材"):
+        return "ラウンド素材（装備表・名前・キルフィード・GIF）"
+    if name.startswith("Notion"):
+        return "Notion への書き込み"
+    if name.startswith("vreplay-perf"):
+        return "測定"
+    return "ほかの解析（キャリブレーション・ミニマップ・ラウンド分割）"
+
+
+def _proc_kind(p, main_pid: int) -> str:
+    name = (p.name() or "").lower()
+    if "ffmpeg" in name or "ffprobe" in name:
+        return "ffmpeg（メインから：装備表・1 枚取り・確認）" if p.ppid() == main_pid else "ffmpeg（スキャンのデコード）"
+    if "deno" in name or "aria2" in name:
+        return "動画の取得"
+    try:
+        cmd = " ".join(p.cmdline())
+    except Exception:
+        cmd = ""
+    if "yt_dlp" in cmd or "yt-dlp" in cmd:
+        return "動画の取得"
+    if "multiprocessing" in cmd or "python" in name:
+        return "スキャンの作業（切り抜き・カード・OCR の前後処理）"
+    return "その他"
+
+
+def _cpu_tree():
+    """このプロセス（スレッドごと）と子プロセスが使った CPU 秒を、種類ごとに覚える。"""
+    if not psutil or _PROC is None:
+        return
+    try:
+        names = {t.native_id: t.name for t in threading.enumerate()}
+        for th in _PROC.threads():
+            nm = names.get(th.id)
+            if nm is None:
+                continue
+            _CPU_SEEN[(_thread_kind(nm), "t", th.id, nm)] = th.user_time + th.system_time
+        for p in _PROC.children(recursive=True):
+            try:
+                with p.oneshot():
+                    ct = p.cpu_times()
+                    kind = _proc_kind(p, _PROC.pid)
+                    _CPU_SEEN[(kind, "p", p.pid, p.create_time())] = ct.user + ct.system
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+def cpu_breakdown() -> list[tuple[str, float]]:
+    """[(種類, CPU 秒)]（多い順）。終わったプロセス・スレッドは最後に見た値（最大 3 秒ぶん少なめ）。"""
+    _cpu_tree()
+    tot: dict[str, float] = {}
+    for (kind, *_), sec in list(_CPU_SEEN.items()):
+        tot[kind] = tot.get(kind, 0.0) + sec
+    return sorted(((k, v) for k, v in tot.items() if v >= 0.5), key=lambda kv: -kv[1])
 
 
 def sample() -> dict:
@@ -145,10 +221,14 @@ def start(interval: float = 1.0):
             pass
 
     def loop():
+        k = 0
         while _RUNNING:
             s = sample()
             with _LOCK:
                 _SAMPLES.append(s)
+            if k % 3 == 0:
+                _cpu_tree()
+            k += 1
             time.sleep(interval)
 
     _RUNNING = True
@@ -202,6 +282,10 @@ def summarize_samples(samples: list[dict]) -> dict | None:
     if gpu:
         out["gpu_avg"] = round(statistics.fmean(gpu), 1)
         out["gpu_max"] = round(max(gpu), 1)
+    dec = _nums(samples, "dec_util")
+    if dec:
+        out["dec_avg"] = round(statistics.fmean(dec), 1)
+        out["dec_max"] = round(max(dec), 1)
     if vram:
         out["vram_peak_gb"] = round(max(vram) / 1024, 2)
     if vram_total:
@@ -232,11 +316,11 @@ def _merge_resources(entries: list[dict]) -> dict:
         return max(vals) if vals else None
 
     out: dict = {}
-    for key in ("cpu_avg", "proc_cpu_avg", "gpu_avg"):
+    for key in ("cpu_avg", "proc_cpu_avg", "gpu_avg", "dec_avg"):
         v = wavg(key)
         if v is not None:
             out[key] = round(v, 1)
-    for key in ("cpu_max", "proc_cpu_max", "gpu_max", "gpu_temp_max_c", "ram_peak_gb",
+    for key in ("cpu_max", "proc_cpu_max", "gpu_max", "dec_max", "gpu_temp_max_c", "ram_peak_gb",
                 "vram_peak_gb", "ram_total_gb", "vram_total_gb"):
         v = peak(key)
         if v is not None:
@@ -307,6 +391,7 @@ def build_summary(entries_: list[dict] | None = None, total_sec: float | None = 
         system["gpu_name"] = name
     return {"generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "total_sec": round(total, 2), "system": system, "stages": stages,
+            "cpu_use": [{"kind": k, "cpu_sec": round(v, 1)} for k, v in cpu_breakdown()],
             "advice": advice(stages, total), "entries": items}
 
 
@@ -348,6 +433,8 @@ def fmt_resources(r: dict | None) -> str:
         bits.append(f"CPU 平均 {r['cpu_avg']:.0f}%（最大 {r.get('cpu_max', 0):.0f}%）")
     if r.get("gpu_avg") is not None:
         s = f"GPU 平均 {r['gpu_avg']:.0f}%（最大 {r.get('gpu_max', 0):.0f}%）"
+        if r.get("dec_avg") is not None:
+            s += f"・デコーダ 平均 {r['dec_avg']:.0f}%"
         if r.get("vram_peak_gb") is not None:
             s += f"・VRAM 最大 {r['vram_peak_gb']:.1f}GB"
         bits.append(s)
@@ -394,6 +481,13 @@ def print_summary(summary: dict, log=print):
     if system.get("gpu_name"):
         line += f"／GPU {system['gpu_name']}"
     log(line)
+    use = summary.get("cpu_use") or []
+    if use:
+        tot = sum(u["cpu_sec"] for u in use)
+        cap = (system.get("cpu_count") or 1) * max(float(summary.get("total_sec") or 0), 1.0)
+        log(f"  CPU の使い道（コア時間の合計 {fmt_seconds(tot)}・使える量の {tot / cap:.0%}）：")
+        for u in use:
+            log(f"    {u['kind']}：{fmt_seconds(u['cpu_sec'])}（{u['cpu_sec'] / tot:.0%}）")
     for hint in summary.get("advice") or []:
         log(f"  ヒント: {hint}")
 
