@@ -222,3 +222,30 @@ def test_range_download_hls_segments(tmp_path, monkeypatch):
     common = sorted(set(ref) & set(got))
     assert len(common) >= 70
     assert all(abs(ref[t] - got[t]) < 3 for t in common)
+
+
+def test_mixed_resolution_parts_are_resized(tmp_path, monkeypatch):
+    import json
+
+    import numpy as np
+
+    from vreplay import video as V
+    for name in ("a.mp4", "b.mp4", "c.mp4"):
+        (tmp_path / name).write_bytes(b"x")
+    man = tmp_path / ("v_0_300" + V.PARTS)
+    man.write_text(json.dumps({"video_id": "v", "start": 0, "end": 300, "parts": [
+        {"file": "a.mp4", "offset": 0, "length": 100}, {"file": "b.mp4", "offset": 100, "length": 100},
+        {"file": "c.mp4", "offset": 200, "length": 100}]}), encoding="utf-8")
+    sizes = {"a.mp4": (1920, 1080), "b.mp4": (1280, 720), "c.mp4": (1920, 1080)}
+    real_probe = V.probe
+
+    def fake_probe(p):
+        n = getattr(p, "name", str(p).split("/")[-1])
+        if n in sizes:
+            return (*sizes[n], 112.0)
+        return real_probe(p)
+    monkeypatch.setattr(V, "probe", fake_probe)
+    V._parts_size.cache_clear()
+    assert V._parts_size(man) == (1920, 1080)
+    fr = np.zeros((720, 1280, 3), np.uint8)
+    assert V._fit(fr, (1920, 1080)).shape == (1080, 1920, 3)

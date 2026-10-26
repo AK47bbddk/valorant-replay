@@ -186,6 +186,8 @@ def refine_scores(ocr, frames: list, roi: dict, round_sec: int = 100, need: int 
 
 # ---------------------------------------------------------------- プレイヤーカード
 def _circles(img, x0: int, y0: int):
+    if img is None or img.size == 0 or img.ndim != 3:
+        return []
     g = cv2.medianBlur(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), 3)
     h = img.shape[0]
     c = cv2.HoughCircles(g, cv2.HOUGH_GRADIENT, dp=1, minDist=h * 0.08, param1=120, param2=22,

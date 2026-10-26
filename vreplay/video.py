@@ -164,6 +164,14 @@ def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_hei
                               ensure_ascii=False, indent=1), encoding="utf-8")
     if log:
         log(f"    {parts} 分割で同時に取得しました")
+        try:
+            from collections import Counter
+            sz = Counter(probe(out_dir / e["file"])[:2] for e in entries)
+            if len(sz) > 1:
+                log("    部分ごとに解像度が違います（" + "・".join(f"{w}x{h}×{n}" for (w, h), n in sz.most_common())
+                    + "）。いちばん多い解像度にそろえて解析します")
+        except Exception:
+            pass
     return man
 
 
@@ -282,10 +290,35 @@ def _download_one(video_id: str, start: int, end: int, out_dir: Path, max_height
                        + "\n  ".join(errors))
 
 
+@lru_cache(maxsize=32)
+def _parts_size(path) -> tuple[int, int]:
+    """分割した動画の各部分の解像度のうち、いちばん多いもの。部分ごとに取得方法（クライアント）が変わると
+    1080p と 720p が混ざることがあり、そのままだと切り抜きの座標がずれて空の画像になる。"""
+    from collections import Counter
+    sizes = Counter()
+    for f, _, _ in parts_of(path) or []:
+        try:
+            w, h, _ = probe(f)
+            sizes[(w, h)] += 1
+        except Exception:
+            continue
+    return sizes.most_common(1)[0][0] if sizes else (0, 0)
+
+
+def _fit(fr, size):
+    """フレームを (幅, 高さ) にそろえる。"""
+    if size and size[0] and (fr.shape[1], fr.shape[0]) != tuple(size):
+        import cv2
+        return cv2.resize(fr, tuple(size), interpolation=cv2.INTER_AREA if fr.shape[1] > size[0] else cv2.INTER_LINEAR)
+    return fr
+
+
 def probe(path: Path) -> tuple[int, int, float]:
     ps = parts_of(path)
     if ps:
-        w, h, _ = probe(ps[0][0])
+        w, h = _parts_size(path)
+        if not w:
+            w, h, _ = probe(ps[0][0])
         return w, h, ps[-1][1] + ps[-1][2]
     out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
                           "stream=width,height:format=duration", "-of", "json", str(path)],
@@ -327,6 +360,7 @@ def iter_frames(path: Path, fps: float, start: float = 0.0, duration: float | No
         # 分割した動画：各部分の受け持ち（重なりを除いた範囲）だけを順に読む。時刻は start からの fps の格子にそろえる
         import math
         end = start + duration if duration else ps[-1][1] + ps[-1][2]
+        size = _parts_size(path)
         for f, off, ln in ps:
             a, b = max(start, off), min(end, off + ln)
             if b - a <= 1e-6:
@@ -335,7 +369,7 @@ def iter_frames(path: Path, fps: float, start: float = 0.0, duration: float | No
             if a >= b:
                 continue
             for t, fr in iter_frames(f, fps, a - off, b - a, hwaccel=hwaccel, fallback=fallback):
-                yield t + off, fr
+                yield t + off, _fit(fr, size)
         return
     w, h, _ = probe(path)
     if hwaccel is None:
@@ -381,12 +415,13 @@ def iter_keyframes(path: Path, start: float = 0.0, duration: float | None = None
     ps = parts_of(path)
     if ps:
         end = start + duration if duration else ps[-1][1] + ps[-1][2]
+        size = _parts_size(path)
         for f, off, ln in ps:
             a, b = max(start, off), min(end, off + ln)
             if b - a > 1e-6:
                 for t, fr in iter_keyframes(f, a - off, b - a):
                     if t + off < b:
-                        yield t + off, fr
+                        yield t + off, _fit(fr, size)
         return
     w, h, _ = probe(path)
     cmd = ["ffmpeg", "-v", "info", "-nostdin", "-skip_frame", "nokey", "-ss", f"{start:.3f}"]

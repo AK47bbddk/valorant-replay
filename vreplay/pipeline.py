@@ -565,6 +565,8 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
             if tb is not None:
                 for ti in sorted(table_idxs(r), reverse=True):        # 開始に近いフレームから
                     img = store.get(ti, "table")
+                    if img is None or img.size == 0:
+                        continue
                     # まず名前だけで「表が映っているか」を確かめ、映っているフレームだけ武器を読む
                     rd = read_table(img, tb, X._ocr(), roster, book, {"L": team_left, "R": team_right},
                                     weapons=False)

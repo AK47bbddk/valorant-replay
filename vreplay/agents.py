@@ -163,9 +163,11 @@ def estimate_icon_frac(imgs: list[np.ndarray], mask=None, fracs=None, icons: dic
         f0 = estimate_icon_frac(imgs, mask=mask, background=background)
         if f0 is None:
             return None
-        return estimate_icon_frac(imgs, mask=mask, fracs=list(np.geomspace(f0 * 0.8, f0 * 1.25, 6)),
+        return estimate_icon_frac(imgs, mask=mask, fracs=list(np.geomspace(max(0.028, f0 * 0.85), f0 * 1.2, 5)),
                                   icons=icons, teams=teams, background=background) or f0
-    fracs = list(fracs if fracs is not None else np.geomspace(0.024, 0.075, 13))
+    # 放送のミニマップのアイコンは高さの 3〜6.5% 程度（Riot 1080p で約 0.04、中国の放送で約 0.04、拡大表示で約 0.058）。
+    # それより小さい大きさは何にでも反応してしまうので探さない
+    fracs = list(fracs if fracs is not None else np.geomspace(0.03, 0.065, 10))
     WARM_RANGES, COOL_RANGES = WARM, COOL
     best = None
     for f in fracs:

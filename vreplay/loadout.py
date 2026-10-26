@@ -47,6 +47,8 @@ class Table:
             return None
         y0 = max(0, int(self.rows[0] - 0.5 * self.pitch))
         y1 = min(img.shape[0], int(self.rows[-1] + 0.5 * self.pitch))
+        if y1 - y0 < 4:                     # 表の位置が画像の外（解像度の違うフレームなど）
+            return None
         g = cv2.cvtColor(img[y0:y1], cv2.COLOR_BGR2GRAY)
         g = cv2.resize(g, (128, 40), interpolation=cv2.INTER_AREA).astype(np.float32)
         g -= g.mean()
@@ -56,9 +58,11 @@ class Table:
     def similarity(self, img) -> float:
         """検出に使った表の画像との似かた（-1〜1）。名前や武器が違っても、表の枠や配置が同じなら高い。"""
         ref = self.extra.get("ref")
-        sig = self.signature(img)
-        if ref is None or sig is None:
+        if ref is None:
             return 1.0
+        sig = self.signature(img)
+        if sig is None:                        # 表の位置が画像に収まらない（解像度の違うフレーム）
+            return -1.0
         return float(np.dot(ref, sig))
 
 
