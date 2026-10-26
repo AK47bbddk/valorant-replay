@@ -555,19 +555,50 @@ def _row_sig(crop) -> np.ndarray:
     return (cv2.resize(wm, (192, 12), interpolation=cv2.INTER_AREA) > 80).astype(np.float32)
 
 
+def _box_masks(img: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """キルフィードの行の色の箱（キラー側・被害者側）。明るい青緑と明るい赤。
+    後ろの試合画面の暗い赤（「B Garage」などの場所の表示の背景）や広告は、明るさで外れる。"""
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    h, s_, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    teal = (h >= 72) & (h <= 102) & (s_ >= 40) & (v >= 130)
+    red = ((h <= 10) | (h >= 165)) & (s_ >= 45) & (v >= 160)
+    return teal, red
+
+
 def _feed_color(crop: np.ndarray) -> float:
-    """キルフィードの 1 行らしさ：チーム色（青緑・赤）の画素の割合。行には必ずキラー側・被害者側の色の箱があるが、
-    スポンサーの広告（Red Bull の「WIIINGS.」など）がキルフィードの場所に出たときはほとんど無い。"""
+    """キルフィードの 1 行らしさ：明るいチーム色（青緑・赤）の箱の画素の割合。"""
     if crop is None or crop.size == 0:
         return 0.0
-    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-    h, s_, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
-    teal = (h >= 75) & (h <= 100) & (s_ >= 60) & (v >= 80)
-    red = ((h <= 10) | (h >= 165)) & (s_ >= 80) & (v >= 90)
+    teal, red = _box_masks(crop)
     return float((teal | red).mean())
 
 
 FEED_MIN_COLOR = 0.08
+
+
+def feed_rows(img: np.ndarray, min_h: int = 5) -> list[tuple[int, int, np.ndarray]]:
+    """キルフィードの行を、チーム色の箱（右寄せの青緑・赤の帯）で探す。返り値は killfeed_bands と同じ形
+    [(y0, y1, 特徴)]。キラーと被害者の 2 色がそろった帯、またはスパイクのキルのように 1 色でも幅の広い帯だけを行とし、
+    場所の表示（B Garage）・広告（LAB・WIIINGS.）など白い文字だけの帯は拾わない。"""
+    if img is None or img.size == 0:
+        return []
+    H, W = img.shape[:2]
+    teal, red = _box_masks(img)
+    tf, rf = teal.mean(axis=1), red.mean(axis=1)
+    ok = ((tf + rf >= 0.15) & (np.minimum(tf, rf) >= 0.03)) | (tf + rf >= 0.22)
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    wm = (hsv[..., 2] >= 190) & (hsv[..., 1] <= 60)
+    out, y = [], 0
+    while y < H:
+        if ok[y]:
+            y0 = y
+            while y < H and (ok[y] or (y + 1 < H and ok[y + 1])):
+                y += 1
+            if min_h <= y - y0 <= max(48, 0.3 * H):
+                feat = cv2.resize(wm[y0:y].astype(np.uint8) * 255, (64, 10), interpolation=cv2.INTER_AREA) > 96
+                out.append((y0, y, feat))
+        y += 1
+    return out
 
 
 def kills_in_round(store: FrameStore, idxs: list[int], times: list[float], labels: list[str], roster: Roster,
@@ -590,8 +621,9 @@ def kills_in_round(store: FrameStore, idxs: list[int], times: list[float], label
     cols = [_feed_color(img[max(0, y0 - 2):y1 + 2]) for _, img, bands in frames[:200] for y0, y1, _ in bands]
     colored = bool(cols) and float(np.mean([c >= FEED_MIN_COLOR for c in cols])) >= 0.5
     if colored:
-        frames = [(j, img, [b for b in bands if _feed_color(img[max(0, b[0] - 2):b[1] + 2]) >= FEED_MIN_COLOR])
-                  for j, img, bands in frames]
+        # 色の箱で行を探し直す（白い文字の帯だと、場所の表示や広告の文字も行に数えてしまう）
+        frames = [(j, img, feed_rows(img)) for j, img, _ in frames]
+    boxes_of = {j: [(b[0], b[1]) for b in bands] for j, img, bands in frames} if colored else {}
     use_bands = any(b for _, _, b in frames)
     jobs = []                                   # (j, 画像)
     if use_bands:
@@ -645,7 +677,17 @@ def kills_in_round(store: FrameStore, idxs: list[int], times: list[float], label
         dets = list(ex.map(lambda x: ocr.detect(x[1], min_score=0.3), jobs))
     for (j, img), det in sorted(zip(jobs, dets), key=lambda x: x[0][0]):
         t = times[j]
+        boxes = boxes_of.get(j)
         for row in parse_killfeed(det, img, roster, book):
+            if colored and boxes is not None:
+                # 読んだ行の高さに色の箱があるか。あればその箱の高さで切り抜く（確認用の画像に別のものが写らない）
+                ry0, ry1 = row["box"]
+                cy = (ry0 + ry1) / 2
+                hit = next(((a, b) for a, b in boxes if a - 3 <= cy <= b + 3), None)
+                if hit is None and (row.get("partial") or not row.get("killer")):
+                    continue                          # 片側の名前だけで色の箱も無い行（場所の表示・広告の文字）
+                if hit is not None:
+                    row["box"] = (max(0, hit[0] - 2), min(img.shape[0], hit[1] + 2))
             vkey = norm_name(row["victim"])
             key = (norm_name(row["killer"]), vkey)
             if vkey in victims:

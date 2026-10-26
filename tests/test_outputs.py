@@ -373,3 +373,35 @@ def test_uv_base_round_trip():
     bg[int(y * 200) - 3:int(y * 200) + 4, int(x * 200) - 3:int(x * 200) + 4] = 255
     uv = tactics.uv_base(bg, T, size=200)
     assert uv[150, 50].max() == 255
+
+
+def test_feed_rows_use_colored_boxes_not_location_or_ads():
+    """実際の放送のキルフィード（5 行のキルの間に「B Garage」の場所表示と「LAB」の広告）。"""
+    from pathlib import Path
+
+    import cv2
+    from vreplay.extract import feed_rows
+    im = cv2.imread(str(Path(__file__).parent / "fixtures" / "killfeed_strip_ads.jpg"))
+    rows = [(a, b) for a, b, _ in feed_rows(im)]
+    assert len(rows) == 5
+    assert all(not (a < 18 and b > 5) for a, b in rows)          # B Garage（上端）は行にしない
+    assert all(not (a < 170 and b > 150) for a, b in rows)       # LAB の広告も行にしない
+
+
+def test_unread_card_names_are_filled():
+    from vreplay.pipeline import fill_by_elimination, fix_slot_names
+    roster = {"G2": ["valyn", "trent", "jawgemo", "leaf", "babybay"], "VIT": ["Derke", "Sayonara", "Jamppi", "Chronicle", "kamyk"]}
+    names = [("valyn", "G2"), ("左2", "G2"), ("jawgemo", "G2"), ("leaf", "G2"), ("babybay", "G2"),
+             ("Derke", "VIT"), ("右2", "VIT"), ("右3", "VIT"), ("Chronicle", "VIT"), ("kamyk", "VIT")]
+    out = fill_by_elimination(names, roster)
+    assert out[1] == ("trent", "G2") and out[6][0] == "右2"          # 2 人分からないチームは決めない
+    full = [list(x) for x in fill_by_elimination(names, roster)]
+    good = [list(x) for x in full]
+    good[6], good[7] = ["Sayonara", "VIT"], ["Jamppi", "VIT"]
+    rounds = [{"n": 1, "slot_names": good}, {"n": 2, "slot_names": good},
+              {"n": 3, "slot_names": full, "ults": [{"player": "右2", "slot": "R2", "team": "VIT"}],
+               "ult_ready": ["右3"], "weapons": {"2": [{"player": "右3", "weapon": "Vandal"}]}}]
+    n = fix_slot_names(rounds, {"Sayonara": "Viper", "Jamppi": "Sova"})
+    assert n == 1
+    assert rounds[2]["ults"][0]["player"] == "Sayonara" and rounds[2]["ults"][0]["agent"] == "Viper"
+    assert rounds[2]["ult_ready"] == ["Jamppi"] and rounds[2]["weapons"]["2"][0]["player"] == "Jamppi"

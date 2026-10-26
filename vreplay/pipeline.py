@@ -258,6 +258,69 @@ def slot_names(store, idxs, geo, roster, team_left, team_right,
     return out
 
 
+def _placeholder(nm: str | None) -> bool:
+    return not nm or (len(nm) <= 2 and nm[0] in "左右")
+
+
+def fill_by_elimination(names: list[tuple[str, str]], roster: dict[str, list[str]]) -> list[tuple[str, str]]:
+    """カードの名前が 1 枚だけ読めなかったら、そのチームの 5 人のうち残った 1 人を当てる。
+    roster: {チーム名: [選手名×5]}"""
+    out = list(names)
+    for team, players in roster.items():
+        idx = [i for i, (nm, tm) in enumerate(out) if tm == team]
+        unknown = [i for i in idx if _placeholder(out[i][0])]
+        used = {out[i][0] for i in idx if not _placeholder(out[i][0])}
+        rest = [p for p in players if p not in used]
+        if len(unknown) == 1 and len(rest) == 1:
+            out[unknown[0]] = (rest[0], team)
+    return out
+
+
+def fix_slot_names(rounds: list[dict], agent: dict[str, str]) -> int:
+    """ラウンドをまたいで、カードの並び（チーム内の何枚目か）→ 選手名を多数決し、名前が読めず「左2」のままの
+    カードを埋める。ULT・ULT が溜まっている人・武器の「左2」も選手名に直す。返り値は直した数。
+    （放送のカードの並びは 1 マップの中で変わらない。前半・後半で左右は入れ替わるので、チーム × 何枚目で数える）"""
+    from collections import Counter
+    votes: dict[tuple[str, int], Counter] = {}
+    for rr in rounds:
+        for i, (nm, tm) in enumerate(rr.get("slot_names") or []):
+            if not _placeholder(nm):
+                votes.setdefault((tm, i % 5), Counter())[nm] += 1
+    fixed = 0
+    for rr in rounds:
+        sn = [tuple(x) for x in rr.get("slot_names") or []]
+        if not sn:
+            continue
+        used = {nm for nm, _ in sn if not _placeholder(nm)}
+        rename = {}
+        for i, (nm, tm) in enumerate(sn):
+            if not _placeholder(nm):
+                continue
+            c = votes.get((tm, i % 5))
+            if not c:
+                continue
+            cand, cnt = c.most_common(1)[0]
+            if cand not in used and cnt >= 2:
+                rename[nm] = cand
+                sn[i] = (cand, tm)
+                used.add(cand)
+        if not rename:
+            continue
+        rr["slot_names"] = [list(x) for x in sn]
+        for u in rr.get("ults") or []:
+            if u.get("player") in rename:
+                u["player"] = rename[u["player"]]
+                u["agent"] = agent.get(u["player"]) or u.get("agent")
+                fixed += 1
+        rr["ult_ready"] = [rename.get(x, x) for x in rr.get("ult_ready") or []]
+        for lst in (rr.get("weapons") or {}).values():
+            for w in lst:
+                if w.get("player") in rename:
+                    w["player"] = rename[w["player"]]
+                    w["agent"] = agent.get(w["player"]) or w.get("agent")
+    return fixed
+
+
 def _has_gpu() -> bool:
     return bool(shutil.which("nvidia-smi"))
 
@@ -366,6 +429,8 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
         cap_fut = cap_ex.submit(CC.fetch, md.vod_id, video_cache_dir(cfg), resolve_cookies(cfg), _ytdlp_env())
     roster = X.Roster([(p.name, m.team1 if p.team == 1 else m.team2) for p in md.players])
     agent = {p.name: p.agent for p in md.players}
+    team_players = {m.team1: [p.name for p in md.players if p.team == 1],
+                    m.team2: [p.name for p in md.players if p.team == 2]}
     with perf.stage("calibrate", tag=tag, label="キャリブレーション") as st_cal:
         roi, geo, geo_buy, _, msg, (W, H, dur) = calibrate(cfg, path, md, roster, log=log)
     t_cal = st_cal["seconds"]
@@ -638,10 +703,13 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
 
             # ラウンド開始直後の安定したフレームから名前を多数決（購入前UIの名前は使わない）
             name_idxs = [r.first_idx] if r.first_idx is not None else []
-            name_idxs += [i for i in r.live if t[i] >= r.t_drop + 1.5][:3]
+            # 開始直後の 2 枚に加え、ラウンド中の離れた時刻も見る（観戦画面の切り替えで一瞬隠れても読めるように）
+            later = [i for i in r.live if t[i] >= r.t_drop + 1.5]
+            name_idxs += later[:2] + later[len(later) // 3::max(1, len(later) // 3)][:2]
             name_idxs = list(dict.fromkeys(i for i in name_idxs if i is not None))
             names_live = slot_names(store, name_idxs, geo, roster, team_left, team_right) if geo else []
-            names = names_live
+            names = fill_by_elimination(names_live, team_players) if names_live else names_live
+            rr["slot_names"] = [list(x) for x in names]
             kills, strip = X.kills_in_round(store, fidx, times, labels, roster, book, out_dir / f"r{r.n:02d}_kills.jpg")
             n_feed = len(kills)
             # それでも武器が分からない選手は、キルフィードでその選手が使った武器で補う
@@ -716,6 +784,9 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                         fut.result()
                     except Exception:
                         traceback.print_exc()
+        n_fix = fix_slot_names(rep["rounds"], agent)
+        if n_fix:
+            log(f"    カードの名前が読めなかった ULT {n_fix} 件を、ほかのラウンドの同じ位置のカードの名前で補いました")
         log(f"    ラウンドごとの素材 {len(det)} ラウンド {perf.fmt_seconds(st_assets['seconds'])}"
             f"｜{perf.fmt_resources(st_assets['resources'])}")
         found = {r.n for r in det}
