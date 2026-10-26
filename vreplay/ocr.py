@@ -270,3 +270,75 @@ class CachedReader:
                     self.vals.append(v)
             self.mat = np.stack(self.keys) if self.keys else None
         return out
+
+
+_TL = threading.local()
+
+
+def thread_stats() -> dict:
+    """このスレッドが OCR で使った時間（空きを待った秒・実行した秒・回数）。素材づくりの内訳のログ用。"""
+    return {"wait": getattr(_TL, "wait", 0.0), "run": getattr(_TL, "run", 0.0), "n": getattr(_TL, "n", 0)}
+
+
+class OCRPool:
+    """同じモデルの OCR を最大 size 個まで作って、空いているものに振り分ける。
+
+    1 つの OCR はロックで 1 本ずつしか動かない（前処理・後処理の CPU の時間も GPU は空く）ので、
+    複数のマップの素材づくりが重なると、全部がその 1 本を待つ。結果は 1 つのときと同じ。
+    """
+
+    def __init__(self, size: int = 2, factory=None):
+        import queue
+        self.size = max(1, int(size))
+        self._factory = factory or OCR
+        self._all: list = []
+        self._free = queue.Queue()
+        self._lock = threading.Lock()
+
+    def resize(self, size: int):
+        self.size = max(self.size, int(size))      # 減らすことはしない（作ったものは使い回す）
+
+    def _get(self):
+        import queue
+        try:
+            return self._free.get_nowait()
+        except queue.Empty:
+            pass
+        with self._lock:
+            if len(self._all) < self.size:
+                o = self._factory()
+                self._all.append(o)
+                return o
+        return self._free.get()
+
+    def _use(self, fn):
+        import time
+        t0 = time.perf_counter()
+        o = self._get()
+        t1 = time.perf_counter()
+        try:
+            return fn(o)
+        finally:
+            t2 = time.perf_counter()
+            self._free.put(o)
+            _TL.wait = getattr(_TL, "wait", 0.0) + (t1 - t0)
+            _TL.run = getattr(_TL, "run", 0.0) + (t2 - t1)
+            _TL.n = getattr(_TL, "n", 0) + 1
+
+    def rec(self, imgs: list) -> list[tuple[str, float]]:
+        return self._use(lambda o: o.rec(imgs))
+
+    def detect(self, img, min_score: float = 0.5):
+        return self._use(lambda o: o.detect(img, min_score))
+
+    @property
+    def calls(self) -> int:
+        return sum(o.calls for o in self._all)
+
+    @property
+    def gpu(self) -> bool:
+        return bool(self._all) and all(o.gpu for o in self._all)
+
+    @property
+    def note(self) -> str:
+        return next((o.note for o in self._all if o.note), "")

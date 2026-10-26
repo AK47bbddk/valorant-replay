@@ -498,16 +498,26 @@ def parse_killfeed(dets, img, roster: Roster, book=None) -> list[dict]:
 
 _OCR_LOCK = threading.Lock()
 _OCR_SHARED = None
+_OCR_POOL_SIZE = 2
+
+
+def set_ocr_pool(size: int):
+    """メインのプロセスで使う OCR の数（複数のマップの素材づくりを同時に進めるとき）。"""
+    global _OCR_POOL_SIZE
+    with _OCR_LOCK:
+        _OCR_POOL_SIZE = max(1, int(size))
+        if _OCR_SHARED is not None:
+            _OCR_SHARED.resize(_OCR_POOL_SIZE)
 
 
 def _ocr():
-    """プロセスで 1 つの OCR を共有する（スレッドごとに読むとモデルの読み込みとスレッドの取り合いで遅くなる）。
-    OCR 側でロックしているので、複数スレッドから呼んでも安全。"""
+    """プロセスで共有する OCR（同じモデルを最大 _OCR_POOL_SIZE 個。空いているものに振り分ける）。
+    モデルは同時に要るときだけ 1 つずつ増やす。複数スレッドから呼んでも安全で、結果は 1 つのときと同じ。"""
     global _OCR_SHARED
     with _OCR_LOCK:
         if _OCR_SHARED is None:
-            from .ocr import OCR
-            _OCR_SHARED = OCR()
+            from .ocr import OCRPool
+            _OCR_SHARED = OCRPool(_OCR_POOL_SIZE)
     return _OCR_SHARED
 
 

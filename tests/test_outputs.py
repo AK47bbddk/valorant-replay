@@ -472,3 +472,38 @@ def test_failed_map_is_retried_without_force(tmp_path, monkeypatch):
     broken.clear()
     reps = pipeline.run(cfg, day=date(2026, 10, 21), log=lambda *a: None)
     assert calls == ["Split"] and all(r.get("video_ok") for r in reps)
+
+
+def test_ocr_pool_runs_in_parallel_up_to_size():
+    """OCR を複数持って、空いているものに振り分ける（同時に動くのは size 個まで・結果は同じ）。"""
+    import threading
+    import time as _t
+    from concurrent.futures import ThreadPoolExecutor
+
+    from vreplay.ocr import OCRPool, thread_stats
+    live, peak, made, lock = [0], [0], [], threading.Lock()
+
+    class Fake:
+        calls, gpu, note = 0, True, ""
+
+        def __init__(self):
+            made.append(self)
+
+        def rec(self, imgs):
+            with lock:
+                live[0] += 1
+                peak[0] = max(peak[0], live[0])
+            _t.sleep(0.05)
+            with lock:
+                live[0] -= 1
+            self.calls += 1
+            return [(str(i), 1.0) for i in imgs]
+
+    pool = OCRPool(2, factory=Fake)
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        outs = list(ex.map(lambda k: pool.rec([k]), range(12)))
+    assert outs == [[(str(k), 1.0)] for k in range(12)]
+    assert peak[0] == 2 and len(made) == 2 and pool.calls == 12
+    pool.rec([0])
+    st = thread_stats()
+    assert st["n"] >= 1 and st["run"] > 0

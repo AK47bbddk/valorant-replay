@@ -103,9 +103,11 @@ notion:
   rounds_db: true
 
 pipeline:
-  # 同時に解析するマップ数。HUD スキャン（CPU・GPU をいちばん使う段階）は scan_slots 本までに抑え、
+  # 同時に解析するマップ数。HUD スキャン（CPU をほぼ使い切る段階）は scan_slots 本までに抑え、
   # ほかの段階（ミニマップ・ラウンド素材・Notion 書き込み・動画の取得）を重ねて、待ち時間を埋める。
-  # Colab の T4（VRAM 15GB・RAM 51GB）なら 2 が目安。メモリが足りなければ 1 に戻す。
-  map_workers: 2
+  # Colab の T4（8 コア・VRAM 15GB・RAM 51GB）では、スキャン 1 本で CPU が 85〜98% になるので scan_slots は 1、
+  # map_workers は 3 が上限の目安（4 以上はスキャンの順番待ちが増えるだけ）。メモリが足りなければ 2 か 1 に。
+  map_workers: 3
   scan_slots: 1
+  ocr_pool: 0           # メインのプロセスで同時に動かす OCR の数（0 = map_workers + 1）。結果は 1 つのときと同じ
   prefetch_maps: 2      # 解析中のマップに加えて、何マップ先まで動画を先に取っておくか（ディスクを埋めないように）

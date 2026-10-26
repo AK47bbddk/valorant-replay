@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -22,6 +23,7 @@ from pathlib import Path
 import numpy as np
 
 from . import db, perf, report, vlr
+from . import ocr as ocr_mod
 from .notion import Notion, how_ja, upsert_match, write_map_page
 
 JST = vlr.JST
@@ -606,7 +608,35 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
             log(f"    ULT の読み取りが当てにならないカード {','.join(('L' if s_ < 5 else 'R') + str(s_ % 5 + 1) for s_ in sorted(bad_ult))}"
                 "（ピストルラウンドでも溜まって見える）→ このカードの ULT は出しません")
 
+        seg_tot, seg_lock = Counter(), threading.Lock()
+
+        @contextlib.contextmanager
+        def seg(name):
+            t0_ = time.perf_counter()
+            try:
+                yield
+            finally:
+                with seg_lock:
+                    seg_tot[name] += time.perf_counter() - t0_
+
+        def lap(name, t0_):
+            t1_ = time.perf_counter()
+            with seg_lock:
+                seg_tot[name] += t1_ - t0_
+            return t1_
+
         def work(r):
+            o0 = ocr_mod.thread_stats()
+            try:
+                _work(r)
+            finally:
+                o1 = ocr_mod.thread_stats()
+                with seg_lock:
+                    seg_tot["OCR の空き待ち"] += o1["wait"] - o0["wait"]
+                    seg_tot["OCR 実行"] += o1["run"] - o0["run"]
+                    seg_tot["OCR 回数"] += o1["n"] - o0["n"]
+
+        def _work(r):
             rr = by_n.get(r.n)
             if rr is None:
                 return
@@ -615,6 +645,7 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
             times = [t[i] for i in r.live]
             labels = [X.clock(timer[i]) for i in r.live]
             a = rr["assets"]
+            t_seg = time.perf_counter()
             if r.first_idx is not None:
                 p = X.save_still(store.get_nearest(obs["idx"][r.first_idx], "minimap"),
                                  out_dir / f"r{r.n:02d}_start.jpg")
@@ -622,6 +653,7 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
             g = X.make_gif(store, fidx, labels, out_dir / f"r{r.n:02d}_minimap.gif", r.n, fps,
                            ocfg["gif_speed"], ocfg["gif_width"], ocfg["gif_max_frames"], times=times)
             a["minimap_gif"] = str(g) if g else None
+            t_seg = lap("GIF・静止画", t_seg)
             wi = r.buy_idx if r.buy_idx is not None else r.first_idx
             widx = obs["idx"][wi] if wi is not None else None
 
@@ -702,16 +734,20 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                     rr["weapons_source"] = "試合中のカード"
                     rr["notes"].append("装備表が映っていなかったため、武器は試合中のカードから読みました")
 
+            lap("装備表・武器", t_seg)
             # ラウンド開始直後の安定したフレームから名前を多数決（購入前UIの名前は使わない）
             name_idxs = [r.first_idx] if r.first_idx is not None else []
             # 開始直後の 2 枚に加え、ラウンド中の離れた時刻も見る（観戦画面の切り替えで一瞬隠れても読めるように）
             later = [i for i in r.live if t[i] >= r.t_drop + 1.5]
             name_idxs += later[:2] + later[len(later) // 3::max(1, len(later) // 3)][:2]
             name_idxs = list(dict.fromkeys(i for i in name_idxs if i is not None))
-            names_live = slot_names(store, name_idxs, geo, roster, team_left, team_right) if geo else []
+            with seg("カードの名前"):
+                names_live = slot_names(store, name_idxs, geo, roster, team_left, team_right) if geo else []
             names = fill_by_elimination(names_live, team_players) if names_live else names_live
             rr["slot_names"] = [list(x) for x in names]
-            kills, strip = X.kills_in_round(store, fidx, times, labels, roster, book, out_dir / f"r{r.n:02d}_kills.jpg")
+            with seg("キルフィード"):
+                kills, strip = X.kills_in_round(store, fidx, times, labels, roster, book,
+                                                out_dir / f"r{r.n:02d}_kills.jpg")
             n_feed = len(kills)
             # それでも武器が分からない選手は、キルフィードでその選手が使った武器で補う
             used = {}
@@ -790,6 +826,9 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
             log(f"    カードの名前が読めなかった ULT {n_fix} 件を、ほかのラウンドの同じ位置のカードの名前で補いました")
         log(f"    ラウンドごとの素材 {len(det)} ラウンド {perf.fmt_seconds(st_assets['seconds'])}"
             f"｜{perf.fmt_resources(st_assets['resources'])}")
+        n_ocr = int(seg_tot.pop("OCR 回数", 0))
+        log("    素材の内訳（各スレッドの合計）：" + "・".join(
+            f"{k} {perf.fmt_seconds(v)}" for k, v in seg_tot.items() if v >= 0.5) + f"（OCR {n_ocr} 回）")
         found = {r.n for r in det}
         if cap_fut is not None:
             try:
@@ -1000,6 +1039,8 @@ def _run_body(cfg: dict, days, match_urls, no_video, force, upsert_only, log, t0
     pcfg = cfg.get("pipeline") or {}
     map_workers = max(1, int(pcfg.get("map_workers") or 1))
     _SCAN_SLOT = threading.BoundedSemaphore(max(1, int(pcfg.get("scan_slots") or 1)))
+    from . import extract as _X
+    _X.set_ocr_pool(int(pcfg.get("ocr_pool") or map_workers + 1))
 
     token = os.environ.get("NOTION_TOKEN")
     nt = Notion(token) if token and cfg["notion"]["enabled"] else None
@@ -1092,7 +1133,16 @@ def _run_body(cfg: dict, days, match_urls, no_video, force, upsert_only, log, t0
     writer = ThreadPoolExecutor(max_workers=2 if map_workers > 1 else 1)
     writes, w_lock = [], threading.Lock()
 
+    busy = []                                         # 各マップの解析にかかった秒（取得の待ちを含む）
+
     def process(i: int):
+        t_map = time.perf_counter()
+        try:
+            return _process(i)
+        finally:
+            busy.append(time.perf_counter() - t_map)
+
+    def _process(i: int):
         day, m, md, map_dir, page = todo[i]
         ensure_downloads(i + ahead)
         short = f"{m.team1[:10]}-{m.team2[:10]} {md.name}"
@@ -1143,8 +1193,14 @@ def _run_body(cfg: dict, days, match_urls, no_video, force, upsert_only, log, t0
                 writes.append(writer.submit(write))
         return day, rep
 
+    t_an = time.perf_counter()
     with ThreadPoolExecutor(max_workers=map_workers) as ex:
         results = list(ex.map(process, range(len(todo))))
+    if todo and not no_video:
+        wall = time.perf_counter() - t_an
+        log(f"解析：{len(todo)} マップを {perf.fmt_seconds(wall)}（1 マップあたり {perf.fmt_seconds(wall / len(todo))}）"
+            f"・マップごとの時間の合計 {perf.fmt_seconds(sum(busy))} → 同時に平均 {sum(busy) / max(wall, 1e-6):.1f} マップ"
+            f"（設定 {map_workers}）")
     for day, rep in results:
         reports.setdefault(day, []).append(rep)
     dl.shutdown(wait=False, cancel_futures=True)
