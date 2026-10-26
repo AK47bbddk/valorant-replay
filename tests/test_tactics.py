@@ -184,6 +184,8 @@ def test_analyze_video_aligns_minimap_and_reads_plant_site(tmp_path, monkeypatch
     su1 = tac["rounds"]["1"]["setups"]["1"]
     assert su1["source"] == "agents" and su1["shape"].startswith("A") and su1["who"]
     assert (tmp_path / "o" / "_tactics" / "board_r01_115.jpg").exists()
+    assert (tmp_path / "o" / "_tactics" / "board_r01_140.jpg").exists()          # 開始直後
+    assert tac["rounds"]["1"]["boards"].get("1:40")
     assert (tmp_path / "o" / "_tactics" / "agents_check.jpg").exists()
     assert tac["aligned"], tac["calibration"]
     assert tac["warm_team1"] is True

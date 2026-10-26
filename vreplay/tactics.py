@@ -254,7 +254,7 @@ def _calibrate(early: list[dict], spawns: dict, log=print) -> tuple[int, bool, f
 
 # ---------------------------------------------------------------- 動画の解析
 # ラウンドの経過秒 → タイマー表示（1:40 始まり）。プレイブックの「1:00 までに MID から減らす」などに使う
-MARKS = {"1:30": 10, "1:15": 25, "1:00": 40, "0:40": 60, "0:20": 80}
+MARKS = {"1:40": 1, "1:30": 10, "1:15": 25, "1:00": 40, "0:40": 60, "0:20": 80}   # 開始からの秒
 ZONE_JA = {"attacker side": "攻撃側", "defender side": "防衛側"}
 
 
@@ -906,7 +906,7 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
                          "score": round(f["score"], 2), "color": team_color.get(f["team"])})
         out.setdefault(str(n), {})[label] = ents
         rt = round_tac.get(n)
-        if rt is not None and ents and out_dir and label in ("1:30", "1:15"):
+        if rt is not None and ents and out_dir and label in ("1:40", "1:15"):   # 開始直後と初動
             # 配置図は放送のミニマップ（背景の中央値）の上に、見つけた場所そのままで描く。
             # マップ画像（valorant-api）に変換して描くと、マップによって座標の基準が違いズレることがあった
             p = Path(out_dir) / "_tactics" / f"board_r{n:02d}_{label.replace(':', '')}.jpg"
