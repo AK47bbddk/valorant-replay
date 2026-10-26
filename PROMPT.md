@@ -185,6 +185,8 @@ vreplay playbook --sync --team G2 --map Split
 - `pipeline.map_workers`（既定 2）でマップを同時に解析。HUD スキャンは `_SCAN_SLOT`（`scan_slots`、既定 1）で同時実行を制限し、
   ほかの段階を重ねる。動画は解析中＋`prefetch_maps` マップ先までだけ先に取る。Notion 書き込みは裏で 2 本まで。
   ウェアハウス（SQLite）はスレッド間で共有するのでロック付き・check_same_thread=False。
+- 取得した部分ファイルに映像が入っていない（途中で切れた）ときは 1 回だけ取り直し、それでもだめならその部分を飛ばして解析する
+  （`video.has_video`）。全部だめなら「映像が入っていない」とはっきりしたエラーにして、そのマップだけ失敗にする。
 
 ## 非機能要件
 

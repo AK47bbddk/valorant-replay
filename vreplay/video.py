@@ -149,12 +149,29 @@ def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_hei
     from concurrent.futures import ThreadPoolExecutor
     bounds = [int(round(start + (end - start) * k / parts)) for k in range(parts + 1)]
     pieces = [(bounds[k], min(end, bounds[k + 1] + overlap)) for k in range(parts)]
+    def get(se, retry=True):
+        f = _download_one(video_id, se[0], se[1], out_dir, max_height, cookies, cache_dirs, None, fragments)
+        if has_video(f) or not retry:
+            return f
+        # 映像の入っていない部分（途中で切れた・音声だけ）は消して 1 回だけ取り直す
+        if Path(f).parent == out_dir:
+            Path(f).unlink(missing_ok=True)
+        if log:
+            log(f"    部分 {se[0]}〜{se[1]} 秒に映像が無かったので取り直します")
+        return get(se, retry=False)
+
     with ThreadPoolExecutor(max_workers=parts) as ex:
-        files = list(ex.map(lambda se: _download_one(video_id, se[0], se[1], out_dir, max_height, cookies,
-                                                     cache_dirs, None, fragments), pieces))
+        files = list(ex.map(get, pieces))
     man = out_dir / f"{video_id}_{start}_{end}{PARTS}"
     entries = []
+    bad = [k for k, f in enumerate(files) if not has_video(f)]
+    if bad and log:
+        log(f"    {len(bad)} 個の部分は取り直しても映像が無かったので、その区間を除いて解析します")
+    if len(bad) == len(files):
+        raise RuntimeError("取得した動画に映像がありません（すべての部分）")
     for k, (f, (a, _)) in enumerate(zip(files, pieces)):
+        if k in bad:
+            continue
         if Path(f).parent != out_dir:                  # キャッシュ側にあった部分はこちらへコピー
             dst = out_dir / Path(f).name
             shutil.copy(f, dst)
@@ -324,8 +341,19 @@ def probe(path: Path) -> tuple[int, int, float]:
                           "stream=width,height:format=duration", "-of", "json", str(path)],
                          capture_output=True, text=True, check=True).stdout
     j = json.loads(out)
+    if not j.get("streams"):
+        raise RuntimeError(f"映像が入っていないファイルです（取得の途中で切れた可能性）: {Path(path).name}")
     s = j["streams"][0]
     return int(s["width"]), int(s["height"]), float(j.get("format", {}).get("duration") or 0)
+
+
+def has_video(path: Path) -> bool:
+    """映像のストリームがあり、幅・高さが読めるファイルか（壊れた・音声だけの部分を見つける）。"""
+    try:
+        w, h, _ = probe(Path(path))
+        return w > 0 and h > 0
+    except Exception:
+        return False
 
 
 @lru_cache(maxsize=1)
@@ -367,6 +395,8 @@ def iter_frames(path: Path, fps: float, start: float = 0.0, duration: float | No
                 continue
             a = start + math.ceil((a - start) * fps - 1e-6) / fps
             if a >= b:
+                continue
+            if not has_video(f):                # 壊れた部分は飛ばす（その区間だけ欠ける）
                 continue
             for t, fr in iter_frames(f, fps, a - off, b - a, hwaccel=hwaccel, fallback=fallback):
                 yield t + off, _fit(fr, size)
@@ -418,7 +448,7 @@ def iter_keyframes(path: Path, start: float = 0.0, duration: float | None = None
         size = _parts_size(path)
         for f, off, ln in ps:
             a, b = max(start, off), min(end, off + ln)
-            if b - a > 1e-6:
+            if b - a > 1e-6 and has_video(f):
                 for t, fr in iter_keyframes(f, a - off, b - a):
                     if t + off < b:
                         yield t + off, _fit(fr, size)

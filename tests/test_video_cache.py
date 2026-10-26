@@ -249,3 +249,30 @@ def test_mixed_resolution_parts_are_resized(tmp_path, monkeypatch):
     assert V._parts_size(man) == (1920, 1080)
     fr = np.zeros((720, 1280, 3), np.uint8)
     assert V._fit(fr, (1920, 1080)).shape == (1080, 1920, 3)
+
+
+def test_broken_part_is_skipped(tmp_path, monkeypatch):
+    import json
+
+    import numpy as np
+
+    from vreplay import video as V
+    for name in ("a.mp4", "b.mp4"):
+        (tmp_path / name).write_bytes(b"x")
+    man = tmp_path / ("w_0_200" + V.PARTS)
+    man.write_text(json.dumps({"video_id": "w", "start": 0, "end": 200, "parts": [
+        {"file": "a.mp4", "offset": 0, "length": 100}, {"file": "b.mp4", "offset": 100, "length": 100}]}),
+        encoding="utf-8")
+    monkeypatch.setattr(V, "has_video", lambda p: str(p).endswith("a.mp4"))
+    real = V.iter_keyframes
+
+    def fake_kf(path, start=0.0, duration=None):
+        if str(path).endswith(".mp4"):
+            assert str(path).endswith("a.mp4"), "壊れた部分を読もうとした"
+            yield start, np.zeros((4, 4, 3), np.uint8)
+            return
+        yield from real(path, start, duration)
+    monkeypatch.setattr(V, "iter_keyframes", fake_kf)
+    monkeypatch.setattr(V, "_parts_size", lambda p: (4, 4))
+    got = list(V.iter_keyframes(man, 0, 200))
+    assert len(got) == 1 and got[0][0] == 0
