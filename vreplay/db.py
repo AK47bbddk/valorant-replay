@@ -204,11 +204,11 @@ def connect(path: str | Path, rebuild_root: str | Path | None = None, log=print)
             Path(str(local) + ext).unlink(missing_ok=True)
         if path.exists():
             shutil.copyfile(path, local)
-        conn = sqlite3.connect(str(local), timeout=60, factory=_SyncedConnection)
+        conn = sqlite3.connect(str(local), timeout=60, factory=_SyncedConnection, check_same_thread=False)
         conn.remote = path
         conn._dirty = not path.exists()
     else:
-        conn = sqlite3.connect(str(path), timeout=60)
+        conn = sqlite3.connect(str(path), timeout=60, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA journal_mode=WAL" if not on_drive else "PRAGMA journal_mode=DELETE")

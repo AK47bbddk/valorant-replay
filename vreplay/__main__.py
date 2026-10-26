@@ -40,6 +40,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run")
     r.add_argument("--date", default="yesterday", help="YYYY-MM-DD（JST）または yesterday")
+    r.add_argument("--to", dest="date_to", help="この日まで（--date からの複数日をまとめて 1 回で処理）")
     r.add_argument("--match", nargs="*", help="VLR の試合 URL（指定時は日付より優先）")
     r.add_argument("--no-video", action="store_true")
     r.add_argument("--force", action="store_true", help="作成済みのページも作り直す")
@@ -105,7 +106,13 @@ def main():
     if a.cmd == "run":
         day = None if a.date == "yesterday" else parse_day(a.date)
         from .pipeline import run
-        run(cfg, day=day, match_urls=a.match, no_video=a.no_video, force=a.force, upsert_only=a.upsert_only)
+        days = None
+        if a.date_to:
+            from datetime import timedelta
+            d0, d1 = day or (date.today() - timedelta(days=1)), parse_day(a.date_to)
+            days = [d0 + timedelta(days=k) for k in range((d1 - d0).days + 1)]
+        run(cfg, day=day, match_urls=a.match, no_video=a.no_video, force=a.force, upsert_only=a.upsert_only,
+            days=days)
     elif a.cmd == "fetch":
         day = None if a.date == "yesterday" else parse_day(a.date)
         from .pipeline import fetch

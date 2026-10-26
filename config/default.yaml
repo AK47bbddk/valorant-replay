@@ -33,7 +33,7 @@ video:
   scan_mode: auto
   fast_keyframe_interval: 2.5
   max_keyframe_interval: 6
-  download_workers: 1    # 同時にダウンロードするマップ数。1 なら 1 マップずつ全力で取り、解析中に次のマップを取る
+  download_workers: 2    # 同時にダウンロードするマップ数（pipeline.map_workers と同じくらいに）
   download_method: sections # sections：区間を分けて yt-dlp で同時に取る（Colab で安定）／range：DASH・HLS の必要な範囲だけを取る（PO トークンの要らない形式が返るときだけ速い）
   download_threads: 16   # range のときの同時接続数（YouTube は 1 本を 1 MB/s 前後に絞るので本数で稼ぐ）
   download_parts: 16     # sections のとき（range が使えないとき）に区間をいくつに分けて同時に取るか
@@ -101,3 +101,11 @@ notion:
   rounds_parent: ""
   rounds_data_source: ""
   rounds_db: true
+
+pipeline:
+  # 同時に解析するマップ数。HUD スキャン（CPU・GPU をいちばん使う段階）は scan_slots 本までに抑え、
+  # ほかの段階（ミニマップ・ラウンド素材・Notion 書き込み・動画の取得）を重ねて、待ち時間を埋める。
+  # Colab の T4（VRAM 15GB・RAM 51GB）なら 2 が目安。メモリが足りなければ 1 に戻す。
+  map_workers: 2
+  scan_slots: 1
+  prefetch_maps: 2      # 解析中のマップに加えて、何マップ先まで動画を先に取っておくか（ディスクを埋めないように）

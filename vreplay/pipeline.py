@@ -460,7 +460,8 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                     else "full")
         elif mode in ("fast", "rounds") and ki is None:
             mode = "full"
-        with perf.stage("scan", tag=tag, label="HUD スキャン") as st_scan:
+        # HUD スキャンは CPU・GPU をいちばん使うので、同時に走らせるのは scan_slots 本まで（ほかの段階は重ねる）
+        with _SCAN_SLOT, perf.stage("scan", tag=tag, label="HUD スキャン") as st_scan:
             if mode in ("fast", "rounds"):
                 # 1 パス目：キーフレームだけ読む（全フレームのデコードより 10 倍以上速い）。
                 #   fast   … キーフレームの画像をそのままミニマップ・キルフィード・カードに使う
@@ -847,12 +848,16 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
             shutil.rmtree(store.root, ignore_errors=True)
 
 
+_SCAN_SLOT = threading.BoundedSemaphore(1)
+
+
 class _Warehouse:
     """毎日の実行で、試合のメタデータ（VLR）と解析結果（report.json）をウェアハウスに入れる。
     失敗しても本体（Notion・HTML）は止めない。"""
 
     def __init__(self, cfg: dict, log=print):
         self.log, self.conn, self.n = log, None, 0
+        self.lock = threading.Lock()                   # 複数のマップを同時に解析するので、書き込みは 1 本ずつ
         if (cfg.get("warehouse") or {}).get("enabled", True) is False:
             return
         try:
@@ -864,8 +869,9 @@ class _Warehouse:
         if self.conn is None:
             return
         try:
-            db.upsert_match(self.conn, m)
-            self.conn.commit()
+            with self.lock:
+                db.upsert_match(self.conn, m)
+                self.conn.commit()
         except Exception as e:
             self.log(f"  ウェアハウスへの試合登録に失敗: {e}")
 
@@ -873,9 +879,10 @@ class _Warehouse:
         if self.conn is None or not rep or "match_id" not in rep:
             return
         try:
-            db.ingest_report(self.conn, rep)
-            self.conn.commit()
-            self.n += 1
+            with self.lock:
+                db.ingest_report(self.conn, rep)
+                self.conn.commit()
+                self.n += 1
         except Exception as e:
             self.log(f"  ウェアハウスへの取り込みに失敗: {e}")
 
@@ -974,20 +981,25 @@ def _fetch_body(cfg: dict, day, match_urls, log, t0) -> list[Path]:
 
 
 def run(cfg: dict, day: date | None = None, match_urls: list[str] | None = None, no_video: bool = False,
-        force: bool = False, upsert_only: bool = False, log=print) -> list[dict]:
-    """upsert_only=True：Notion の試合行・マップ行だけ更新し、本文や動画解析はしない（GitHub Actions 用）。"""
+        force: bool = False, upsert_only: bool = False, log=print, days: list[date] | None = None) -> list[dict]:
+    """upsert_only=True：Notion の試合行・マップ行だけ更新し、本文や動画解析はしない（GitHub Actions 用）。
+    days を渡すと複数日をまとめて 1 回で処理する（日の切れ目で待たずに、取得・解析・Notion 書き込みを重ね続ける）。"""
     perf.start()
     t0 = time.time()
     try:
-        return _run_body(cfg, day, match_urls, no_video, force, upsert_only, log, t0)
+        return _run_body(cfg, days or [day], match_urls, no_video, force, upsert_only, log, t0)
     finally:
         perf.stop()
 
 
-def _run_body(cfg: dict, day, match_urls, no_video, force, upsert_only, log, t0) -> list[dict]:
-    day = day or (datetime.now(JST).date() - timedelta(days=1))
-    out_root = Path(cfg["output"]["dir"]) / day.isoformat()
-    out_root.mkdir(parents=True, exist_ok=True)
+def _run_body(cfg: dict, days, match_urls, no_video, force, upsert_only, log, t0) -> list[dict]:
+    global _SCAN_SLOT
+    days = [d or (datetime.now(JST).date() - timedelta(days=1)) for d in days]
+    if match_urls:
+        days = days[:1]
+    pcfg = cfg.get("pipeline") or {}
+    map_workers = max(1, int(pcfg.get("map_workers") or 1))
+    _SCAN_SLOT = threading.BoundedSemaphore(max(1, int(pcfg.get("scan_slots") or 1)))
 
     token = os.environ.get("NOTION_TOKEN")
     nt = Notion(token) if token and cfg["notion"]["enabled"] else None
@@ -998,67 +1010,89 @@ def _run_body(cfg: dict, day, match_urls, no_video, force, upsert_only, log, t0)
     # プレイブック用のウェアハウス（SQLite）。毎日の実行でも試合と解析結果をためていく
     wh = _Warehouse(cfg, log)
 
-    # 1) 対象マップを決めて Notion の行を作る
-    todo, reports = [], []
+    # 1) 対象マップを決めて Notion の行を作る（複数日ならまとめて）
+    todo, reports = [], {}
     with perf.stage("matches", label="試合の選択・Notion 行更新") as st_match:
-        for m in select_matches(cfg, day, match_urls, log):
-            log(f"● {m.title}  [{m.event} / {m.stage}]  {m.map_count}")
-            wh.match(m)
-            pages = {}
-            if nt:
-                try:
-                    _, pages = upsert_match(nt, cfg, m)
-                except Exception as e:
-                    log(f"  Notion upsert 失敗: {e}")
-            if upsert_only:
-                continue
-            for md in m.maps:
-                map_dir = out_root / f"{m.id}_{md.order}_{_slug(md.name)}"
-                page = pages.get(md.order)
-                done_json = map_dir / "report.json"
-                prev = json.loads(done_json.read_text(encoding="utf-8")) if done_json.exists() else None
-                prev_ok = bool(prev and (prev.get("video_ok") or no_video or not md.vod_id or md.vod_t is None))
-                if not force and ((page and nt.children(page["id"])) or (not nt and prev_ok)):
-                    log(f"  {md.order}. {md.name}: 作成済みのためスキップ（--force で作り直し）")
-                    if prev:
-                        reports.append(prev)
-                        wh.report(prev)
+        for day in days:
+            if len(days) > 1:
+                log(f"===== {day} =====")
+            out_root = Path(cfg["output"]["dir"]) / day.isoformat()
+            out_root.mkdir(parents=True, exist_ok=True)
+            reports.setdefault(day, [])
+            for m in select_matches(cfg, day, match_urls, log):
+                log(f"● {m.title}  [{m.event} / {m.stage}]  {m.map_count}")
+                wh.match(m)
+                pages = {}
+                if nt:
+                    try:
+                        _, pages = upsert_match(nt, cfg, m)
+                    except Exception as e:
+                        log(f"  Notion upsert 失敗: {e}")
+                if upsert_only:
                     continue
-                todo.append((m, md, map_dir, page))
+                for md in m.maps:
+                    map_dir = out_root / f"{m.id}_{md.order}_{_slug(md.name)}"
+                    page = pages.get(md.order)
+                    done_json = map_dir / "report.json"
+                    prev = json.loads(done_json.read_text(encoding="utf-8")) if done_json.exists() else None
+                    prev_ok = bool(prev and (prev.get("video_ok") or no_video or not md.vod_id or md.vod_t is None))
+                    if not force and ((page and nt.children(page["id"])) or (not nt and prev_ok)):
+                        log(f"  {md.order}. {md.name}: 作成済みのためスキップ（--force で作り直し）")
+                        if prev:
+                            reports[day].append(prev)
+                            wh.report(prev)
+                        continue
+                    todo.append((day, m, md, map_dir, page))
     log(f"  試合の選択・Notion 行更新 {perf.fmt_seconds(st_match['seconds'])}"
         f"｜{perf.fmt_resources(st_match['resources'])}")
+    if todo:
+        log(f"解析するマップ：{len(todo)}（同時に {map_workers} マップ・HUD スキャンは {int(pcfg.get('scan_slots') or 1)} 本まで）")
 
-    # 2) 動画を裏でまとめてダウンロード開始（既定 3 本まで。解析中に次のマップを取得する）
+    # 2) 動画の取得は裏で先回り。取り過ぎてディスクを埋めないよう、解析中＋数マップ先までに限る
     dl_workers = max(1, int(cfg["video"].get("download_workers") or 1))
+    ahead = max(dl_workers, map_workers) + int(pcfg.get("prefetch_maps") or 2)
     dl = ThreadPoolExecutor(max_workers=dl_workers)
-    futs = {}
-    if not no_video:
-        for m, md, _, _ in todo:
-            if md.vod_id and md.vod_t is not None:
-                futs[(m.id, md.order)] = dl.submit(download, cfg, m, md, log)
+    futs, dl_lock = {}, threading.Lock()
+
+    def ensure_downloads(upto: int):
+        if no_video:
+            return
+        with dl_lock:
+            for _, m, md, _, _ in todo[:upto]:
+                if md.vod_id and md.vod_t is not None and (m.id, md.order) not in futs:
+                    futs[(m.id, md.order)] = dl.submit(download, cfg, m, md, log)
+
+    ensure_downloads(ahead)
 
     # ラウンドDB（1 行 = 1 ラウンド × 1 チーム。Notion で ULT・オペ・フェイクなどを検索する用）
     rounds_state = {"ds": None, "tried": False}
+    rounds_lock = threading.Lock()
 
     def _rounds_db(rep, map_url):
         if not nt or (cfg.get("notion") or {}).get("rounds_db", True) is False:
             return
         from . import notion_rounds as NR
         try:
-            if not rounds_state["tried"]:
-                rounds_state["tried"] = True
-                rounds_state["ds"] = NR.ensure_db(nt, cfg, NR.parent_of(cfg), log)
+            with rounds_lock:
+                if not rounds_state["tried"]:
+                    rounds_state["tried"] = True
+                    rounds_state["ds"] = NR.ensure_db(nt, cfg, NR.parent_of(cfg), log)
             if rounds_state["ds"]:
                 k = NR.sync_map(nt, rounds_state["ds"], rep, map_url, log)
                 log(f"    → ラウンドDB に {k} 行")
         except Exception as e:
             log(f"    ラウンドDB の書き込み失敗: {e}")
 
-    # 3) 順に解析
-    blocked = False
-    writer = ThreadPoolExecutor(max_workers=1)
-    writes = []
-    for m, md, map_dir, page in todo:
+    # 3) 解析（map_workers マップを同時に。Notion への書き込みも裏で 2 本まで並行）
+    state = {"blocked": False}
+    writer = ThreadPoolExecutor(max_workers=2 if map_workers > 1 else 1)
+    writes, w_lock = [], threading.Lock()
+
+    def process(i: int):
+        day, m, md, map_dir, page = todo[i]
+        ensure_downloads(i + ahead)
+        short = f"{m.team1[:10]}-{m.team2[:10]} {md.name}"
+        mlog = (lambda msg, _s=short: log(f"[{_s}] {msg.lstrip()}")) if map_workers > 1 else log
         log(f"  {m.title} {md.order}. {md.name} {md.score1}-{md.score2}")
         tag = f"{m.id}:{md.order}"
         rep = base_report(m, md, cfg)
@@ -1067,18 +1101,18 @@ def _run_body(cfg: dict, day, match_urls, no_video, force, upsert_only, log, t0)
             rep["analysis_note"] = "動画解析なし（VLR のデータのみ）"
         elif fut is None:
             rep["analysis_note"] = "マップ開始秒つきの VOD が無いため動画解析をスキップ"
-        elif blocked:
+        elif state["blocked"]:
             rep["analysis_note"] = "YouTube のボット判定で動画を取得できなかったため VLR のデータのみ（README「YouTube に弾かれるとき」）"
         else:
             try:
                 path = fut.result()
-                analyze_video(cfg, m, md, rep, map_dir, path, log)
+                analyze_video(cfg, m, md, rep, map_dir, path, mlog)
                 if not cfg["video"].get("keep_video") and path.parent == _work_root(cfg):
                     from .video import remove_video
                     remove_video(path)
             except Exception as e:
                 if "ボット判定" in str(e):
-                    blocked = True
+                    state["blocked"] = True
                     log(f"    {e}")
                 else:
                     traceback.print_exc()
@@ -1101,19 +1135,29 @@ def _run_body(cfg: dict, day, match_urls, no_video, force, upsert_only, log, t0)
                 except Exception as e:
                     log(f"    Notion 書き込み失敗（{name}）: {e}")
                 _rounds_db(rep, page.get("url"))
-            writes.append(writer.submit(write))
-        reports.append(rep)
+            with w_lock:
+                writes.append(writer.submit(write))
+        return day, rep
+
+    with ThreadPoolExecutor(max_workers=map_workers) as ex:
+        results = list(ex.map(process, range(len(todo))))
+    for day, rep in results:
+        reports.setdefault(day, []).append(rep)
     dl.shutdown(wait=False, cancel_futures=True)
-    for w in writes:
+    for w in list(writes):
         w.result()
     writer.shutdown()
     wh.close()
 
     summary = perf.build_summary(total_sec=time.time() - t0)
-    perf.write_json(summary, out_root / "perf.json")
     perf.print_summary(summary, log)
-    if cfg["output"].get("html_report") and reports:
-        with perf.stage("html", label="HTML レポート") as st_html:
-            p = report.write(out_root, reports, day, perf_data=summary)
-        log(f"HTML レポート: {p}（{perf.fmt_seconds(st_html['seconds'])}）")
-    return reports
+    out = []
+    for day, reps in reports.items():
+        out_root = Path(cfg["output"]["dir"]) / day.isoformat()
+        perf.write_json(summary, out_root / "perf.json")
+        if cfg["output"].get("html_report") and reps:
+            with perf.stage("html", label="HTML レポート") as st_html:
+                p = report.write(out_root, reps, day, perf_data=summary)
+            log(f"HTML レポート: {p}（{perf.fmt_seconds(st_html['seconds'])}）")
+        out += reps
+    return out

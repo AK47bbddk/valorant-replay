@@ -405,3 +405,41 @@ def test_unread_card_names_are_filled():
     assert n == 1
     assert rounds[2]["ults"][0]["player"] == "Sayonara" and rounds[2]["ults"][0]["agent"] == "Viper"
     assert rounds[2]["ult_ready"] == ["Jamppi"] and rounds[2]["weapons"]["2"][0]["player"] == "Jamppi"
+
+
+def test_pipeline_parallel_maps_over_several_days(tmp_path, monkeypatch):
+    """複数日をまとめて、2 マップ同時に解析する（HUD スキャンは 1 本ずつ）。"""
+    import threading
+    import time as _t
+
+    def mk(mid, day):
+        m = vlr.Match(id=mid, url=f"https://www.vlr.gg/{mid}/x", team1="A", team2="B", event="VCT 2026: Pacific",
+                      stage="Final", dt_jst=datetime(2026, 10, day, 20, tzinfo=vlr.JST), tag1="AA", tag2="BB")
+        m.maps = [vlr.MapData(order=k, name=nm, game_id=str(k), score1=13, score2=5,
+                              rounds=[vlr.Round(1, 1, "攻撃", "elim")], vod_url="https://youtu.be/v?t=10",
+                              vod_id=f"v{mid}{k}", vod_t=10) for k, nm in ((1, "Bind"), (2, "Split"))]
+        return m
+    ms = {"21": mk("21", 21), "22": mk("22", 22)}
+    monkeypatch.setattr(vlr, "list_results", lambda d: [{"url": ms[str(d.day)].url, "event": "VCT 2026: Pacific",
+                                                         "team1": "A", "team2": "B"}])
+    monkeypatch.setattr(vlr, "parse_match", lambda url: ms[url.split("/")[3]])
+    monkeypatch.delenv("NOTION_TOKEN", raising=False)
+    monkeypatch.setattr(pipeline, "download", lambda cfg, m, md, log: tmp_path / f"{md.vod_id}.mp4")
+    live, peak, lock = [0], [0], threading.Lock()
+
+    def fake_analyze(cfg, m, md, rep, map_dir, path, log):
+        with lock:
+            live[0] += 1
+            peak[0] = max(peak[0], live[0])
+        _t.sleep(0.2)
+        rep["analysis_note"] = "ok"
+        with lock:
+            live[0] -= 1
+    monkeypatch.setattr(pipeline, "analyze_video", fake_analyze)
+    cfg = config.load()
+    cfg["output"]["dir"] = str(tmp_path)
+    cfg["pipeline"] = {"map_workers": 2, "scan_slots": 1}
+    reps = pipeline.run(cfg, days=[date(2026, 10, 21), date(2026, 10, 22)], log=lambda *a: None)
+    assert len(reps) == 4 and all(r["analysis_note"] == "ok" for r in reps)
+    assert peak[0] == 2
+    assert (tmp_path / "2026-10-21" / "index.html").exists() and (tmp_path / "2026-10-22" / "index.html").exists()

@@ -179,6 +179,13 @@ vreplay playbook --sync --team G2 --map Split
   親ページ（notion.rounds_parent か playbook.notion_parent、CLI の --notion）の下に 1 つ作り、ID は output.dir/_cache/notion_rounds.json。
   毎日の実行でマップのページを書いたあとに追加し、`vreplay rounds` で解析済みの report.json からまとめて入れる。
 
+## まとめて速く処理する
+
+- `vreplay run --date A --to B`：期間の全マップを 1 回で処理（試合の選択→全マップの Notion 行→解析）。HTML は日ごと。
+- `pipeline.map_workers`（既定 2）でマップを同時に解析。HUD スキャンは `_SCAN_SLOT`（`scan_slots`、既定 1）で同時実行を制限し、
+  ほかの段階を重ねる。動画は解析中＋`prefetch_maps` マップ先までだけ先に取る。Notion 書き込みは裏で 2 本まで。
+  ウェアハウス（SQLite）はスレッド間で共有するのでロック付き・check_same_thread=False。
+
 ## 非機能要件
 
 - HUD の位置は放送で変わるので、レイアウトのプリセット選択・カードの円検出・キルフィードの選手名検出で自動で合わせる。
