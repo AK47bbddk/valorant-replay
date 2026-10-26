@@ -86,6 +86,12 @@ def main():
     pb.add_argument("--no-llm", action="store_true", help="LLM の API キーがあっても要約を書かせない")
     pb.add_argument("--config")
 
+    rd = sub.add_parser("rounds", help="解析済みの report.json から Notion のラウンドDB を作る・更新する")
+    rd.add_argument("--notion", help="ラウンドDB を置く親ページの URL（初回だけ。既定は config の notion.rounds_parent）")
+    rd.add_argument("--from", dest="start", help="この日以降（YYYY-MM-DD）")
+    rd.add_argument("--to", dest="end", help="この日まで（YYYY-MM-DD）")
+    rd.add_argument("--config")
+
     sy = sub.add_parser("sync", help="既存の report.json をまとめて DB に入れる")
     sy.add_argument("--root", help="report.json を探すルート（既定 output.dir）")
     sy.add_argument("--config")
@@ -135,6 +141,15 @@ def main():
                    notion=nt, notion_parent=parent)
         if not a.team and not a.map:
             build(cfg, out / "stats", min_maps=a.min_maps)      # 以前の集計ページ（ヒートマップ・型の表）
+    elif a.cmd == "rounds":
+        import os
+        from . import notion_rounds as NR
+        from .notion import Notion
+        if not os.environ.get("NOTION_TOKEN"):
+            raise SystemExit("NOTION_TOKEN がありません")
+        NR.backfill(Notion(os.environ["NOTION_TOKEN"]), cfg, NR.parent_of(cfg, a.notion), Path(cfg["output"]["dir"]),
+                    since=parse_day(a.start).isoformat() if a.start else None,
+                    until=parse_day(a.end).isoformat() if a.end else None)
     elif a.cmd == "sync":
         from . import db
         conn = db.open_warehouse(cfg)

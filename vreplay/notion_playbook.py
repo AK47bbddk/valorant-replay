@@ -71,6 +71,42 @@ def _row(nt: Notion, ds: str, name: str, kind: str, rows: list[dict], tags: list
     nt.append(pg["id"], [cl] if cl else left)
 
 
+def _plan_blocks(rows: list[dict], side: str, label: str) -> list[dict]:
+    """12R の組み立て（何ラウンド目に何をしがちか・試合ごとの並び）と、攻撃なら同じ初動の形からの分岐。"""
+    d = D.plan_data(rows).get(side)
+    out = []
+    if d:
+        ps = d["summary"]
+        out.append(_h(3, f"{label} 12R の組み立て"))
+        for i in range(1, 13):
+            c = ps["by_idx"].get(i)
+            if not c:
+                continue
+            w, n = d["wins"].get(i, [0, 0])
+            ult = ps["ult_rate"].get(i, 0.0)
+            out.append(_bullet(_rt(f"{i}R 目　", bold=True),
+                               _rt("・".join(f"{t} {v}" for t, v in c.most_common(3))
+                                   + f"　勝ち {w}/{n}　ULT 平均 {ult:.1f}"
+                                   + (f"（ULTラウンド {ps['ult_rounds'][i]}）" if ps["ult_rounds"].get(i) else ""))))
+        for name, cnt in (("ピストル勝ちの 2R", ps["after_pistol_win"]), ("ピストル負けの 2R", ps["after_pistol_loss"])):
+            if cnt:
+                out.append(_para(_rt(f"{name}：" + "・".join(f"{t} {v}" for t, v in cnt.most_common()), color="gray")))
+        for (dt, opp, mp, h), rs in list(d["seqs"].items())[-4:]:
+            out.append(_bullet(_rt(f"vs {opp} {h}　", bold=True),
+                               _rt(" → ".join(f"{r['rtype']['label']}{'○' if r['win'] else '✗'}" for r in rs))))
+    if side == ATTACK:
+        bg = [g for g in D.branch_groups(rows) if g["n"] >= 2]
+        if bg:
+            out.append(_h(3, "同じ初動の形からの分岐"))
+            for g in bg[:8]:
+                tags = "・".join(f"{t} {c}" for t, c in g["tags"].most_common())
+                seq = "、".join(f"{r['opp_tag']} R{r['n']} {(r.get('branch') or {}).get('tag') or '?'}"
+                               f"{'○' if r['win'] else '✗'}" for r in g["rows"][:8])
+                out.append(_bullet(_rt(f"{g['name']}（{g['shape']}）　{g['w']}/{g['n']} 勝・フェイク {len(g['fakes'])}　",
+                                       bold=True), _rt(f"{tags}｜{seq}")))
+    return out
+
+
 def _code(shape: str) -> str:
     """'A1 Mid3 B1' → '1-3-1'（A-MID-B の人数）。C があるマップは 'A1 B2 C1 Mid1' → '1-2-1・MID1'"""
     z = {m.group(1): int(m.group(2)) for m in re.finditer(r"(A|B|C|Mid)(\d)", shape or "")}
@@ -141,6 +177,7 @@ def export(nt: Notion, cfg: dict, key: dict, rows: list[dict], base: list[dict],
         nt.append(pid, [_h(2, f"{label} summary")] + _summary_lines(key.get("llm"), label, strong, weak))
         if not srows:
             continue
+        nt.append(pid, _plan_blocks(rows, side, label))
         ds = _db(nt, pid, label, ["Default", "Set", "PostPlant", "Retake"])
         for g in D.setup_clusters(srows, k=8):
             follow = []

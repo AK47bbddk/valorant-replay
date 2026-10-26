@@ -112,6 +112,8 @@ def records(rep: dict) -> list[dict]:
     tac = rep.get("tactics") or {}
     T = tac.get("transform") if tac.get("aligned") else None
     tac_rounds = tac.get("rounds") or {}
+    from . import flow as F
+    rtypes = F.all_types(rep)
     pos_by_n = defaultdict(list)
     if T:
         for p in tac.get("positions") or []:
@@ -193,6 +195,7 @@ def records(rep: dict) -> list[dict]:
                 "caster": rr.get("caster") or {},
                 "reason_main": reason.get("main"), "dur_clock": rr.get("duration"),
                 "board": (rr.get("assets") or {}).get("board"),
+                "rtype": rtypes.get((n, no)), "branch": F.branch(rep, rr, no),
             })
     return out
 
@@ -572,6 +575,93 @@ def _roles(rs: list[dict]) -> str:
             for a in ags:
                 by[a][z] += 1
     return "・".join(f"{a}→{c.most_common(1)[0][0]}" for a, c in sorted(by.items()))
+
+
+def plan_data(rows: list[dict]) -> dict:
+    """攻守ごとの 12 ラウンドの組み立ての集計（flow.plan_summary）と、マップごとの並び。"""
+    from . import flow as F
+    out = {}
+    for side in (DEFENSE, ATTACK):
+        srows = [r for r in rows if r["side"] == side and r.get("rtype")]
+        if not srows:
+            continue
+        ps = F.plan_summary(srows)
+        seqs = defaultdict(list)
+        for r in sorted(srows, key=lambda r: (str(r["date"]), r["match_id"], r["order"], r["n"])):
+            if r["rtype"]["half"] != "OT":
+                seqs[(str(r["date"]), r["opp_tag"], r["map"], r["rtype"]["half"])].append(r)
+        wins = defaultdict(lambda: [0, 0])
+        for r in srows:
+            i = r["rtype"]["idx"]
+            wins[i][0] += int(r["win"])
+            wins[i][1] += 1
+        out[side] = {"summary": ps, "seqs": seqs, "wins": dict(wins)}
+    return out
+
+
+def branch_groups(rows: list[dict], k: int = 8) -> list[dict]:
+    """攻撃の同じ初動の形（setup_clusters）ごとの攻め先の内訳とフェイクの数。"""
+    out = []
+    for g in setup_clusters([r for r in rows if r["side"] == ATTACK], k=k):
+        rs = sorted(g["rows"], key=lambda r: (str(r["date"]), r["match_id"], r["n"]))
+        tags = Counter((r.get("branch") or {}).get("tag") for r in rs if (r.get("branch") or {}).get("tag"))
+        fakes = [r for r in rs if ((r.get("branch") or {}).get("tag") or "").startswith("フェイク")]
+        finals = Counter((r.get("branch") or {}).get("final") for r in rs if (r.get("branch") or {}).get("final"))
+        out.append({"name": g["name"], "shape": g["shape"], "n": g["n"], "w": g["w"], "rows": rs, "tags": tags,
+                    "fakes": fakes, "fake_w": sum(r["win"] for r in fakes), "finals": finals})
+    return out
+
+
+def plan_slides(rows: list[dict], foot: str) -> list[str]:
+    pd_ = plan_data(rows)
+    slides = []
+    for side in (DEFENSE, ATTACK):
+        d = pd_.get(side)
+        if not d:
+            continue
+        ps = d["summary"]
+        trs = ""
+        for i in range(1, 13):
+            c = ps["by_idx"].get(i)
+            if not c:
+                continue
+            w, n = d["wins"].get(i, [0, 0])
+            types = "・".join(f"{t} {v}" for t, v in c.most_common(3))
+            ult = ps["ult_rate"].get(i, 0.0)
+            trs += (f"<tr><td>{i}R 目</td><td>{_e(types)}</td><td>{w}/{n}</td>"
+                    f"<td>{ult:.1f}{'（ULTラウンド ' + str(ps['ult_rounds'][i]) + '）' if ps['ult_rounds'].get(i) else ''}</td></tr>")
+        eco = []
+        if ps["after_pistol_win"]:
+            eco.append("ピストル勝ちの 2R：" + "・".join(f"{t} {v}" for t, v in ps["after_pistol_win"].most_common()))
+        if ps["after_pistol_loss"]:
+            eco.append("ピストル負けの 2R：" + "・".join(f"{t} {v}" for t, v in ps["after_pistol_loss"].most_common()))
+        seqs = "".join(
+            f"<li><b>{_e(opp)}</b> {_e(mp)} {_e(h)}：" + " → ".join(
+                f"{_e(r['rtype']['label'])}{'○' if r['win'] else '✗'}" for r in rs) + "</li>"
+            for (dt, opp, mp, h), rs in list(d["seqs"].items())[-4:])
+        body = (f'<div class="cols"><div><table><thead><tr><th>半分の中</th><th>種類（多い順）</th><th>勝ち</th>'
+                f'<th>ULT 平均</th></tr></thead><tbody>{trs}</tbody></table>'
+                + "".join(f'<p class="sub">{_e(x)}</p>' for x in eco)
+                + f'</div><div><h3>試合ごとの並び</h3><ul class="plain sub">{seqs}</ul></div></div>'
+                '<p class="sub">ボーナス＝ピストルと 2R を取った 3R の持ち越し。対フォース＝相手がハーフ・フォース。'
+                'ULT2 以上を「ULTラウンド」と数えています。オペ／対オペはオペレーターを持つ側。</p>')
+        slides.append(_slide(SIDE_EN[side], f"12R の組み立て（{side}）", body, foot))
+    bg = [g for g in branch_groups(rows) if g["n"] >= 2]
+    if bg:
+        cards = []
+        for g in bg[:6]:
+            tags = "・".join(f"{t} {c}" for t, c in g["tags"].most_common())
+            seq = "、".join(f"{r['opp_tag']} R{r['n']} {(r.get('branch') or {}).get('tag') or '?'}{'○' if r['win'] else '✗'}"
+                           for r in g["rows"][:8])
+            cards.append(f'<div class="card"><h3>{_e(g["name"])}（{_e(g["shape"])}）</h3>'
+                         f'<p>{g["w"]}/{g["n"]} 勝・フェイク {len(g["fakes"])} 回'
+                         + (f'（勝ち {g["fake_w"]}）' if g["fakes"] else "") + '</p>'
+                         f'<p class="sub">{_e(tags or "-")}</p><p class="sub">{_e(seq)}</p></div>')
+        slides.append(_slide("ATK", "同じ初動の形からの分岐", f'<div class="cols3">{"".join(cards)}</div>'
+                             '<p class="sub">1:15 前後の配置が同じ型のラウンドで、いちばん人数の多かったゾーンと実際の攻め先'
+                             '（設置サイト、無ければ 0:40 の位置）を比べています。前半に見せた形から後半に別のサイトへ行く'
+                             'ラウンドが「フェイク」です。</p>', foot))
+    return slides
 
 
 def setup_clusters(rows: list[dict], th: float = 0.5, k: int = 6) -> list[dict]:
@@ -986,6 +1076,9 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
                         f'<div>{_fig(fig, "設置後 10 秒の自チームの位置")}</div></div>')
                 slides.append(_slide(en, f"{s} Site PostPlant", body, foot))
 
+    # 12 ラウンドの組み立て（ピストル → アンチエコ → ボーナス → フルバイ…）と、同じ初動の形からの分岐
+    slides += plan_slides(rows, foot)
+
     # ラウンドの流れ（試合が少ないときはこれがいちばん役に立つ）と、解説から拾った意図
     for side in (DEFENSE, ATTACK):
         srows = sorted([r for r in rows if r["side"] == side], key=lambda r: (str(r["date"]), r["match_id"], r["n"]))
@@ -994,15 +1087,17 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
         for k0 in range(0, len(srows), 13):
             part = srows[k0:k0 + 13]
             trs = "".join(
-                f"<tr><td>{_e(r['opp_tag'])} R{r['n']}</td><td>{_e(r['buy'])}</td>"
-                f"<td>{_e((r.get('setup') or {}).get('name') or '-')}</td><td>{_e(r.get('first_fight') or '-')}</td>"
+                f"<tr><td>{_e(r['opp_tag'])} R{r['n']}</td><td>{_e((r.get('rtype') or {}).get('label') or r['buy'])}</td>"
+                f"<td>{_e((r.get('setup') or {}).get('name') or '-')}"
+                f"{('<br><span class=sub>' + _e((r.get('branch') or {}).get('tag')) + '</span>') if (r.get('branch') or {}).get('tag') else ''}</td>"
+                f"<td>{_e(r.get('first_fight') or '-')}</td>"
                 f"<td>{_e((r['plant_site'] or '') + (' ' + _clock(100 - r['plant_e']) if r['plant_e'] is not None else '') if r['planted'] else '-')}</td>"
                 f"<td>{'〇' if r['win'] else '✕'} {_e(r.get('reason_main') or '')}</td>"
                 f"<td>{_e('・'.join((r.get('caster') or {}).get('tags', [])[:3]))}</td>"
                 f"<td>{('<a href=' + chr(34) + _e(r['yt']) + chr(34) + '>▶</a>') if r['yt'] else ''}</td></tr>"
                 for r in part)
             slides.append(_slide(SIDE_EN[side], f"ラウンドの流れ（{side}）" + (f" {k0 // 13 + 1}" if len(srows) > 13 else ""),
-                                 f'<table><thead><tr><th>ラウンド</th><th>購入</th><th>初動の配置</th><th>初動ファイト</th>'
+                                 f'<table><thead><tr><th>ラウンド</th><th>組み立て</th><th>初動の配置・攻め先</th><th>初動ファイト</th>'
                                  f'<th>設置（残り）</th><th>結果・勝因</th><th>解説の言及</th><th></th></tr></thead>'
                                  f'<tbody>{trs}</tbody></table>', foot))
     intent = intent_summary(rows)
@@ -1021,7 +1116,7 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
     if key.get("llm"):
         body = "".join(f"<p>{_e(line)}</p>" if not line.startswith(("-", "・", "*"))
                        else f"<li>{_e(line.lstrip('-・* '))}</li>" for line in key["llm"].splitlines() if line.strip())
-        slides.insert(1, _slide("Summary", "ATK / DEF summary（Claude が数字から書いた叩き台）",
+        slides.insert(1, _slide("Summary", "ATK / DEF summary（LLM が数字から書いた叩き台）",
                                 f'<div class="sub" style="font-size:15px">{body}</div>', foot))
 
     # ULT・選手・経済

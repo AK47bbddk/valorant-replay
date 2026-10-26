@@ -96,3 +96,8 @@ notion:
   enabled: true
   match_data_source: e70c4f36-8160-4ce0-a35b-dfe52f0f7e16
   map_data_source: 3baf8426-8608-49dd-beb6-f8e894447f57
+  # ラウンドDB（1 行 = 1 ラウンド × 1 チーム）を置く親ページの URL。初回にその下へ「ラウンドDB」を作る
+  # （空なら playbook.notion_parent を使う。どちらも空なら作らない）。作った ID は output.dir/_cache/notion_rounds.json
+  rounds_parent: ""
+  rounds_data_source: ""
+  rounds_db: true

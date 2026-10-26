@@ -234,10 +234,34 @@ def build_blocks(rep: dict, uploads: dict[str, str | None]) -> list[dict]:
         rows.append([rcell, r.get("score") or "-", [_rt(win, bold=True, color="blue" if r.get("winner_no") == 1 else "red")],
                      S.how(r), S.reason_cell(r), S.buy_cell(r, "1"), S.buy_cell(r, "2"), S.first_kill(rep, r),
                      S.kill_count(rep, r), S.ult_used(r, rep), r.get("duration") or "-"])
+    blocks += flow_blocks(rep)
     blocks += [_h(2, "ラウンド一覧"), _table(rows), _h(2, "ラウンドごと")]
     for r in rep["rounds"]:
         blocks += round_blocks(rep, r, uploads)
     return blocks
+
+
+def flow_blocks(rep: dict) -> list[dict]:
+    """前半・後半の組み立て（ピストル → アンチエコ → … の並び）と、同じ初動の形からの攻め先。"""
+    from . import flow as F
+    out = []
+    fl = F.flow(rep)
+    if fl:
+        out.append(_h(2, "ラウンドの組み立て"))
+        for it in fl:
+            rts = [_rt(f"{it['tag']}　", bold=True), _rt(f"{it['half']}（{it['side'] or '?'}）")]
+            for i, (n, lab, w) in enumerate(it["items"]):
+                rts.append(_rt(" → " if i else "　"))
+                rts.append(_rt(f"R{n} {lab}", color="blue" if w else "red"))
+            out.append(_bullet(*rts))
+        out.append(_para(_rt("青＝勝ち・赤＝負け。ULT の数・オペ（自分が持つ）・対オペ（相手が持つ）を付けています。"
+                             "ボーナスはピストルと 2R を取った 3R の持ち越し。", color="gray")))
+    br_ = [g for g in F.branches(rep) if len(g["rounds"]) >= 2]
+    if br_:
+        out.append(_h(3, "同じ初動の形からの攻め先（攻撃側）"))
+        for g in br_:
+            out.append(_bullet(_rt(F.branch_text(g))))
+    return out
 
 
 def _columns(*cols: list) -> dict | None:

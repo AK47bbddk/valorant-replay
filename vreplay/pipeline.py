@@ -927,6 +927,23 @@ def _run_body(cfg: dict, day, match_urls, no_video, force, upsert_only, log, t0)
             if md.vod_id and md.vod_t is not None:
                 futs[(m.id, md.order)] = dl.submit(download, cfg, m, md, log)
 
+    # ラウンドDB（1 行 = 1 ラウンド × 1 チーム。Notion で ULT・オペ・フェイクなどを検索する用）
+    rounds_state = {"ds": None, "tried": False}
+
+    def _rounds_db(rep, map_url):
+        if not nt or (cfg.get("notion") or {}).get("rounds_db", True) is False:
+            return
+        from . import notion_rounds as NR
+        try:
+            if not rounds_state["tried"]:
+                rounds_state["tried"] = True
+                rounds_state["ds"] = NR.ensure_db(nt, cfg, NR.parent_of(cfg), log)
+            if rounds_state["ds"]:
+                k = NR.sync_map(nt, rounds_state["ds"], rep, map_url, log)
+                log(f"    → ラウンドDB に {k} 行")
+        except Exception as e:
+            log(f"    ラウンドDB の書き込み失敗: {e}")
+
     # 3) 順に解析
     blocked = False
     writer = ThreadPoolExecutor(max_workers=1)
@@ -973,6 +990,7 @@ def _run_body(cfg: dict, day, match_urls, no_video, force, upsert_only, log, t0)
                         f"（{perf.fmt_seconds(st_nt['seconds'])}）")
                 except Exception as e:
                     log(f"    Notion 書き込み失敗（{name}）: {e}")
+                _rounds_db(rep, page.get("url"))
             writes.append(writer.submit(write))
         reports.append(rep)
     dl.shutdown(wait=False, cancel_futures=True)

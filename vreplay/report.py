@@ -90,6 +90,15 @@ def _map_section(rep: dict, base: Path) -> str:
            f'<p class="sub">{_e(rep.get("event"))} / {_e(rep.get("stage"))}　{" ・ ".join(links)}</p>']
     if rep.get("analysis_note"):
         out.append(f'<p class="note">{_e(rep["analysis_note"])}</p>')
+    from . import flow as F
+    fl = F.flow(rep)
+    if fl:
+        items = "".join(f'<li><strong>{_e(it["tag"])}</strong> {_e(F.flow_text(it))}</li>' for it in fl)
+        out.append(f'<h3>ラウンドの組み立て</h3><ul class="kills">{items}</ul>')
+    br_ = [g for g in F.branches(rep) if len(g["rounds"]) >= 2]
+    if br_:
+        items = "".join(f'<li>{_e(F.branch_text(g))}</li>' for g in br_)
+        out.append(f'<h3>同じ初動の形からの攻め先（攻撃側）</h3><ul class="kills">{items}</ul>')
     tac = rep.get("tactics") or {}
     if tac.get("sites"):
         sites = "、".join(f'{s.get("site")} {s.get("count")}R' for s in tac["sites"][:5])
