@@ -451,6 +451,15 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
                   for c in meta["callouts"]]
     if cal_msg and log:
         log(f"    {cal_msg}")
+    # プレイブックの重ね合わせ図の下地（放送のミニマップをコールアウトの座標に写したもの）
+    uv_path = None
+    if T.get("ok") and bg_path is not None:
+        try:
+            up = bg_path.with_name(bg_path.stem + "_uv.jpg")
+            cv2.imwrite(str(up), uv_base(background, T), [cv2.IMWRITE_JPEG_QUALITY, 90])
+            uv_path = str(up)
+        except Exception:
+            uv_path = None
     if fit_path is not None:
         try:
             _fit_overlay(background, placed, dots, fit_path)
@@ -585,6 +594,7 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         "map": meta["name"],
         "background": str(bg_path) if bg_path and bg_path.exists() else None,
         "fit_image": str(fit_path) if fit_path and fit_path.exists() else None,
+        "uv_base": uv_path,
         "samples": len(samples),
         "mean_dots": round(mean_dots, 2),
         "confidence": confidence,
@@ -793,27 +803,56 @@ def _uv(T: dict, x: float, y: float, aspect: float = 1.0) -> tuple[float, float]
     return a + 0.5, b + 0.5
 
 
+def board_base(background: np.ndarray, mask: np.ndarray | None, width: int = 560) -> np.ndarray:
+    """配置図の下地：放送のミニマップ（背景の中央値）の床だけを残し、床の外（後ろの試合画面）は白く飛ばす。"""
+    img = background.copy()
+    if mask is not None and mask.shape[:2] == img.shape[:2]:
+        m = cv2.dilate(mask.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+        img[~m] = (img[~m].astype(np.float32) * 0.15 + 250 * 0.85).astype(np.uint8)
+    h = int(round(width * img.shape[0] / img.shape[1]))
+    return cv2.resize(img, (width, h), interpolation=cv2.INTER_CUBIC)
+
+
+def uv_base(background: np.ndarray, T: dict, size: int = 512) -> np.ndarray:
+    """放送のミニマップの背景を、コールアウトの座標（valorant-api の 0..1）の向き・大きさに写した画像。
+    プレイブックの重ね合わせ図（uv 座標）の下地にすると、マップ画像の座標の基準の違いに左右されない。"""
+    from . import minimap as MM
+    H = background.shape[0]
+    dst = np.float32([[0, 0], [size, 0], [0, size]])
+    src = np.float32([[v * H for v in MM.apply(T, u, w)] for u, w in ((0, 0), (1, 0), (0, 1))])
+    M = cv2.getAffineTransform(dst, src)
+    return cv2.warpAffine(background, M, (size, size), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                          borderMode=cv2.BORDER_CONSTANT, borderValue=(245, 245, 245))
+
+
 def board_png(base: np.ndarray, entries: list[dict], icons: dict, path: Path, to_xy, title: str = "") -> Path:
     """Valotactics のような配置図：地図の上に各エージェントのアイコン（チーム色の縁つき）を置く。
-    to_xy(entry) → 画像上の (x, y) ピクセル。"""
+    to_xy(entry) → 画像上の (x, y) ピクセル。誰か分からないアイコンはチーム色の丸に「?」。"""
     img = base.copy()
-    S = img.shape[0]
-    R = max(9, int(S * 0.028))
+    Hh, Ww = img.shape[:2]
+    R = max(10, int(min(Hh, Ww) * 0.03))
     for e in entries:
         xy = to_xy(e)
         if xy is None:
             continue
-        x, y = int(xy[0]), int(xy[1])
-        col = (60, 60, 230) if e.get("color") == "warm" else (210, 190, 40)
+        x, y = int(round(xy[0])), int(round(xy[1]))
+        col = (60, 60, 230) if e.get("color") == "warm" else (200, 180, 30)
         ic = icons.get(e.get("agent"))
         if ic is not None:
             t = cv2.resize(ic, (2 * R, 2 * R))
             m = np.zeros((2 * R, 2 * R), np.uint8)
             cv2.circle(m, (R, R), R - 1, 255, -1)
-            y0, x0 = y - R, x - R
-            if 0 <= y0 and 0 <= x0 and y0 + 2 * R <= S and x0 + 2 * R <= img.shape[1]:
-                roi = img[y0:y0 + 2 * R, x0:x0 + 2 * R]
-                roi[m > 0] = t[m > 0]
+            # 端にかかるときは見える部分だけ貼る
+            x0, y0 = x - R, y - R
+            ax0, ay0, ax1, ay1 = max(0, x0), max(0, y0), min(Ww, x0 + 2 * R), min(Hh, y0 + 2 * R)
+            if ax1 > ax0 and ay1 > ay0:
+                sub_t = t[ay0 - y0:ay1 - y0, ax0 - x0:ax1 - x0]
+                sub_m = m[ay0 - y0:ay1 - y0, ax0 - x0:ax1 - x0] > 0
+                roi = img[ay0:ay1, ax0:ax1]
+                roi[sub_m] = sub_t[sub_m]
+        else:
+            cv2.circle(img, (x, y), R, col, -1, cv2.LINE_AA)
+            cv2.putText(img, "?", (x - 5, y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
         cv2.circle(img, (x, y), R, col, 3, cv2.LINE_AA)
     if title:
         cv2.putText(img, title, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
@@ -834,7 +873,7 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
         return None
     icon_frac = icon_frac or ICON_FRAC
     team_color = {v: k for k, v in color_team.items()}
-    base = map_icon(cfg, meta.get("name") or "", 512) if T else None
+    base = board_base(background, mask)
     out = {}
     first = None
     n_found = n_try = 0
@@ -868,13 +907,11 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
         out.setdefault(str(n), {})[label] = ents
         rt = round_tac.get(n)
         if rt is not None and ents and out_dir and label in ("1:30", "1:15"):
+            # 配置図は放送のミニマップ（背景の中央値）の上に、見つけた場所そのままで描く。
+            # マップ画像（valorant-api）に変換して描くと、マップによって座標の基準が違いズレることがあった
             p = Path(out_dir) / "_tactics" / f"board_r{n:02d}_{label.replace(':', '')}.jpg"
-            if base is not None:
-                to_xy = (lambda e: tuple(v * 512 for v in _uv(T, e["x"], e["y"], aspect)))
-                board_png(base, ents, icons, p, to_xy, f"R{n} {label}")
-            else:
-                bg = cv2.resize(background, (512, int(512 * background.shape[0] / background.shape[1])))
-                board_png(bg, ents, icons, p, lambda e: (e["x"] * bg.shape[1], e["y"] * bg.shape[0]), f"R{n} {label}")
+            bw, bh = base.shape[1], base.shape[0]
+            board_png(base, ents, icons, p, lambda e: (e["x"] * bw, e["y"] * bh), f"R{n} {label}")
             rt.setdefault("boards", {})[label] = str(p)
     if first is not None and out_dir:
         AG.contact_sheet(first[0], first[1], icons, Path(out_dir) / "_tactics" / "agents_check.jpg", icon_frac=icon_frac)

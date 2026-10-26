@@ -330,3 +330,46 @@ def test_killfeed_reads_kills_with_real_ocr(tmp_path):
     ev, strip = X.kills_in_round(st, list(range(len(seq))), [i * 1.0 for i in range(len(seq))], ["-"] * len(seq),
                                  roster, None, tmp_path / "k.jpg")
     assert [(e["killer"], e["victim"]) for e in ev] == [("JAWGEMO", "Timotino"), ("Asuna", "trent")]
+
+
+def test_feed_color_rejects_sponsor_banner():
+    import cv2
+    import numpy as np
+    from vreplay.extract import FEED_MIN_COLOR, _feed_color
+    row = np.full((18, 300, 3), 60, np.uint8)
+    row[:, 150:220] = (170, 160, 40)        # キラー側（青緑）
+    row[:, 230:300] = (70, 70, 220)         # 被害者側（赤）
+    ad = np.full((18, 300, 3), 25, np.uint8)
+    cv2.putText(ad, "WIIINGS.", (190, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    cv2.circle(ad, (175, 9), 5, (40, 40, 200), -1)
+    assert _feed_color(row) >= FEED_MIN_COLOR > _feed_color(ad)
+
+
+def test_board_is_drawn_on_the_broadcast_minimap(tmp_path):
+    import cv2
+    import numpy as np
+    from vreplay import tactics
+    bg = np.full((300, 320, 3), 90, np.uint8)
+    mask = np.zeros((300, 320), bool)
+    mask[50:250, 60:260] = True
+    base = tactics.board_base(bg, mask)
+    assert base.shape[1] == 560 and base[5, 5].mean() > 200 and base[150, 280].mean() < 120
+    icon = np.full((64, 64, 3), (0, 200, 0), np.uint8)
+    ents = [{"agent": "Sova", "x": 0.5, "y": 0.5, "color": "cool"}, {"agent": None, "x": 0.99, "y": 0.02, "color": "warm"}]
+    p = tactics.board_png(base, ents, {"Sova": icon}, tmp_path / "b.jpg",
+                          lambda e: (e["x"] * base.shape[1], e["y"] * base.shape[0]), "R1 1:15")
+    img = cv2.imread(str(p))
+    cy, cx = base.shape[0] // 2, base.shape[1] // 2
+    assert img[cy, cx, 1] > 150 and img[cy, cx, 0] < 80          # アイコンが真ん中に貼られている
+
+
+def test_uv_base_round_trip():
+    import numpy as np
+    from vreplay import minimap as MM
+    from vreplay import tactics
+    bg = np.zeros((200, 210, 3), np.uint8)
+    T = {"mirror": False, "theta": 1.5708, "scale": 0.8, "tx": 0.52, "ty": 0.5}
+    x, y = MM.apply(T, 0.25, 0.75)
+    bg[int(y * 200) - 3:int(y * 200) + 4, int(x * 200) - 3:int(x * 200) + 4] = 255
+    uv = tactics.uv_base(bg, T, size=200)
+    assert uv[150, 50].max() == 255

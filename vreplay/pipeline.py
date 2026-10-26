@@ -14,6 +14,7 @@ import shutil
 import threading
 import time
 import traceback
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -348,6 +349,7 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
     from .loadout import add_weapons, find_table, merge_reads, read_table, table_image
     from .scan import merge_obs, scan
     from .video import gpu_decode_ok, keyframe_interval
+    from .weapons import PISTOLS
     from .weapons import ja as wja
     from .weapons import load_book
 
@@ -570,18 +572,42 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                         reads.append((ti, add_weapons(img, rd, tb, book)))
                         if len(reads) >= 3:
                             break
+            def live_card_weapons():
+                """ラウンド開始 2〜4 秒後の試合中のカードの武器 {選手名: 武器}（購入が終わったあとの実際の持ち物）。"""
+                if geo is None or not r.live:
+                    return {}
+                cand = [i for i in r.live if r.t_drop + 2.0 <= t[i] <= r.t_drop + 6.0][:3] or \
+                    ([r.first_idx] if r.first_idx is not None else [])
+                votes = {}
+                for i in cand:
+                    pidx_ = obs["idx"][i]
+                    nm_ = slot_names(store, pidx_, geo, roster, team_left, team_right)
+                    for (nm, _tm), (w, _sc) in zip(nm_, X.weapons_from_panels(book, store, pidx_, geo)):
+                        if nm and w:
+                            votes.setdefault(nm, Counter())[w] += 1
+                return {nm: c.most_common(1)[0][0] for nm, c in votes.items()}
+
             if reads:
                 reads.sort(key=lambda x: x[0])
                 merged = merge_reads([rd for _, rd in reads])
+                # 装備表が購入前（まだ何も買っていない）のフレームだと武器が空なので、試合中のカードでも確かめる
+                card_w = live_card_weapons()
+                n_fill = 0
                 wt = {m.team1: [], m.team2: []}
                 for p in sorted(merged.values(), key=lambda p: (p["side"], p["row"])):
                     w = p["primary"] or p["sidearm"]
+                    cw = card_w.get(p["player"])
+                    if cw and (w is None or (w in PISTOLS and cw not in PISTOLS)
+                               or (w == "Classic" and cw != "Classic")):
+                        w, n_fill = cw, n_fill + 1
                     wt.setdefault(p["team"], []).append({
                         "player": p["player"], "agent": agent.get(p["player"]), "weapon": w,
                         "weapon_ja": wja(w) if w else "?", "sidearm": p["sidearm"],
                         "sidearm_ja": wja(p["sidearm"]) if p["sidearm"] else None})
                 rr["weapons"] = {"1": wt[m.team1], "2": wt[m.team2]}
-                rr["weapons_source"] = "装備表"
+                rr["weapons_source"] = "装備表" + ("＋試合中のカード" if n_fill else "")
+                if n_fill:
+                    rr["notes"].append(f"装備表に武器が映っていなかった {n_fill} 人は、試合中のカードから読みました")
                 ti, rd = reads[-1]
                 b = table_image(store.get(ti, "table"), tb, out_dir / f"r{r.n:02d}_buy.jpg", rd)
                 a["buy_panels"] = str(b) if b else None
@@ -616,6 +642,17 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
             names = names_live
             kills, strip = X.kills_in_round(store, fidx, times, labels, roster, book, out_dir / f"r{r.n:02d}_kills.jpg")
             n_feed = len(kills)
+            # それでも武器が分からない選手は、キルフィードでその選手が使った武器で補う
+            used = {}
+            for k in kills:
+                if k.get("killer") and k.get("weapon") and k["weapon"] not in ("Melee", "Spike"):
+                    used.setdefault(k["killer"], k["weapon"])
+            for lst in (rr.get("weapons") or {}).values():
+                for wp in lst:
+                    if (not wp.get("weapon") or wp.get("weapon_ja") == "?") and used.get(wp.get("player")):
+                        wp["weapon"] = used[wp["player"]]
+                        wp["weapon_ja"] = wja(wp["weapon"])
+                        wp["from_kill"] = True
             if geo and names and r.live:
                 # キルフィードで読めなかったキルを、カードが灰色になった時刻で補う（キラーは不明）
                 after = [i for i in r.live if t[i] >= r.t_drop + 2]

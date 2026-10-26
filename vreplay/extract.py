@@ -555,6 +555,21 @@ def _row_sig(crop) -> np.ndarray:
     return (cv2.resize(wm, (192, 12), interpolation=cv2.INTER_AREA) > 80).astype(np.float32)
 
 
+def _feed_color(crop: np.ndarray) -> float:
+    """キルフィードの 1 行らしさ：チーム色（青緑・赤）の画素の割合。行には必ずキラー側・被害者側の色の箱があるが、
+    スポンサーの広告（Red Bull の「WIIINGS.」など）がキルフィードの場所に出たときはほとんど無い。"""
+    if crop is None or crop.size == 0:
+        return 0.0
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    h, s_, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    teal = (h >= 75) & (h <= 100) & (s_ >= 60) & (v >= 80)
+    red = ((h <= 10) | (h >= 165)) & (s_ >= 80) & (v >= 90)
+    return float((teal | red).mean())
+
+
+FEED_MIN_COLOR = 0.08
+
+
 def kills_in_round(store: FrameStore, idxs: list[int], times: list[float], labels: list[str], roster: Roster,
                    book, out_path: Path, min_gap: float = 0.4, every: float = 2.0,
                    row_tol: float = 0.015, keep: float = 8.0, safety: float = 4.0) -> tuple[list[dict], Path | None]:
@@ -565,12 +580,18 @@ def kills_in_round(store: FrameStore, idxs: list[int], times: list[float], label
     行が下にずれても見た目は同じなので読み直さない。帯が 1 つも見つからない放送では、画面全体を
     見た目の変化＋2 秒おきに読む。
     """
-    events, crops, seen, victims = [], [], {}, {}
+    events, crops, seen, victims = [], {}, {}, {}
     frames = []
     for j, i in enumerate(idxs):
         img = store.get(i, "killfeed")
         if img is not None:
             frames.append((j, img, killfeed_bands(img)))
+    # この放送のキルフィードがチーム色の箱で描かれているなら、色の無い帯（広告・スポンサーの表示）は行として扱わない
+    cols = [_feed_color(img[max(0, y0 - 2):y1 + 2]) for _, img, bands in frames[:200] for y0, y1, _ in bands]
+    colored = bool(cols) and float(np.mean([c >= FEED_MIN_COLOR for c in cols])) >= 0.5
+    if colored:
+        frames = [(j, img, [b for b in bands if _feed_color(img[max(0, b[0] - 2):b[1] + 2]) >= FEED_MIN_COLOR])
+                  for j, img, bands in frames]
     use_bands = any(b for _, _, b in frames)
     jobs = []                                   # (j, 画像)
     if use_bands:
@@ -633,6 +654,12 @@ def kills_in_round(store: FrameStore, idxs: list[int], times: list[float], label
                 if not ev.get("killer") and row.get("killer") and t - ev["t"] <= 8:
                     ev.update({k_: v for k_, v in row.items() if k_ not in ("box", "partial")})
                     ev.pop("partial", None)
+                # 確認用の切り抜きが広告などに隠れていたら、後のフレームのきれいな行に差し替える
+                y0, y1 = row["box"]
+                c_new = img[y0:y1, :]
+                old_c = crops.get(id(ev))
+                if old_c is not None and _feed_color(old_c) < FEED_MIN_COLOR <= _feed_color(c_new):
+                    crops[id(ev)] = c_new
                 seen[key] = t
                 continue
             if key in seen and t - seen[key] < 12:
@@ -640,9 +667,10 @@ def kills_in_round(store: FrameStore, idxs: list[int], times: list[float], label
                 continue
             seen[key] = t
             y0, y1 = row.pop("box")
-            crops.append(img[y0:y1, :])
             events.append({"t": round(t, 1), "timer": labels[j], **row})
+            crops[id(events[-1])] = img[y0:y1, :]
             victims[vkey] = events[-1]
+    crops = [crops[id(e)] for e in events if id(e) in crops]
     strip = None
     if crops:
         w = max(c.shape[1] for c in crops)

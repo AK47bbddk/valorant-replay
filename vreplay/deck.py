@@ -196,6 +196,7 @@ def records(rep: dict) -> list[dict]:
                 "reason_main": reason.get("main"), "dur_clock": rr.get("duration"),
                 "board": (rr.get("assets") or {}).get("board"),
                 "rtype": rtypes.get((n, no)), "branch": F.branch(rep, rr, no),
+                "uv_base": tac.get("uv_base") if T else None,
             })
     return out
 
@@ -819,7 +820,16 @@ def position_png(cfg: dict, map_name: str, rows: list[dict], mark: str | None, p
             pts += [(u, v) for e, u, v, _ in r["uv"] if abs(e - MARK_E[mark]) <= 3]
     if len(pts) < 5:
         return None
-    bg = _icon(cfg, map_name)
+    # 下地：放送のミニマップをコールアウトの座標に写した画像（tactics.uv_base）があればそれ。
+    # valorant-api のマップ画像は、マップによってコールアウトの座標と基準がずれることがある
+    bg = None
+    for r in rows:
+        p_ = r.get("uv_base")
+        if p_ and Path(p_).exists():
+            bg = cv2.resize(cv2.imread(p_), (512, 512))
+            break
+    if bg is None:
+        bg = _icon(cfg, map_name)
     if bg is None:
         bg = np.full((512, 512, 3), 245, np.uint8)
         for c in callouts or []:
