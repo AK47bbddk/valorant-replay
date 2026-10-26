@@ -1011,7 +1011,7 @@ def _run_body(cfg: dict, days, match_urls, no_video, force, upsert_only, log, t0
     wh = _Warehouse(cfg, log)
 
     # 1) 対象マップを決めて Notion の行を作る（複数日ならまとめて）
-    todo, reports = [], {}
+    todo, reports, redo = [], {}, set()
     with perf.stage("matches", label="試合の選択・Notion 行更新") as st_match:
         for day in days:
             if len(days) > 1:
@@ -1036,7 +1036,11 @@ def _run_body(cfg: dict, days, match_urls, no_video, force, upsert_only, log, t0
                     done_json = map_dir / "report.json"
                     prev = json.loads(done_json.read_text(encoding="utf-8")) if done_json.exists() else None
                     prev_ok = bool(prev and (prev.get("video_ok") or no_video or not md.vod_id or md.vod_t is None))
-                    if not force and ((page and nt.children(page["id"])) or (not nt and prev_ok)):
+                    retry = bool(prev) and not prev_ok        # 前回は動画解析に失敗 → --force なしでもやり直す
+                    if retry and not force:
+                        redo.add(map_dir)
+                        log(f"  {md.order}. {md.name}: 前回は動画解析に失敗していたのでやり直します")
+                    if not force and not retry and ((page and nt.children(page["id"])) or (not nt and prev_ok)):
                         log(f"  {md.order}. {md.name}: 作成済みのためスキップ（--force で作り直し）")
                         if prev:
                             reports[day].append(prev)
@@ -1129,7 +1133,7 @@ def _run_body(cfg: dict, days, match_urls, no_video, force, upsert_only, log, t0
             def write(rep=rep, page=page, tag=tag, name=f"{m.title} {md.order}. {md.name}"):
                 try:
                     with perf.stage("notion", tag=tag, label="Notion 書き込み") as st_nt:
-                        write_map_page(nt, page["id"], rep, force=force)
+                        write_map_page(nt, page["id"], rep, force=force or map_dir in redo)
                     log(f"    → Notion に書き込みました（{name}）: {page.get('url', '')}"
                         f"（{perf.fmt_seconds(st_nt['seconds'])}）")
                 except Exception as e:

@@ -443,3 +443,32 @@ def test_pipeline_parallel_maps_over_several_days(tmp_path, monkeypatch):
     assert len(reps) == 4 and all(r["analysis_note"] == "ok" for r in reps)
     assert peak[0] == 2
     assert (tmp_path / "2026-10-21" / "index.html").exists() and (tmp_path / "2026-10-22" / "index.html").exists()
+
+
+def test_failed_map_is_retried_without_force(tmp_path, monkeypatch):
+    """前回「動画解析に失敗」したマップだけ、--force なしでもやり直す。"""
+    m = vlr.Match(id="31", url="https://www.vlr.gg/31/x", team1="A", team2="B", event="VCT 2026: Pacific",
+                  stage="Final", dt_jst=datetime(2026, 10, 21, 20, tzinfo=vlr.JST), tag1="AA", tag2="BB")
+    m.maps = [vlr.MapData(order=k, name=nm, game_id=str(k), score1=13, score2=5,
+                          rounds=[vlr.Round(1, 1, "攻撃", "elim")], vod_url="https://youtu.be/v?t=10",
+                          vod_id=f"v{k}", vod_t=10) for k, nm in ((1, "Bind"), (2, "Split"))]
+    monkeypatch.setattr(vlr, "list_results", lambda d: [{"url": m.url, "event": m.event, "team1": "A", "team2": "B"}])
+    monkeypatch.setattr(vlr, "parse_match", lambda url: m)
+    monkeypatch.delenv("NOTION_TOKEN", raising=False)
+    monkeypatch.setattr(pipeline, "download", lambda cfg, m, md, log: tmp_path / f"{md.vod_id}.mp4")
+    calls, broken = [], {"Split"}
+
+    def fake_analyze(cfg, m, md, rep, map_dir, path, log):
+        calls.append(md.name)
+        if md.name in broken:
+            raise IndexError("list index out of range")
+        rep["video_ok"] = True
+    monkeypatch.setattr(pipeline, "analyze_video", fake_analyze)
+    cfg = config.load()
+    cfg["output"]["dir"] = str(tmp_path)
+    pipeline.run(cfg, day=date(2026, 10, 21), log=lambda *a: None)
+    assert sorted(calls) == ["Bind", "Split"]
+    calls.clear()
+    broken.clear()
+    reps = pipeline.run(cfg, day=date(2026, 10, 21), log=lambda *a: None)
+    assert calls == ["Split"] and all(r.get("video_ok") for r in reps)
