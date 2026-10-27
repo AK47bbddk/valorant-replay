@@ -1,4 +1,5 @@
 from datetime import datetime
+from pathlib import Path
 
 from vreplay import config, pipeline, video, vlr
 
@@ -276,3 +277,63 @@ def test_broken_part_is_skipped(tmp_path, monkeypatch):
     monkeypatch.setattr(V, "_parts_size", lambda p: (4, 4))
     got = list(V.iter_keyframes(man, 0, 200))
     assert len(got) == 1 and got[0][0] == 0
+
+
+def _fake_ytdlp(monkeypatch, V, avail):
+    """avail: {クライアント: 取れる高さ}。-f の [height=h] / [height<=h] を見てファイルを作る偽の yt-dlp。"""
+    import re
+    import types
+    calls = []
+
+    def run(cmd, **kw):
+        client = None
+        if "--extractor-args" in cmd:
+            client = cmd[cmd.index("--extractor-args") + 1].split("=")[1]
+        fmt = cmd[cmd.index("-f") + 1]
+        calls.append((client, fmt))
+        h = avail.get(client)
+        exact = re.search(r"\[height=(\d+)\]", fmt)
+        if h is None or (exact and int(exact.group(1)) != h):
+            return types.SimpleNamespace(returncode=1, stderr="ERROR: Requested format is not available", stdout="")
+        out = cmd[cmd.index("-o") + 1].replace("%(ext)s", "mp4")
+        Path(out).write_text(str(h))
+        return types.SimpleNamespace(returncode=0, stderr="", stdout="")
+    monkeypatch.setattr(V.subprocess, "run", run)
+    monkeypatch.setattr(V, "_part_height", lambda f: int(Path(f).read_text() or 0) if Path(f).exists() else 0)
+    monkeypatch.setattr(V, "has_video", lambda f: Path(f).exists())
+    V._GOOD_CLIENT.clear()
+    return calls
+
+
+def test_download_prefers_exact_1080_over_other_clients(tmp_path, monkeypatch):
+    """既定のクライアントが 360p しか出さなくても、1080p を出せるクライアントを先に探す。"""
+    from vreplay import video as V
+    calls = _fake_ytdlp(monkeypatch, V, {None: 360, "web_safari": 1080})
+    f = V._download_one("vid", 0, 100, tmp_path, 1080, "", (), None, 4)
+    assert f.read_text() == "1080"
+    assert all("[height=1080]" in fmt for _, fmt in calls)          # 低い解像度は試していない
+    assert V._GOOD_CLIENT["vid"] == "web_safari"
+    # 次の部分は 1080p が取れたクライアントから試す
+    calls.clear()
+    V._download_one("vid", 100, 200, tmp_path, 1080, "", (), None, 4)
+    assert calls[0][0] == "web_safari"
+
+
+def test_download_falls_back_when_no_1080(tmp_path, monkeypatch):
+    from vreplay import video as V
+    _fake_ytdlp(monkeypatch, V, {None: 720})
+    f = V._download_one("vid", 0, 100, tmp_path, 1080, "", (), None, 4)
+    assert f.read_text() == "720"
+    import pytest
+    with pytest.raises(RuntimeError):
+        V._download_one("vid", 100, 200, tmp_path, 1080, "", (), None, 4, strict=True)
+
+
+def test_split_download_redoes_low_resolution_parts(tmp_path, monkeypatch):
+    """前の実行で 360p になった部分が残っていても、1080p で取り直してそろえる。"""
+    from vreplay import video as V
+    _fake_ytdlp(monkeypatch, V, {"web_safari": 1080})
+    (tmp_path / "vid_0_252.mp4").write_text("360")                   # 1 つ目の部分だけ 360p のキャッシュ
+    man = V.download_segment("vid", 0, 480, tmp_path, 1080, method="sections", parts=2, overlap=12)
+    hs = [f.read_text() for f, _, _ in V.parts_of(man)]
+    assert hs == ["1080", "1080"]

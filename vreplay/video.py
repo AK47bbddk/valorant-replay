@@ -96,6 +96,28 @@ CLIENTS = [None, "web_safari", "tv", "mweb", "web_embedded"]
 RANGE_CLIENTS = ["tv", "web_safari", None, "visionos", "mweb", "android_vr"]
 
 
+_GOOD_CLIENT: dict[str, str | None] = {}     # 動画 → 1080p が取れたクライアント（ほかの部分もまずそれで取る）
+
+
+def _ordered(clients: list, video_id: str) -> list:
+    if video_id in _GOOD_CLIENT and _GOOD_CLIENT[video_id] in clients:
+        g = _GOOD_CLIENT[video_id]
+        return [g] + [c for c in clients if c != g]
+    return list(clients)
+
+
+def _height_filter(h: int, strict: bool) -> str:
+    """strict は「ちょうど h」（部分ごとに解像度が混ざらないように）、そうでなければ「h 以下でいちばん良いもの」。"""
+    return f"[height={h}]" if strict else f"[height<={h}]"
+
+
+def _part_height(f) -> int:
+    try:
+        return probe(Path(f))[1]
+    except Exception:
+        return 0
+
+
 def _err_lines(stderr: str, n: int = 6) -> str:
     keys = ("ERROR", "error", "Error", "403", "failed", "Invalid", "denied")
     lines = [l.strip() for l in stderr.replace("\r", "\n").splitlines() if any(k in l for k in keys)]
@@ -115,6 +137,10 @@ def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_hei
     つなぎ方を書いた {video_id}_{start}_{end}.parts.json を返す。デコードは parts.json をそのまま渡せばよい。
     """
     hit = find_cached(video_id, start, end, [out_dir, *cache_dirs])
+    if hit and parts_of(hit) and len({_part_height(f) for f, _, _ in parts_of(hit)}) > 1:
+        if log:
+            log(f"    キャッシュ済みの動画は部分ごとに解像度が違うので、{max_height}p でない部分を取り直します")
+        hit = None
     if hit:
         if log:
             log(f"    キャッシュ済みの動画を使います（{hit.name}）")
@@ -162,6 +188,27 @@ def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_hei
 
     with ThreadPoolExecutor(max_workers=parts, thread_name_prefix="取得-部分") as ex:
         files = list(ex.map(get, pieces))
+    # 解像度をそろえる：max_height の部分があるのに低い部分があれば、その部分だけ max_height ちょうどで取り直す
+    hs = [_part_height(f) for f in files]
+    low = [k for k, hh in enumerate(hs) if 0 < hh < max_height]
+    if low and max(hs) >= max_height:
+        if log:
+            log(f"    {len(low)} 個の部分が {max_height}p 未満だったので、{max_height}p で取り直します")
+
+        def redo(k):
+            if Path(files[k]).parent == out_dir:
+                Path(files[k]).unlink(missing_ok=True)
+            try:
+                return k, _download_one(video_id, pieces[k][0], pieces[k][1], out_dir, max_height, cookies, (),
+                                        None, fragments, strict=True)
+            except Exception:
+                return k, None
+        with ThreadPoolExecutor(max_workers=len(low), thread_name_prefix="取得-部分") as ex:
+            for k, f in ex.map(redo, low):
+                if f is not None and has_video(f):
+                    files[k] = f
+                else:                                   # 取り直せなければ、低い解像度のまま（解析時に拡大してそろえる）
+                    files[k] = get(pieces[k], retry=False)
     man = out_dir / f"{video_id}_{start}_{end}{PARTS}"
     entries = []
     bad = [k for k, f in enumerate(files) if not has_video(f)]
@@ -201,8 +248,10 @@ def _download_range(video_id: str, start: int, end: int, out_dir: Path, max_heig
     h = max_height
     # DASH（mp4・バイト範囲で取れる）を優先し、無ければ HLS（m3u8・断片ごとに取れる）。
     # 既定クライアントの DASH は PO トークンが無いと 403 になることがあり、tv などは HLS しか返さない
-    fmt = (f"bv*[height<={h}][vcodec^=avc1][ext=mp4][protocol=https]/bv*[height<={h}][ext=mp4][protocol=https]"
-           f"/bv*[height<={h}][protocol^=m3u8]/b[height<={h}][protocol^=m3u8]")
+    def fmt_of(strict):
+        q = _height_filter(h, strict)
+        return (f"bv*{q}[vcodec^=avc1][ext=mp4][protocol=https]/bv*{q}[ext=mp4][protocol=https]"
+                f"/bv*{q}[protocol^=m3u8]/b{q}[protocol^=m3u8]")
     errors = []
     info = getter = None
     jar = None
@@ -214,9 +263,10 @@ def _download_range(video_id: str, start: int, end: int, out_dir: Path, max_heig
         except Exception:
             jar = None
     # クライアントごとに「形式の URL を得る → 1KB だけ取ってみる」。通った最初のクライアントで本番を取る
-    for client in RANGE_CLIENTS:
+    # まず max_height ちょうどの形式をすべてのクライアントで探し、どこにも無いときだけ低い解像度を許す
+    for client, strict in [(c, True) for c in _ordered(RANGE_CLIENTS, video_id)] + [(c, False) for c in RANGE_CLIENTS]:
         try:
-            info = ytrange.format_info(video_id, fmt, cookies, client, env)
+            info = ytrange.format_info(video_id, fmt_of(strict), cookies, client, env)
             getter = ytrange.Getter(info["url"], info["headers"], info.get("opts"), cookies=jar)
             if info.get("kind") == "hls":
                 getter.fetch(info["url"])            # プレイリストが取れるか（断片の取得は本番で）
@@ -224,9 +274,12 @@ def _download_range(video_id: str, start: int, end: int, out_dir: Path, max_heig
             else:
                 mode = getter.probe()
             info["client"], info["mode"] = client or "既定", mode
+            if strict:
+                _GOOD_CLIENT[video_id] = client
             break
         except Exception as e:
-            errors.append(f"[{client or '既定'}] {str(e).splitlines()[-1][:160] if str(e) else e}")
+            errors.append(f"[{client or '既定'}{'' if strict else '・低解像度可'}] "
+                          f"{str(e).splitlines()[-1][:160] if str(e) else e}")
             if "Sign in to confirm" in str(e):
                 raise
             info = getter = None
@@ -250,6 +303,7 @@ def _download_range(video_id: str, start: int, end: int, out_dir: Path, max_heig
     man = out_dir / f"{stem}{PARTS}"
     man.write_text(json.dumps({"video_id": video_id, "start": start, "end": end, "method": "range",
                                "format": info.get("format_id"), "client": info.get("client"),
+                               "height": info.get("height"),
                                "mode": info.get("mode"),
                                "parts": [{"file": dst.name, "offset": round(t0 - start, 3), "length": round(dur, 3)}]},
                               ensure_ascii=False, indent=1), encoding="utf-8")
@@ -257,20 +311,25 @@ def _download_range(video_id: str, start: int, end: int, out_dir: Path, max_heig
 
 
 def _download_one(video_id: str, start: int, end: int, out_dir: Path, max_height: int, cookies: str,
-                  cache_dirs, log, fragments: int) -> Path:
+                  cache_dirs, log, fragments: int, strict: bool | None = None) -> Path:
+    """strict=None：まず max_height ちょうどをすべてのクライアントで試し、無ければ低い解像度も許す。
+    strict=True：max_height ちょうどだけ（取れなければ例外）。"""
     hit = find_cached(video_id, start, end, [out_dir, *cache_dirs])
     if hit and not hit.name.endswith(PARTS):
         return hit
+    passes = [True] if strict else [True, False]
     stem = f"{video_id}_{start}_{end}"
     env = _ytdlp_env()
     # いったんローカルの一時フォルダに落としてから移す（Drive などに ffmpeg が直接書くと失敗することがある）
     tmp = Path(tempfile.mkdtemp(prefix="vreplay_"))
     errors = []
-    for client in CLIENTS:
+    tries = [(c, True) for c in _ordered(CLIENTS, video_id)] + ([(c, False) for c in CLIENTS] if False in passes else [])
+    for client, strict_ in tries:
+        q = _height_filter(max_height, strict_)
         cmd = [sys.executable, "-m", "yt_dlp", "--no-warnings", "--no-part", "--no-progress",
                "--sleep-requests", "1", "--remote-components", "ejs:github",
                "--concurrent-fragments", str(max(1, int(fragments))),
-               "-f", f"bv*[height<={max_height}][vcodec^=avc1]/bv*[height<={max_height}]/b[height<={max_height}]",
+               "-f", f"bv*{q}[vcodec^=avc1]/bv*{q}" + ("" if strict_ else f"/b{q}"),
                "--download-sections", f"*{start}-{end}",
                "-o", str(tmp / (stem + ".%(ext)s")),
                f"https://www.youtube.com/watch?v={video_id}"]
@@ -282,7 +341,15 @@ def _download_one(video_id: str, start: int, end: int, out_dir: Path, max_height
             cmd[3:3] = ["--js-runtimes", "node"]
         r = subprocess.run(cmd, capture_output=True, text=True, env=env)
         got = find_cached(video_id, start, end, [tmp])
+        if r.returncode == 0 and got and strict_ and _part_height(got) != max_height:
+            errors.append(f"[{client or '既定'}] {_part_height(got)}p しか取れませんでした")
+            got.unlink(missing_ok=True)
+            continue
         if r.returncode == 0 and got:
+            if strict_:
+                _GOOD_CLIENT[video_id] = client
+            elif log:
+                log(f"    {max_height}p の形式が無かったので {_part_height(got)}p で取得しました")
             dst = out_dir / got.name
             shutil.move(str(got), dst)
             shutil.rmtree(tmp, ignore_errors=True)
@@ -296,14 +363,14 @@ def _download_one(video_id: str, start: int, end: int, out_dir: Path, max_height
             extra = ("（cookies は読み込めています。それでも弾かれる場合は、cookies が無効になっているか、"
                      "この IP 自体がブロックされています。② の自宅 PC で取得する方法が確実です）") if cookies else ""
             raise RuntimeError(COOKIE_HELP + extra + f"\n  yt-dlp: {_err_lines(r.stderr)}")
-        errors.append(f"[{client or '既定'}] {_err_lines(r.stderr)}")
+        errors.append(f"[{client or '既定'}{'' if strict_ else '・低解像度可'}] {_err_lines(r.stderr)}")
     shutil.rmtree(tmp, ignore_errors=True)
     hint = ""
     joined = " ".join(errors)
     if "challenge solving failed" in joined or "Only images are available" in joined:
         hint = ("（YouTube の暗号解読に失敗：JS ランタイムがありません。Colab ではセル1で deno が入ります。"
                 "自宅 PC では `winget install DenoLand.Deno` を実行してください）")
-    raise RuntimeError(f"yt-dlp failed{hint}（{len(CLIENTS)} 通りの取得方法をすべて試しました）:\n  "
+    raise RuntimeError(f"yt-dlp failed{hint}（{len(tries)} 通りの取得方法をすべて試しました）:\n  "
                        + "\n  ".join(errors))
 
 
