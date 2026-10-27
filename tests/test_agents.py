@@ -30,7 +30,7 @@ def _minimap(icons, places, H=400, W=400, frac=0.058):
         x0, y0 = int(x * W) - D // 2, int(y * H) - D // 2
         roi = img[y0:y0 + D, x0:x0 + D]
         roi[m > 0] = t[m > 0]
-        rim = (40, 40, 230) if color == "warm" else (200, 190, 30)
+        rim = {"warm": (40, 40, 230), "cool": (200, 190, 30), "yellow": (40, 220, 235)}[color]
         cv2.circle(img, (int(x * W), int(y * H)), int(D * 0.52), rim, 3)
     return img
 
@@ -154,3 +154,57 @@ def test_static_background_marks_are_not_icons():
     found = AG.match(img, icons, {1: names, 2: []}, {"warm": 1, "cool": 2}, icon_frac=0.04, background=bg)
     assert all(abs(e["x"] - 0.75) > 0.05 for e in found)
     assert any(e["agent"] == "Sova" for e in found)
+
+
+
+def test_mirror_comp_split_by_rim_and_spectated_yellow():
+    """両チームに同じエージェント（Omen 同士）でも縁の色でチームを分ける。観戦中（黄色の縁）の選手は顔で決める。"""
+    names = ["Omen", "Jett", "Sova", "Fade", "Viper"]
+    icons = {n: _icon(i) for i, n in enumerate(names)}
+    places = [("Omen", "warm", 0.25, 0.3), ("Omen", "cool", 0.7, 0.7), ("Jett", "yellow", 0.3, 0.75),
+              ("Sova", "cool", 0.75, 0.25)]
+    img = _minimap(icons, places, frac=0.05)
+    teams = {1: ["Omen", "Jett", "Viper"], 2: ["Omen", "Sova", "Fade"]}
+    found = AG.match(img, icons, teams, {"warm": 1, "cool": 2}, icon_frac=0.05)
+    got = {(f["team"], f["agent"]): (round(f["x"], 2), round(f["y"], 2)) for f in found}
+    assert got[(1, "Omen")] == (0.25, 0.3) and got[(2, "Omen")] == (0.7, 0.7)
+    assert got[(1, "Jett")] == (0.3, 0.75) and got[(2, "Sova")] == (0.75, 0.25)
+    assert all(f["agent"] for f in found)                              # 誰か分からない丸は出さない
+
+
+def test_consensus_keeps_supported_and_drops_one_frame_noise():
+    e = lambda a, x, y, s, t=1: {"agent": a, "team": t, "x": x, "y": y, "score": s}
+    frames = [(0.0, [e("Sova", 0.5, 0.5, 0.5), e("Jett", 0.9, 0.1, 0.48)]),     # Jett は 1 枚だけ・弱い → 捨てる
+              (1.0, [e("Sova", 0.52, 0.5, 0.55), e("Omen", 0.2, 0.2, 0.7)]),    # Omen は 1 枚だけでも顔がよく似る → 残す
+              (-1.0, [e("Sova", 0.49, 0.51, 0.52)])]
+    got = {f["agent"]: f for f in AG.consensus(frames)}
+    assert set(got) == {"Sova", "Omen"}
+    assert (got["Sova"]["x"], got["Sova"]["y"]) == (0.5, 0.5)                     # 節目にいちばん近い時刻
+    assert len(AG.consensus(frames, alive={1: 1})) == 1
+
+
+def test_register_official_map_art_to_broadcast():
+    """公式のマップ画像（床の形）を 90 度回して縮めた放送風のミニマップに、縁の線で重ねる。"""
+    import math
+    S = 512
+    alpha = np.zeros((S, S), np.uint8)
+    pts = np.array([[80, 60], [300, 60], [300, 160], [430, 160], [430, 430], [220, 430], [220, 300],
+                    [80, 300]], np.int32)
+    cv2.fillPoly(alpha, [pts], 255)
+    cv2.rectangle(alpha, (140, 120), (200, 240), 0, -1)                   # 中の壁
+    art = np.dstack([np.full((S, S, 3), 120, np.uint8), alpha])
+    H, W = 400, 420
+    T_true = {"mirror": False, "theta": math.pi / 2 + 0.03, "scale": 0.85, "tx": 0.53, "ty": 0.5}
+    floor = MM.warp_art(alpha, T_true, (H, W)) > 128
+    rng = np.random.default_rng(0)
+    bg = rng.integers(40, 90, (H, W, 3)).astype(np.uint8)                  # 後ろの試合画面
+    bg[floor] = (128, 128, 128)
+    edge = cv2.morphologyEx(floor.astype(np.uint8), cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8)) > 0
+    bg[edge] = (235, 235, 235)                                             # 床の縁の白い線
+    T = MM.register_art(bg, alpha)
+    assert T["ok"], T["msg"]
+    got = MM.warp_art(alpha, T, (H, W)) > 128
+    iou = (got & floor).sum() / (got | floor).sum()
+    assert iou > 0.93, iou
+    base = TT.board_base(bg, got, art=MM.warp_art(art, T, (H, W)))
+    assert base.shape[1] == 560 and base[5, 5].min() >= 240                # 床の外は白

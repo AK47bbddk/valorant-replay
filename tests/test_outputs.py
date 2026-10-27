@@ -507,3 +507,15 @@ def test_ocr_pool_runs_in_parallel_up_to_size():
     pool.rec([0])
     st = thread_stats()
     assert st["n"] >= 1 and st["run"] > 0
+
+
+def test_feed_rows_ignore_vivid_ad_banner():
+    """Mastercard（priceless）の帯は鮮やかな青と赤：くすんだキルの箱と彩度で分ける。"""
+    from pathlib import Path
+
+    import cv2
+    from vreplay.extract import feed_rows
+    im = cv2.imread(str(Path(__file__).parent / "fixtures" / "killfeed_strip_mastercard.jpg"))
+    rows = [(a, b) for a, b, _ in feed_rows(im)]
+    assert len(rows) == 6
+    assert all(not (a < 55 and b > 40) for a, b in rows)          # 31〜62 の帯（priceless）は行にしない

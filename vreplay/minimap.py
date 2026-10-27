@@ -557,3 +557,101 @@ def region_of(reg: dict | None, placed: list[dict], x: float, y: float) -> dict 
             return None
         k = int(np.bincount(vals).argmax())
     return placed[k] if 0 <= k < len(placed) else None
+
+
+# ---------------------------------------------------------------- 公式のマップ画像（valorant-api）で合わせる
+def _art_edges(alpha: np.ndarray, n: int = 2000, seed: int = 0) -> np.ndarray:
+    """公式のマップ画像の床の縁の点（0..1 の座標）。"""
+    import cv2
+    a = cv2.resize(alpha, (512, 512), interpolation=cv2.INTER_AREA)
+    edge = cv2.Canny((a > 128).astype(np.uint8) * 255, 50, 150)
+    ys, xs = np.nonzero(edge)
+    if len(xs) < 50:
+        return np.zeros((0, 2))
+    sel = np.random.default_rng(seed).choice(len(xs), min(n, len(xs)), replace=False)
+    return np.stack([xs[sel] / 512.0, ys[sel] / 512.0], axis=1)
+
+
+def register_art(bg: np.ndarray, alpha: np.ndarray, T0: dict | None = None) -> dict:
+    """公式のマップ画像（valorant-api の displayIcon。コールアウトと同じ 0..1 の座標）の床の縁を、
+    放送のミニマップの白い縁の線に重ねる相似変換。
+
+    放送のミニマップは公式の画像を回転・拡大しただけなので、縁の線どうしの距離（chamfer）を最小にすると
+    ほぼ 1 画素の精度で重なる。重なれば、床の 2 値画像は公式の画像をそのまま写したものを使える
+    （放送の色から作る床は、半透明の床の後ろの試合画面の色で穴が開いたり、床の外に島ができたりする）。
+    T0（コールアウトと床で合わせた結果）があればそこから、無ければ 90 度ごとの向きから詰める。"""
+    import cv2
+    H, W = bg.shape[:2]
+    uv = _art_edges(alpha)
+    line = _outline(bg)
+    if len(uv) < 50 or line.sum() < 200:
+        return {"ok": False, "msg": "ミニマップ合わせ（公式の画像）：縁の線が見つかりません"}
+    dt = cv2.distanceTransform((~line).astype(np.uint8), cv2.DIST_L2, 3)
+    cap = 8.0
+    a0 = uv - 0.5
+
+    def cost(th, s, tx, ty, inl=False):
+        c, sn = math.cos(th), math.sin(th)
+        X = (s * (c * a0[:, 0] - sn * a0[:, 1]) + tx) * H
+        Y = (s * (sn * a0[:, 0] + c * a0[:, 1]) + ty) * H
+        ins = (X >= 0) & (X < W - 1) & (Y >= 0) & (Y < H - 1)
+        d = np.full(len(X), cap)
+        d[ins] = np.minimum(dt[Y[ins].astype(int), X[ins].astype(int)], cap)
+        return float((d <= 2.0).mean()) if inl else float(d.mean())
+
+    def refine(p):
+        cur = (cost(*p), *p)
+        for st, ss, sx in ((math.radians(2), 0.03, 0.02), (math.radians(1), 0.015, 0.008),
+                           (math.radians(0.4), 0.006, 0.003), (math.radians(0.15), 0.002, 0.001)):
+            improved = True
+            while improved:
+                improved = False
+                best = cur
+                for dth in (-st, 0, st):
+                    for ds in (1 - ss, 1, 1 + ss):
+                        for dx in (-sx, 0, sx):
+                            for dy in (-sx, 0, sx):
+                                q = (cur[1] + dth, cur[2] * ds, cur[3] + dx, cur[4] + dy)
+                                v = cost(*q)
+                                if v < best[0] - 1e-6:
+                                    best = (v, *q)
+                if best[0] < cur[0] - 1e-6:
+                    cur, improved = best, True
+        return cur
+
+    inits = []
+    if T0 and not T0.get("mirror") and T0.get("scale"):
+        inits.append((T0["theta"], T0["scale"], T0["tx"], T0["ty"]))
+    # 縁の線の広がりと、公式の画像の床の広がりから、向きごとの倍率・位置の初期値
+    ys, xs = np.nonzero(line)
+    lx0, lx1 = np.percentile(xs, [1, 99]) / H
+    ly0, ly1 = np.percentile(ys, [1, 99]) / H
+    for k in range(4):
+        th = k * math.pi / 2
+        c, sn = math.cos(th), math.sin(th)
+        R = np.stack([c * a0[:, 0] - sn * a0[:, 1], sn * a0[:, 0] + c * a0[:, 1]], axis=1)
+        span = max(R[:, 1].max() - R[:, 1].min(), 1e-3)
+        s = (ly1 - ly0) / span
+        cx, cy = (R[:, 0].max() + R[:, 0].min()) / 2 * s, (R[:, 1].max() + R[:, 1].min()) / 2 * s
+        inits.append((th, s, (lx0 + lx1) / 2 - cx, (ly0 + ly1) / 2 - cy))
+    best = min((refine(p) for p in inits), key=lambda r: r[0])
+    _, th, s, tx, ty = best
+    inl = cost(th, s, tx, ty, inl=True)
+    T = {"mirror": False, "theta": th, "scale": s, "tx": tx, "ty": ty, "aspect": W / H,
+         "method": "art", "inlier": round(inl, 2), "chamfer": round(best[0], 2),
+         "confidence": round(max(0.0, min(1.0, (inl - 0.35) / 0.35)), 2)}
+    T["ok"] = inl >= 0.5 and best[0] <= 3.5
+    T["msg"] = (f"ミニマップ合わせ（公式のマップ画像）：回転 {math.degrees(th) % 360:.0f}°・倍率 {s:.2f}"
+                f"（縁の一致 {inl:.0%}・平均のずれ {best[0]:.1f}px）" + ("" if T["ok"] else "（合わず）"))
+    return T
+
+
+def warp_art(img: np.ndarray, T: dict, shape: tuple) -> np.ndarray:
+    """公式のマップ画像（正方形）を、変換 T で放送のミニマップの切り抜きの座標に写す。"""
+    import cv2
+    H, W = shape[:2]
+    S = img.shape[0]
+    src = np.float32([[0, 0], [S, 0], [0, S]])
+    dst = np.float32([[v * H for v in apply(T, u, w)] for u, w in ((0, 0), (1, 0), (0, 1))])
+    A = cv2.getAffineTransform(src, dst)
+    return cv2.warpAffine(img, A, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)

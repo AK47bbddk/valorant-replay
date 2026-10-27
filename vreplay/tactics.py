@@ -276,7 +276,8 @@ def _wanted_times(rlist: list[dict], every: float) -> list[float]:
     for r in rlist:
         st, en = float(r["start"]), float(r["end"])
         out += [st - 5.0, st - 3.0, st - 1.0]
-        out += [st + e for e in MARKS.values() if st + e < en]
+        # 節目は前後 1 秒も読む（アイコンの照合を数枚で確かめるため）
+        out += [st + e + d for e in MARKS.values() for d in (-1.0, 0.0, 1.0) if st + e + d < en]
         e = 4.0
         while st + e < en:
             out.append(st + e)
@@ -377,8 +378,11 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
             st_ = float(r["start"])
             for label, e in MARKS.items():
                 d_, key = abs(t - st_ - e), (int(r["n"]), label)
-                if d_ <= 2.0 and (key not in keep or d_ < keep[key][0]):
-                    keep[key] = (d_, t, mm.copy())
+                if d_ <= 2.0:
+                    lst = keep.setdefault(key, [])
+                    lst.append((d_, t, mm.copy()))
+                    lst.sort(key=lambda x: x[0])
+                    del lst[3:]
         h, w = mm.shape[:2]
         aspect = w / max(1, h)
         if len(bgs) < 40 and (not bgs or len(samples) % 7 == 0) and (not bgs or bgs[0].shape == mm.shape):
@@ -398,6 +402,23 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         cv2.imwrite(str(bg_path), background, [cv2.IMWRITE_JPEG_QUALITY, 92])
     # 床（歩ける場所）の 2 値画像。床から離れた点（UI・背景のちらつき）は捨てる
     mask = MM.map_mask(background)
+    # 公式のマップ画像の床の縁を放送の白い縁の線に重ねる。重なれば、床・位置合わせはそれを使う
+    # （放送の色から作る床は、半透明の床の後ろの試合画面の色で穴が開いたり、床の外に島ができたりする）
+    T_art, art_crop = None, None
+    T_mask = MM.fit_mask(mask, meta, bg=background) if mask is not None else {"ok": False, "msg": "床が見つかりません"}
+    art = map_art(cfg, meta["name"] or map_name) if meta else None
+    if art is not None:
+        try:
+            T_art = MM.register_art(background, art[:, :, 3], T_mask if T_mask.get("ok") else None)
+            if T_art.get("ok"):
+                mask = MM.warp_art(art[:, :, 3], T_art, background.shape) > 128
+                art_crop = MM.warp_art(art, T_art, background.shape)
+            elif log:
+                log(f"    {T_art['msg']}")
+        except Exception as e:
+            T_art = None
+            if log:
+                log(f"    公式のマップ画像で合わせられませんでした（{e}）")
     near = None
     if mask is not None:
         dist = cv2.distanceTransform((~mask).astype(np.uint8), cv2.DIST_L2, 3)
@@ -428,7 +449,7 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
 
     start_by_n = {int(r["n"]): float(r["start"]) for r in rlist}
     # まず地形（床の形）でコールアウトを重ねる。だめなら試合中の点で合わせる
-    T = MM.fit_mask(mask, meta, bg=background) if mask is not None else {"ok": False, "msg": "床が見つかりません"}
+    T = T_art if T_art is not None and T_art.get("ok") else T_mask
     if T.get("ok"):
         placed = MM.place(T, meta["callouts"])
         warm1, votes = _warm_team1(samples, placed, start_by_n, alive_fn)
@@ -584,7 +605,7 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
     if agent_teams and keep:
         agent_info = _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed, aspect,
                                       T if T.get("ok") else None, background, out_dir, round_tac, log,
-                                      icons=icons, icon_frac=icon_frac, alive_fn=alive_fn)
+                                      icons=icons, icon_frac=icon_frac, alive_fn=alive_fn, art=art_crop)
         _agent_setups(agent_info, round_tac)
     top_callouts = [{"name": n, "count": c} for n, c in callouts_all.most_common(12)]
     top_sites = [{"site": s, "count": c} for s, c in sites_all.most_common()]
@@ -599,6 +620,7 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         "mean_dots": round(mean_dots, 2),
         "confidence": confidence,
         "aligned": bool(T.get("ok")),
+        "align_method": T.get("method"),
         "transform": {k_: T[k_] for k_ in ("mirror", "theta", "scale", "tx", "ty", "aspect", "confidence")
                       if k_ in T} if T.get("ok") else None,
         "orientation": k,
@@ -767,6 +789,29 @@ def _agent_setups(agent_info: dict | None, round_tac: dict) -> None:
                 "dots_shape": old_su.get("shape")}
 
 
+def map_art(cfg: dict, map_name: str):
+    """valorant-api の公式のマップ画像（displayIcon、透過つき RGBA の正方形）。取れなければ None。
+    床（不透明の部分）の形が放送のミニマップとそのまま重なるので、位置合わせ・床の判定・配置図の下地に使う。"""
+    from urllib.request import urlopen
+    d = Path(cfg["output"]["dir"]) / "_cache" / "map_icons"
+    p = d / f"{_norm(map_name)}.png"
+    if not p.exists():
+        meta = load_map(map_name, cfg, log=None) or {}
+        url = meta.get("icon")
+        if not url:
+            return None
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            with urlopen(url, timeout=30) as r:
+                p.write_bytes(r.read())
+        except Exception:
+            return None
+    img = cv2.imread(str(p), cv2.IMREAD_UNCHANGED)
+    if img is None or img.ndim != 3 or img.shape[2] != 4:
+        return None
+    return img
+
+
 def map_icon(cfg: dict, map_name: str, size: int = 512):
     """valorant-api のマップ画像（ミニマップの絵）。透過部分は明るい灰色にして size×size で返す。"""
     from urllib.request import urlopen
@@ -803,8 +848,15 @@ def _uv(T: dict, x: float, y: float, aspect: float = 1.0) -> tuple[float, float]
     return a + 0.5, b + 0.5
 
 
-def board_base(background: np.ndarray, mask: np.ndarray | None, width: int = 560) -> np.ndarray:
-    """配置図の下地：放送のミニマップ（背景の中央値）の床だけを残し、床の外（後ろの試合画面）は白く飛ばす。"""
+def board_base(background: np.ndarray, mask: np.ndarray | None, width: int = 560,
+               art: np.ndarray | None = None) -> np.ndarray:
+    """配置図の下地：放送のミニマップ（背景の中央値）の床だけを残し、床の外（後ろの試合画面）は白く飛ばす。
+    art（放送の座標に写した公式のマップ画像、RGBA）があれば、それを白地に重ねたもの（スキルの線や後ろの画面が映らない）。"""
+    if art is not None and art.shape[:2] == background.shape[:2]:
+        a = art[:, :, 3:4].astype(np.float32) / 255.0
+        img = (art[:, :, :3].astype(np.float32) * a + 250 * (1 - a)).astype(np.uint8)
+        h = int(round(width * img.shape[0] / img.shape[1]))
+        return cv2.resize(img, (width, h), interpolation=cv2.INTER_CUBIC)
     img = background.copy()
     if mask is not None and mask.shape[:2] == img.shape[:2]:
         m = cv2.dilate(mask.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
@@ -863,8 +915,8 @@ def board_png(base: np.ndarray, entries: list[dict], icons: dict, path: Path, to
 
 
 def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed, aspect, T, background,
-                     out_dir, round_tac, log, icons=None, icon_frac=None, alive_fn=None):
-    """節目ごとのミニマップでエージェントのアイコンを照合し、位置・ゾーンと配置図を作る。"""
+                     out_dir, round_tac, log, icons=None, icon_frac=None, alive_fn=None, art=None):
+    """節目ごとのミニマップ（前後 1 秒の数枚）でエージェントのアイコンを照合し、位置・ゾーンと配置図を作る。"""
     from . import agents as AG
     from . import minimap as MM
     if icons is None:
@@ -873,11 +925,14 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
         return None
     icon_frac = icon_frac or ICON_FRAC
     team_color = {v: k for k, v in color_team.items()}
-    base = board_base(background, mask)
+    base = board_base(background, mask, art=art)
     out = {}
     first = None
-    n_found = n_try = 0
-    for (n, label), (_, t, mm) in sorted(keep.items()):
+    n_found = n_try = n_frames = 0
+    for (n, label), frames in sorted(keep.items()):
+        if isinstance(frames, tuple):                 # 古い形（1 枚）
+            frames = [frames]
+        t = frames[0][1]
         alive = None
         if alive_fn is not None:
             try:
@@ -885,13 +940,18 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
                 alive = {1: a1, 2: a2} if a1 is not None and a2 is not None else None
             except Exception:
                 alive = None
-        found = AG.match(mm, icons, agent_teams, color_team, icon_frac=icon_frac,
-                         mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
-                         alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None)
+        per = []
+        for d_, t_, mm in frames:
+            f_ = AG.match(mm, icons, agent_teams, color_team, icon_frac=icon_frac,
+                          mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
+                          alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None)
+            per.append((t_ - frames[0][1] + d_, f_))
+            if f_ and (first is None or len(f_) > len(first[1])):
+                first = (mm, f_)
+        found = AG.consensus(per, alive=alive) if len(per) > 1 else per[0][1]
         n_try += 1
+        n_frames += len(frames)
         n_found += len(found)
-        if found and (first is None or len(found) > len(first[1])):
-            first = (mm, found)
         ents = []
         for f in found:
             c = MM.region_of(reg, placed, f["x"], f["y"]) if reg else None
@@ -907,8 +967,7 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
         out.setdefault(str(n), {})[label] = ents
         rt = round_tac.get(n)
         if rt is not None and ents and out_dir and label in ("1:40", "1:15"):   # 開始直後と初動
-            # 配置図は放送のミニマップ（背景の中央値）の上に、見つけた場所そのままで描く。
-            # マップ画像（valorant-api）に変換して描くと、マップによって座標の基準が違いズレることがあった
+            # 配置図は放送のミニマップの座標のまま描く（下地は放送の座標に写した公式のマップ画像）
             p = Path(out_dir) / "_tactics" / f"board_r{n:02d}_{label.replace(':', '')}.jpg"
             bw, bh = base.shape[1], base.shape[0]
             board_png(base, ents, icons, p, lambda e: (e["x"] * bw, e["y"] * bh), f"R{n} {label}")
@@ -916,7 +975,8 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
     if first is not None and out_dir:
         AG.contact_sheet(first[0], first[1], icons, Path(out_dir) / "_tactics" / "agents_check.jpg", icon_frac=icon_frac)
     if log:
-        log(f"    エージェントの位置：{n_try} 枚で平均 {n_found / max(1, n_try):.1f} 人を照合（アイコン {len(icons)} 種）")
+        log(f"    エージェントの位置：{n_try} 個の節目（{n_frames} 枚）で平均 {n_found / max(1, n_try):.1f} 人"
+            f"（アイコン {len(icons)} 種・前後のフレームで確かめたもの）")
     return out
 
 

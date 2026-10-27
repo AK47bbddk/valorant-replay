@@ -565,13 +565,18 @@ def _row_sig(crop) -> np.ndarray:
     return (cv2.resize(wm, (192, 12), interpolation=cv2.INTER_AREA) > 80).astype(np.float32)
 
 
+BOX_MAX_SAT = 200
+
+
 def _box_masks(img: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """キルフィードの行の色の箱（キラー側・被害者側）。明るい青緑と明るい赤。
-    後ろの試合画面の暗い赤（「B Garage」などの場所の表示の背景）や広告は、明るさで外れる。"""
+    後ろの試合画面の暗い赤（「B Garage」などの場所の表示の背景）は明るさで外れる。
+    キルの箱は半透明のくすんだ色（彩度は 90% の画素で 170 以下）なので、広告の鮮やかな色
+    （Mastercard の青い帯や赤い丸は彩度 220〜255）は彩度の上限で外す。"""
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     h, s_, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
-    teal = (h >= 72) & (h <= 102) & (s_ >= 40) & (v >= 130)
-    red = ((h <= 10) | (h >= 165)) & (s_ >= 45) & (v >= 160)
+    teal = (h >= 72) & (h <= 102) & (s_ >= 40) & (s_ <= BOX_MAX_SAT) & (v >= 130)
+    red = ((h <= 10) | (h >= 165)) & (s_ >= 45) & (s_ <= BOX_MAX_SAT) & (v >= 160)
     return teal, red
 
 
@@ -694,10 +699,11 @@ def kills_in_round(store: FrameStore, idxs: list[int], times: list[float], label
                 ry0, ry1 = row["box"]
                 cy = (ry0 + ry1) / 2
                 hit = next(((a, b) for a, b in boxes if a - 3 <= cy <= b + 3), None)
-                if hit is None and (row.get("partial") or not row.get("killer")):
-                    continue                          # 片側の名前だけで色の箱も無い行（場所の表示・広告の文字）
-                if hit is not None:
-                    row["box"] = (max(0, hit[0] - 2), min(img.shape[0], hit[1] + 2))
+                if hit is None:
+                    # 色の箱の無い行は数えない：場所の表示・広告の文字のほか、広告に隠れかけた行も
+                    # （名前が読めても確認用の画像が広告になる。箱が見えるフレームで改めて数える）
+                    continue
+                row["box"] = (max(0, hit[0] - 2), min(img.shape[0], hit[1] + 2))
             vkey = norm_name(row["victim"])
             key = (norm_name(row["killer"]), vkey)
             if vkey in victims:
@@ -706,11 +712,11 @@ def kills_in_round(store: FrameStore, idxs: list[int], times: list[float], label
                 if not ev.get("killer") and row.get("killer") and t - ev["t"] <= 8:
                     ev.update({k_: v for k_, v in row.items() if k_ not in ("box", "partial")})
                     ev.pop("partial", None)
-                # 確認用の切り抜きが広告などに隠れていたら、後のフレームのきれいな行に差し替える
+                # 確認用の切り抜きは、箱の色がいちばんよく見えている（隠れていない）フレームのものにする
                 y0, y1 = row["box"]
                 c_new = img[y0:y1, :]
                 old_c = crops.get(id(ev))
-                if old_c is not None and _feed_color(old_c) < FEED_MIN_COLOR <= _feed_color(c_new):
+                if old_c is None or _feed_color(c_new) > _feed_color(old_c) + 0.02:
                     crops[id(ev)] = c_new
                 seen[key] = t
                 continue

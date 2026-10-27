@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from pathlib import Path
@@ -23,6 +24,9 @@ API = "https://valorant-api.com/v1/agents?isPlayableCharacter=true"
 # アイコンの縁の色。放送や圧縮で彩度が落ちるので広め（青緑は H≈85、背景の青 H≈115 は含めない）
 WARM = [((0, 50, 80), (12, 255, 255)), ((165, 50, 80), (179, 255, 255))]
 COOL = [((75, 40, 80), (100, 255, 255))]
+# 観戦中（画面に映っている）の選手のアイコンは、チーム色ではなく黄色の縁になる
+YELLOW = [((20, 90, 150), (34, 255, 255))]
+RANGES = {"warm": WARM, "cool": COOL, "yellow": YELLOW}
 
 
 def _norm(s: str) -> str:
@@ -134,7 +138,7 @@ def _on_floor(mask, x, y, W, H, tol: int = 2) -> bool:
     return bool(mask[max(0, my - tol):my + tol + 1, max(0, mx - tol):mx + tol + 1].any())
 
 
-def _peaks(R: np.ndarray, D: float, thr: float, k: int, mask=None) -> list[tuple[int, int, float]]:
+def _peaks(R: np.ndarray, D: float, thr: float, k: int, mask=None, nms: float = 1.1) -> list[tuple[int, int, float]]:
     H, W = R.shape
     R = R.copy()
     out = []
@@ -142,7 +146,7 @@ def _peaks(R: np.ndarray, D: float, thr: float, k: int, mask=None) -> list[tuple
         _, mv, _, (x, y) = cv2.minMaxLoc(R)
         if mv < thr or len(out) >= k:
             break
-        cv2.circle(R, (x, y), max(2, int(D * 1.1)), -1.0, -1)       # 同じアイコンの縁・向きの三角で 2 回拾わない
+        cv2.circle(R, (x, y), max(2, int(D * nms)), -1.0, -1)       # 同じアイコンの縁・向きの三角で 2 回拾わない
         edge = 0.5 * D
         if edge <= x < W - edge and edge <= y < H - edge and _on_floor(mask, x, y, W, H):
             out.append((x, y, float(mv)))
@@ -199,19 +203,20 @@ def estimate_icon_frac(imgs: list[np.ndarray], mask=None, fracs=None, icons: dic
 
 
 def find_icons(img: np.ndarray, icon_frac: float, mask=None, per_color: int = 5, thr: float = 0.22,
-               background: np.ndarray | None = None) -> list[dict]:
+               background: np.ndarray | None = None, colors=("warm", "cool"), nms: float = 1.1) -> list[dict]:
     """チーム色の輪からアイコンの中心を探す。返り値 [{"color", "x", "y"（正規化）, "ring"}]
     background（何枚かの中央値＝動かないものだけの画像）を渡すと、そこでも反応する場所（設置位置の赤い円・
     UI の色など、動かない色の模様）を差し引く。アイコンは動くので中央値には残らない。"""
     H, W = img.shape[:2]
     D = icon_frac * H
     out = []
-    for color, ranges in (("warm", WARM), ("cool", COOL)):
+    for color in colors:
+        ranges = RANGES[color]
         R = _ring_response(img, ranges, D)
         if background is not None and background.shape[:2] == img.shape[:2]:
             Rb = cv2.dilate(_ring_response(background, ranges, D), np.ones((3, 3), np.uint8))
             R = R - np.clip(Rb, 0, None)
-        for x, y, v in _peaks(R, D, thr, per_color, mask):
+        for x, y, v in _peaks(R, D, thr, per_color, mask, nms=nms):
             out.append({"color": color, "x": x / W, "y": y / H, "ring": round(v, 2), "px": (x, y)})
     return out
 
@@ -257,48 +262,93 @@ def _assign(scores: np.ndarray) -> list[tuple[int, int]]:
 
 
 def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[str]], color_team: dict[str, int],
-          icon_frac: float = 0.058, thr: float = 0.35, mask: np.ndarray | None = None,
+          icon_frac: float = 0.058, thr: float = 0.45, mask: np.ndarray | None = None,
           alive: dict[int, int] | None = None, background: np.ndarray | None = None) -> list[dict]:
     """ミニマップ 1 枚で、誰がどこにいるか。
-    ① チーム色の輪から、アイコンらしい場所の候補を多めに（生存人数の 3 倍）拾う
-    ② 各候補を、そのチームの 5 人の顔とだけ比べ、1 人 1 か所で合計がいちばん似る組に割り当てる
-       （同じチームに同じエージェントはいない。顔の似ていない候補＝背景の色・スキルの円は残らない）
+    ① 縁の輪（暖色・寒色・観戦中の黄色）から、アイコンらしい場所の候補を多めに拾う（重なったアイコンも
+       拾えるよう、近い候補も残す）
+    ② 各候補を 10 人の顔と比べ、「候補 ↔（チーム, エージェント）」を 1 対 1 で、合計がいちばん似る組に割り当てる。
+       縁がチーム色の候補はそのチームにしか割り当てない（両チームに同じエージェントがいても分けられる）。
+       黄色の縁（観戦中の選手）は顔だけで決める
+    ③ 顔が似ていない候補（スキルの円・線・設置位置の印）は捨てる。誰か分からない丸は出さない
     teams: {1: [5 人のエージェント], 2: [...]}、color_team: {"warm": 1 or 2, "cool": ...}、alive: {1: 生存人数, 2: ...}
-    返り値 [{"agent"（似ていなければ None）, "team", "x", "y"（正規化）, "score", "ring", "guess"}]"""
+    返り値 [{"agent", "team", "x", "y"（正規化）, "score", "ring", "guess", "color"}]"""
     if img is None or img.size == 0:
         return []
     H, W = img.shape[:2]
     D = icon_frac * H
-    out = []
-    for color in ("warm", "cool"):
-        team = color_team.get(color)
-        cap = min(5, int((alive or {}).get(team, 5)))
-        if cap <= 0:
-            continue
-        cands = [f for f in find_icons(img, icon_frac, mask, per_color=cap * 3, thr=0.15, background=background)
-                 if f["color"] == color]
-        ags = [a for a in dict.fromkeys(teams.get(team) or []) if a in icons]
-        if not cands:
-            continue
-        if not ags:          # 顔が無いときは輪の強い順に
-            for f in cands[:cap]:
-                if f["ring"] >= 0.3:
-                    out.append({"agent": None, "team": team, "x": f["x"], "y": f["y"], "score": 0.0,
-                                "ring": f["ring"], "guess": None})
-            continue
-        S = np.array([[_face_score(img, f["px"], icons[a], D) for a in ags] for f in cands])
-        # 輪の強さも少し足す（顔が隠れていても縁がはっきりしたアイコンを残す）
-        R = np.array([f["ring"] for f in cands])[:, None]
-        pairs = _assign(S + 0.2 * R)
-        pairs.sort(key=lambda ij: -S[ij[0], ij[1]])
-        for i, j in pairs[:cap]:
-            sc = float(S[i, j])
-            if sc < thr and cands[i]["ring"] < 0.35:
+    team_color = {t: c for c, t in color_team.items()}
+    caps = {t: min(5, int((alive or {}).get(t, 5))) for t in (1, 2)}
+    slots = [(t, a) for t in (1, 2) if caps[t] > 0 for a in dict.fromkeys(teams.get(t) or []) if a in icons]
+    if not slots:          # 顔が無いときは輪の強い順に（エージェントは不明）
+        out = []
+        for color in ("warm", "cool"):
+            team = color_team.get(color)
+            if not caps.get(team):
                 continue
-            f = cands[i]
-            out.append({"agent": ags[j] if sc >= thr else None, "team": team, "x": f["x"], "y": f["y"],
-                        "score": round(sc, 2), "ring": f["ring"], "guess": ags[j]})
+            for f in find_icons(img, icon_frac, mask, per_color=caps[team], thr=0.3, background=background,
+                                colors=(color,)):
+                out.append({"agent": None, "team": team, "x": f["x"], "y": f["y"], "score": 0.0,
+                            "ring": f["ring"], "guess": None, "color": color})
+        return out
+    cands = find_icons(img, icon_frac, mask, per_color=12, thr=0.15, background=background,
+                       colors=("warm", "cool", "yellow"), nms=0.8)
+    if not cands:
+        return []
+    ags = list(dict.fromkeys(a for _, a in slots))
+    face = np.array([[_face_score(img, f["px"], icons[a], D) for a in ags] for f in cands])
+    S = np.array([[face[i, ags.index(a)] for t, a in slots] for i in range(len(cands))])
+    total = S + 0.2 * np.array([f["ring"] for f in cands])[:, None]
+    for i, f in enumerate(cands):
+        for j, (t, _) in enumerate(slots):
+            tc = team_color.get(t)
+            if f["color"] == "yellow" or tc is None:
+                continue
+            total[i, j] += 0.1 if f["color"] == tc else -9.0     # 縁の色が相手チーム → 割り当てない
+    pairs = [(i, j) for i, j in _assign(total) if total[i, j] > -1.0 and S[i, j] >= thr]
+    pairs.sort(key=lambda ij: -S[ij[0], ij[1]])
+    out, used = [], {1: 0, 2: 0}
+    for i, j in pairs:
+        t, a = slots[j]
+        if used[t] >= caps[t]:
+            continue
+        used[t] += 1
+        f = cands[i]
+        out.append({"agent": a, "team": t, "x": f["x"], "y": f["y"], "score": round(float(S[i, j]), 2),
+                    "ring": f["ring"], "guess": a, "color": team_color.get(t, f["color"])})
     return out
+
+
+def consensus(frames: list[tuple[float, list[dict]]], max_move: float = 0.08, strong: float = 0.6,
+              alive: dict[int, int] | None = None) -> list[dict]:
+    """節目の前後の何枚か（[(節目からの秒数の差, match の結果)]）から、エージェントごとの位置を 1 つに決める。
+    1 枚だけだと、アイコンの重なり・スモーク・観戦画面の切り替えで見落としたり、スキルの印を誤って拾ったりする。
+    ほかのフレームでも近く（max_move 以内）に見つかった検出か、顔がよく似た（strong 以上の）検出だけを残し、
+    その中で節目にいちばん近い時刻のものを使う。"""
+    by: dict = {}
+    for k, (dt, found) in enumerate(sorted(frames, key=lambda x: abs(x[0]))):
+        for e in found:
+            if e.get("agent"):
+                by.setdefault((e["team"], e["agent"]), []).append((k, abs(dt), e))
+    out = []
+    for key, dets in by.items():
+        ok = []
+        for k, dt, e in dets:
+            sup = sum(1 for k2, _, e2 in dets if k2 != k and math.hypot(e["x"] - e2["x"], e["y"] - e2["y"]) <= max_move)
+            if sup >= 1 or e["score"] >= strong:
+                ok.append((dt, -e["score"], e))
+        if ok:
+            ok.sort(key=lambda x: (x[0], x[1]))
+            e = dict(ok[0][2])
+            e["frames"] = len(dets)
+            out.append(e)
+    # 生存人数より多ければ、似ている度合いの低いものから外す
+    res = []
+    for t in (1, 2):
+        mine = sorted((e for e in out if e["team"] == t), key=lambda e: -e["score"])
+        cap = (alive or {}).get(t)
+        res += mine[:cap] if cap is not None else mine
+    return res
 
 
 def contact_sheet(img: np.ndarray, found: list[dict], icons: dict[str, np.ndarray], path: Path,
