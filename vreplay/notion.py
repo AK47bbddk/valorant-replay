@@ -310,7 +310,7 @@ def round_blocks(rep: dict, r: dict, uploads: dict[str, str | None]) -> list[dic
 
     start = _img(uploads.get(a.get("minimap_start")), "開始時のミニマップ")
     gif = _img(uploads.get(a.get("minimap_gif")), f"ラウンド中（{rep.get('gif_speed', 4)}倍速・リプレイ除外）")
-    board = _img(uploads.get(a.get("board")), "配置図（開始直後 1:40・アイコン照合）")
+    board = _img(uploads.get(a.get("board")), "配置図（ラウンド開始時 1:40・アイコン照合）")
     cl = _columns(*[[b] for b in (start, gif, board) if b])
     out += [cl] if cl else [b for b in (start, gif, board) if b]
 

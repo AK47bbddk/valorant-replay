@@ -183,7 +183,7 @@ def test_analyze_video_aligns_minimap_and_reads_plant_site(tmp_path, monkeypatch
     assert len(ag) == 5 and sum(e["zone"] == "A" for e in ag) >= 4
     su1 = tac["rounds"]["1"]["setups"]["1"]
     assert su1["source"] == "agents" and su1["shape"].startswith("A") and su1["who"]
-    assert (tmp_path / "o" / "_tactics" / "board_r01_115.jpg").exists()
+    assert not (tmp_path / "o" / "_tactics" / "board_r01_115.jpg").exists()      # 1:15 の図は作らない
     assert (tmp_path / "o" / "_tactics" / "board_r01_140.jpg").exists()          # 開始直後
     assert tac["rounds"]["1"]["boards"].get("1:40")
     assert (tmp_path / "o" / "_tactics" / "agents_check.jpg").exists()

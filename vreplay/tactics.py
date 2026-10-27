@@ -966,12 +966,18 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
                          "score": round(f["score"], 2), "color": team_color.get(f["team"])})
         out.setdefault(str(n), {})[label] = ents
         rt = round_tac.get(n)
-        if rt is not None and ents and out_dir and label in ("1:40", "1:15"):   # 開始直後と初動
-            # 配置図は放送のミニマップの座標のまま描く（下地は放送の座標に写した公式のマップ画像）
-            p = Path(out_dir) / "_tactics" / f"board_r{n:02d}_{label.replace(':', '')}.jpg"
+        if rt is not None and out_dir and label == "1:40":     # 配置図はラウンド開始時だけ
+            p = Path(out_dir) / "_tactics" / f"board_r{n:02d}_140.jpg"
             bw, bh = base.shape[1], base.shape[0]
-            board_png(base, ents, icons, p, lambda e: (e["x"] * bw, e["y"] * bh), f"R{n} {label}")
-            rt.setdefault("boards", {})[label] = str(p)
+            if len(ents) >= 3:
+                # 放送のミニマップの座標のまま描く（下地は放送の座標に写した公式のマップ画像）
+                board_png(base, ents, icons, p, lambda e: (e["x"] * bw, e["y"] * bh), f"R{n} 1:40")
+            else:
+                # 開始直後はスポーンでアイコンが重なって照合しきれないことがある。そのときは別の時刻の図にせず、
+                # 開始時の放送のミニマップそのものを載せる
+                raw = cv2.resize(frames[0][2], (bw, bh), interpolation=cv2.INTER_CUBIC)
+                board_png(raw, ents, icons, p, lambda e: (e["x"] * bw, e["y"] * bh), f"R{n} 1:40")
+            rt.setdefault("boards", {})["1:40"] = str(p)
     if first is not None and out_dir:
         AG.contact_sheet(first[0], first[1], icons, Path(out_dir) / "_tactics" / "agents_check.jpg", icon_frac=icon_frac)
     if log:

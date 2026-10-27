@@ -560,8 +560,8 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                         "aligned": bool(tac.get("aligned")),
                     }
                     bd = (rt.get("boards") or {})
-                    if bd.get("1:40") or bd.get("1:15"):
-                        rr.setdefault("assets", {})["board"] = bd.get("1:40") or bd.get("1:15")
+                    if bd.get("1:40"):                      # 配置図はラウンド開始時（1:40）だけ
+                        rr.setdefault("assets", {})["board"] = bd["1:40"]
                 bits = "・".join(f"{x['site']}{x['count']}" for x in (tac.get("sites") or [])[:3])
                 n_ps = sum(1 for v in tac["rounds"].values() if v.get("plant_site"))
                 tac_note = (f"サイト {bits or '-'}・点 {tac['mean_dots']:.1f}/枚"
