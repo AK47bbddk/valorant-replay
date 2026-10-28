@@ -58,6 +58,7 @@ llm:
   #   GEMINI_API_KEY（Gemini 3.8 Flash 無料枠。混雑・回数制限は待ってやり直す）→ OPENROUTER_API_KEY（そのとき無料のモデルを一覧から探す）→ DEEPSEEK_API_KEY（有料）
   # 1 つに決めるなら provider: openrouter / gemini / deepseek / anthropic と、必要なら model・base_url
   provider: auto
+  order: ""             # auto のときに試す順（例 "openrouter,gemini"）。空なら gemini → openrouter → deepseek。環境変数 VREPLAY_LLM_ORDER でも可
   model: ""
   base_url: ""
   # auto のときのモデルの上書き（無料モデルの名前が変わったとき用）

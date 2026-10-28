@@ -323,3 +323,37 @@ def test_llm_moves_on_when_gemini_stays_busy(monkeypatch, tmp_path):
     calls.clear()
     assert llm.summarize(cfg, {"i": 9}, log=lambda *a: None) == "ok"
     assert calls == ["x/y:free"]                               # 3 冊目は Gemini を待たない
+
+
+
+def test_llm_daily_limit_and_order(monkeypatch, tmp_path):
+    """Gemini の 1 日の上限（429・PerDay）は待たずに次へ。llm.order で試す順を変えられる。"""
+    for k in ("DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "o")
+    monkeypatch.setattr(llm, "openrouter_free", lambda cfg=None, limit=3: ["x/y:free"])
+    monkeypatch.setattr(llm, "_NO_CREDIT", set())
+    monkeypatch.setattr(llm, "_BUSY", {})
+    sleeps = []
+    monkeypatch.setattr(llm.time, "sleep", sleeps.append)
+    calls = []
+
+    class R:
+        def __init__(self, code, text=""):
+            self.status_code, self.text, self.headers = code, text, {}
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    def post(url, timeout, headers, json):
+        calls.append(json["model"])
+        if "googleapis" in url:
+            return R(429, '{"error":{"status":"RESOURCE_EXHAUSTED","details":[{"quotaId":"GenerateRequestsPerDayPerProject"}]}}')
+        return R(200)
+    monkeypatch.setattr(llm.requests, "post", post)
+    cfg = {"output": {"dir": str(tmp_path)}, "llm": {"provider": "auto"}}
+    assert llm.summarize(cfg, {"d": 1}, log=lambda *a: None) == "ok"
+    assert calls == ["gemini-3.8-flash", "x/y:free"] and not sleeps
+    cfg["llm"]["order"] = "openrouter,gemini"
+    assert [c[0] for c in llm._chain(cfg)][0] == "openrouter"

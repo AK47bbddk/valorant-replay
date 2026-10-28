@@ -95,7 +95,10 @@ def _chain(cfg: dict) -> list[tuple[str, str, str, str]]:
     """使える (provider, key, base_url, model) を試す順に。OpenRouter は無料モデルを何個か続けて並べる。"""
     lcfg = cfg.get("llm") or {}
     want = (lcfg.get("provider") or "auto").lower()
-    names = AUTO_ORDER if want == "auto" else (want,)
+    order = lcfg.get("order") or os.environ.get("VREPLAY_LLM_ORDER") or ""
+    if isinstance(order, str):
+        order = [x.strip() for x in order.split(",") if x.strip()]
+    names = (tuple(order) or AUTO_ORDER) if want == "auto" else (want,)
     out = []
     for name in names:
         if name not in PROVIDERS:
@@ -171,6 +174,11 @@ def _call(name: str, key: str, base: str, model: str, body: str, max_tokens: int
                 time.sleep(10)
                 continue
             raise
+        low = r.text.lower()
+        if r.status_code == 429 and any(w in low for w in ("perday", "per day", "per_day", "daily")):
+            _NO_CREDIT.add(name)                       # 1 日の上限：待っても今日は通らない
+            log(f"  LLM（{name}）は 1 日の上限に達しています。この実行では使わずに次へ進みます")
+            return None
         if r.status_code in RETRY_STATUS and attempt < retries:
             w = _wait_seconds(r, attempt)
             why = "混雑" if r.status_code in (500, 502, 503, 504) else "回数制限"
