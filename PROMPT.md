@@ -122,7 +122,7 @@ vreplay playbook --sync --team G2 --map Split
   意図のキーワード（ラッシュ・スプリット・フェイク・ラーク・リテイク・ローテ・スタック・デフォルト・ミッドコントロール・エコ・フォース・
   オペレーター・ポストプラント・遅延・エントリー・クラッチ・ULT・タイムアウト）と根拠の一節（100 文字以内）を `rr["caster"]` に残す。数字とは分けて「言及」として表示。
 - **LLM の要約**（`vreplay/llm.py`、任意）：Claude の API は使わない（`llm.provider: anthropic` と明示したときだけ）。
-  無料の OpenAI 互換 API を順に試す：`GEMINI_API_KEY`（`gemini-3.8-flash`。503 混雑・429 回数制限・5xx は 10/20/40/60 秒（Retry-After があればそれ）待って `llm.retries`（既定 4）回までやり直す。`reasoning_effort: low`、考える分も含め max_tokens 4096 以上。名前が使えなければ `gemini-flash-latest`）→ `OPENROUTER_API_KEY`（DeepSeek V4 Flash の無料版は 2026-10 に終了。`llm.openrouter_free` が OpenRouter のモデル一覧から無料の文章向けモデルを 3 つまで選び、使えなければ次へ。一覧は 12 時間キャッシュ）（
+  無料の OpenAI 互換 API を順に試す：`GEMINI_API_KEY`（`gemini-3.8-flash`。503 混雑・429 回数制限・5xx は 10/20/40/60 秒（Retry-After があればそれ）待って `llm.retries`（既定 4）回までやり直す。`reasoning_effort: low`、考える分も含め max_tokens 4096 以上。名前が使えなければ `gemini-flash-latest`）。1 回の要求は 90 秒で打ち切り、402（前払い切れ）・429 の 1 日の上限（PerDay）はやり直さずその実行では使わない。Gemini の混雑で 2 冊続けて書けなければ残りはほかのモデルを先に。`llm.order`（環境変数 `VREPLAY_LLM_ORDER`）で試す順を変えられる→ `OPENROUTER_API_KEY`（DeepSeek V4 Flash の無料版は 2026-10 に終了。`llm.openrouter_free` が OpenRouter のモデル一覧から無料の文章向けモデルを 3 つまで選び、使えなければ次へ。一覧は 12 時間キャッシュ）（
   無料枠）→ `DEEPSEEK_API_KEY`（有料）。429 は待ってやり直し、失敗したら次へ。集計（指標・型・担当・セット・解説の言及）から
   ATK / DEF summary と対策メモを書かせる。データにないことは「推測：」と分けさせ、`<think>` は落とし、結果はキャッシュする。
 - **Notion 版**（`vreplay/notion_playbook.py`）：親ページの下に「{map} {tag} Comp PlayBook」。`# 概要` → ATK summary → ATK のデータベース →
