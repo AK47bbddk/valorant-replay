@@ -1,8 +1,10 @@
 """（任意）集計した数字と解説の字幕から、プレイブックの「ATK summary / DEF summary」の文章を LLM に書かせる。
 
 無料で使える OpenAI 互換の API を、キーがあるものから順に試す（Colab のシークレットに登録）：
-  1. OPENROUTER_API_KEY … OpenRouter の DeepSeek V4 Flash 無料版（deepseek/deepseek-v4-flash:free）
-  2. GEMINI_API_KEY     … Google AI Studio の Gemini Flash（無料枠）
+  1. GEMINI_API_KEY     … Google AI Studio の Gemini Flash（無料枠。日本語の文章がいちばん安定）
+  2. OPENROUTER_API_KEY … OpenRouter の無料モデル（名前の末尾が :free）。無料のモデルはよく入れ替わる
+     （DeepSeek V4 Flash の無料版は 2026 年 10 月に終了）ので、実行のたびに OpenRouter のモデル一覧から
+     いま無料の文章向けモデルを探して使う（一覧は output.dir/_cache に 12 時間ためる）
   3. DEEPSEEK_API_KEY   … DeepSeek 公式（有料・安価）
   Claude（ANTHROPIC_API_KEY）は llm.provider: anthropic と書いたときだけ使う。
 どれも無ければ何もしない（要約のスライドが省かれるだけ）。
@@ -23,12 +25,16 @@ import requests
 
 # provider → (環境変数, base_url, 既定のモデル)
 PROVIDERS = {
-    "openrouter": ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1", "deepseek/deepseek-v4-flash:free"),
+    "openrouter": ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1", "auto"),
     "gemini": ("GEMINI_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-flash-latest"),
     "deepseek": ("DEEPSEEK_API_KEY", "https://api.deepseek.com", "deepseek-chat"),
     "anthropic": ("ANTHROPIC_API_KEY", "https://api.anthropic.com/v1", "claude-sonnet-5-5"),
 }
-AUTO_ORDER = ("openrouter", "gemini", "deepseek")
+AUTO_ORDER = ("gemini", "openrouter", "deepseek")
+# OpenRouter の無料モデルを選ぶ順（id に含まれる語）。文章の要約に向かないもの（音声・画像生成・安全判定）は除く
+FREE_PREFER = ("deepseek", "qwen", "gemma-4-31b", "nemotron-3-super", "nemotron-3-ultra", "llama", "gemma",
+               "mistral", "nemotron")
+FREE_SKIP = ("lyria", "voice", "tts", "audio", "safety", "guard", "embed", "image", "nano", "lightning", "2-6b")
 
 SYSTEM = (
     "あなたは VALORANT のプロチームのアナリスト兼コーチです。渡されるのは、試合映像を自動解析して集計した"
@@ -45,8 +51,43 @@ SYSTEM = (
 )
 
 
+def openrouter_free(cfg: dict | None = None, limit: int = 3) -> list[str]:
+    """OpenRouter で今いる無料の文章向けモデルの id（選ぶ順）。一覧が取れなければ []。"""
+    cache = Path((cfg or {}).get("output", {}).get("dir") or ".") / "_cache" / "openrouter_models.json"
+    data = None
+    try:
+        if cache.exists() and time.time() - cache.stat().st_mtime < 12 * 3600:
+            data = json.loads(cache.read_text("utf-8"))
+    except Exception:
+        data = None
+    if data is None:
+        try:
+            r = requests.get("https://openrouter.ai/api/v1/models", timeout=20)
+            data = r.json().get("data") or []
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps(data), "utf-8")
+        except Exception:
+            return []
+    free = []
+    for m in data:
+        mid = str(m.get("id") or "")
+        pr = m.get("pricing") or {}
+        out_mod = ((m.get("architecture") or {}).get("output_modalities")) or ["text"]
+        if not (mid.endswith(":free") or (str(pr.get("prompt")) == "0" and str(pr.get("completion")) == "0")):
+            continue
+        if "text" not in out_mod or any(w in mid.lower() for w in FREE_SKIP):
+            continue
+        free.append((mid, int(m.get("context_length") or 0)))
+
+    def rank(x):
+        low = x[0].lower()
+        k = next((i for i, w in enumerate(FREE_PREFER) if w in low), len(FREE_PREFER))
+        return (k, -x[1])
+    return [mid for mid, _ in sorted(free, key=rank)[:limit]]
+
+
 def _chain(cfg: dict) -> list[tuple[str, str, str, str]]:
-    """使える (provider, key, base_url, model) を試す順に。"""
+    """使える (provider, key, base_url, model) を試す順に。OpenRouter は無料モデルを何個か続けて並べる。"""
     lcfg = cfg.get("llm") or {}
     want = (lcfg.get("provider") or "auto").lower()
     names = AUTO_ORDER if want == "auto" else (want,)
@@ -63,6 +104,11 @@ def _chain(cfg: dict) -> list[tuple[str, str, str, str]]:
         if want != "auto":       # 1 つに決めたときだけ、model・base_url の上書きを効かせる
             base = lcfg.get("base_url") or base
             model = lcfg.get("model") or model
+        if name == "openrouter":
+            ms = [model] if model and model != "auto" else []
+            ms += [m for m in openrouter_free(cfg) if m not in ms]
+            out += [(name, key, base.rstrip("/"), m) for m in ms]
+            continue
         out.append((name, key, base.rstrip("/"), model))
     return out
 
@@ -99,7 +145,11 @@ def _call(name: str, key: str, base: str, model: str, body: str, max_tokens: int
             time.sleep(8 * (attempt + 1))
             continue
         if r.status_code >= 400:
-            log(f"  LLM（{name} / {model}）エラー {r.status_code}: {r.text[:200]}")
+            if name == "openrouter" and r.status_code in (404, 400) and any(
+                    w in r.text for w in ("unavailable", "No endpoints", "not a valid model")):
+                log(f"  LLM（openrouter / {model}）は使えなくなっていたので次を試します")
+            else:
+                log(f"  LLM（{name} / {model}）エラー {r.status_code}: {r.text[:200]}")
             return None
         ch = (r.json().get("choices") or [{}])[0]
         return (ch.get("message") or {}).get("content") or ""

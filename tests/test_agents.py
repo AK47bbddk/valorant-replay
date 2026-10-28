@@ -92,7 +92,21 @@ def test_llm_provider_chain_and_call(monkeypatch, tmp_path):
     assert not llm.available(cfg)                 # Claude は明示したときだけ
     monkeypatch.setenv("GEMINI_API_KEY", "g")
     monkeypatch.setenv("OPENROUTER_API_KEY", "o")
-    assert [c[0] for c in llm._chain(cfg)] == ["openrouter", "gemini"]
+    models = [{"id": "x/voice-turbo:free", "pricing": {"prompt": "0", "completion": "0"}},
+              {"id": "nvidia/nemotron-3-super-120b-a12b:free", "context_length": 262144},
+              {"id": "deepseek/deepseek-v4-flash", "pricing": {"prompt": "0.0000001", "completion": "0.0000002"}},
+              {"id": "google/gemma-4-31b-it:free", "context_length": 131072}]
+
+    class G:
+        def json(self):
+            return {"data": models}
+    monkeypatch.setattr(llm.requests, "get", lambda url, timeout: G())
+    assert llm.openrouter_free(cfg) == ["google/gemma-4-31b-it:free", "nvidia/nemotron-3-super-120b-a12b:free"]
+    chain = llm._chain(cfg)
+    assert [c[0] for c in chain] == ["gemini", "openrouter", "openrouter"]
+    cfg["llm"]["provider"] = "openrouter"
+    chain = llm._chain(cfg)
+    assert [c[3] for c in chain] == ["google/gemma-4-31b-it:free", "nvidia/nemotron-3-super-120b-a12b:free"]
     calls = []
 
     class R:
@@ -104,14 +118,15 @@ def test_llm_provider_chain_and_call(monkeypatch, tmp_path):
 
     def post(url, timeout, headers, json):
         calls.append((url, json["model"]))
-        if "openrouter" in url:
-            return R(400, {"error": "x"})
+        if json["model"].startswith("google/"):          # 無料版が終わったモデル → 次の無料モデルへ
+            return R(404, {"error": {"message": "This model is unavailable for free."}})
         return R(200, {"choices": [{"message": {"content": "<think>…</think>ATK summary\n- a"}}]})
     monkeypatch.setattr(llm.requests, "post", post)
-    out = llm.summarize(cfg, {"a": 1}, log=lambda *a: None)
+    logs = []
+    out = llm.summarize(cfg, {"a": 1}, log=logs.append)
     assert out == "ATK summary\n- a"
-    assert calls[0] == ("https://openrouter.ai/api/v1/chat/completions", "deepseek/deepseek-v4-flash:free")
-    assert calls[1][0].startswith("https://generativelanguage.googleapis.com/")
+    assert [c[1] for c in calls] == ["google/gemma-4-31b-it:free", "nvidia/nemotron-3-super-120b-a12b:free"]
+    assert any("使えなくなっていた" in x for x in logs)
     assert os.listdir(tmp_path / "_cache" / "llm")
 
 

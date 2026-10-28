@@ -55,14 +55,14 @@ captions:
 
 llm:
   # プレイブックの ATK/DEF summary を書かせる LLM。auto はキーのあるものを順に試す：
-  #   OPENROUTER_API_KEY（DeepSeek V4 Flash 無料版）→ GEMINI_API_KEY（Gemini Flash 無料枠）→ DEEPSEEK_API_KEY（有料）
+  #   GEMINI_API_KEY（Gemini Flash 無料枠）→ OPENROUTER_API_KEY（そのとき無料のモデルを一覧から探す）→ DEEPSEEK_API_KEY（有料）
   # 1 つに決めるなら provider: openrouter / gemini / deepseek / anthropic と、必要なら model・base_url
   provider: auto
   model: ""
   base_url: ""
   # auto のときのモデルの上書き（無料モデルの名前が変わったとき用）
   models:
-    openrouter: deepseek/deepseek-v4-flash:free
+    openrouter: auto      # auto = OpenRouter のモデル一覧から無料のものを探す。決めるなら id（例 google/gemma-4-31b-it:free）
     gemini: gemini-flash-latest
   max_tokens: 1500
 
