@@ -34,6 +34,8 @@ PROVIDERS = {
 AUTO_ORDER = ("gemini", "openrouter", "deepseek")
 RETRY_STATUS = (429, 500, 502, 503, 504)       # 混雑・回数制限・一時的な不調。待てば通ることが多い
 _NO_CREDIT: set[str] = set()                    # 前払いのクレジットが切れた（402）プロバイダー。この実行ではもう呼ばない
+_BUSY: dict[str, int] = {}                      # やり直しても書けなかった回数（続けて 2 冊だめなら、この実行では後回し）
+TIMEOUT = 90                                    # 1 回の要求の待ち時間（秒）。混雑時は返事が来ないまま待ち続けるので短めに
 # OpenRouter の無料モデルを選ぶ順（id に含まれる語）。文章の要約に向かないもの（音声・画像生成・安全判定）は除く
 FREE_PREFER = ("deepseek", "qwen", "gemma-4-31b", "nemotron-3-super", "nemotron-3-ultra", "llama", "gemma",
                "mistral", "nemotron")
@@ -162,7 +164,7 @@ def _call(name: str, key: str, base: str, model: str, body: str, max_tokens: int
         payload["reasoning_effort"] = reasoning        # Gemini の考える量（low・medium・high）
     for attempt in range(retries + 1):
         try:
-            r = requests.post(base + "/chat/completions", timeout=180, headers=headers, json=payload)
+            r = requests.post(base + "/chat/completions", timeout=TIMEOUT, headers=headers, json=payload)
         except requests.RequestException as e:        # 接続の切断・タイムアウトもやり直す
             if attempt < retries:
                 log(f"  LLM（{name} / {model}）に接続できず（{type(e).__name__}）。10 秒待ってやり直します")
@@ -206,6 +208,9 @@ def summarize(cfg: dict, data: dict, log=print) -> str | None:
         return cache.read_text(encoding="utf-8")
     retries = int(lcfg.get("retries") if lcfg.get("retries") is not None else 4)
     reasoning = lcfg.get("reasoning_effort") or "low"
+    if _BUSY.get("gemini", 0) >= 2:
+        # 混雑が続いている：この実行の残りは、ほかのモデルを先に試し、だめなときだけ Gemini に戻る
+        chain = [c for c in chain if c[0] != "gemini"] + [c for c in chain if c[0] == "gemini"]
     for name, key, base, model in chain:
         if name in _NO_CREDIT:
             continue
@@ -218,6 +223,13 @@ def summarize(cfg: dict, data: dict, log=print) -> str | None:
         except Exception as e:
             log(f"  LLM（{name}）に接続できませんでした（{e}）")
             continue
+        if name == "gemini" and model != "gemini-flash-latest":
+            if text:
+                _BUSY["gemini"] = 0
+            else:
+                _BUSY["gemini"] = _BUSY.get("gemini", 0) + 1
+                if _BUSY["gemini"] == 2:
+                    log("  Gemini の混雑が続いているので、この実行の残りはほかのモデルを先に使います")
         if text:
             log(f"  要約：{name} / {model}")
             cache.parent.mkdir(parents=True, exist_ok=True)

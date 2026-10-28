@@ -269,6 +269,7 @@ def test_llm_skips_gemini_when_prepaid_credit_is_gone(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENROUTER_API_KEY", "o")
     monkeypatch.setattr(llm, "openrouter_free", lambda cfg=None, limit=3: ["x/y:free"])
     monkeypatch.setattr(llm, "_NO_CREDIT", set())
+    monkeypatch.setattr(llm, "_BUSY", {})
     monkeypatch.setattr(llm.time, "sleep", lambda s: None)
     calls = []
 
@@ -290,3 +291,35 @@ def test_llm_skips_gemini_when_prepaid_credit_is_gone(monkeypatch, tmp_path):
     assert calls == ["gemini-3.8-flash", "x/y:free"]
     assert llm.summarize(cfg, {"c": 4}, log=lambda *a: None) == "ok"
     assert calls[2:] == ["x/y:free"]                          # 2 冊目からは Gemini を呼ばない
+
+
+
+def test_llm_moves_on_when_gemini_stays_busy(monkeypatch, tmp_path):
+    """2 冊続けて Gemini が混雑で書けなければ、この実行の残りは OpenRouter を先に使う。"""
+    for k in ("DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "o")
+    monkeypatch.setattr(llm, "openrouter_free", lambda cfg=None, limit=3: ["x/y:free"])
+    monkeypatch.setattr(llm, "_NO_CREDIT", set())
+    monkeypatch.setattr(llm, "_BUSY", {})
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    calls = []
+
+    class R:
+        def __init__(self, code):
+            self.status_code, self.text, self.headers = code, str(code), {}
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    def post(url, timeout, headers, json):
+        calls.append(json["model"])
+        return R(503 if "googleapis" in url else 200)
+    monkeypatch.setattr(llm.requests, "post", post)
+    cfg = {"output": {"dir": str(tmp_path)}, "llm": {"provider": "auto", "retries": 1}}
+    for i in range(2):
+        assert llm.summarize(cfg, {"i": i}, log=lambda *a: None) == "ok"
+    calls.clear()
+    assert llm.summarize(cfg, {"i": 9}, log=lambda *a: None) == "ok"
+    assert calls == ["x/y:free"]                               # 3 冊目は Gemini を待たない
