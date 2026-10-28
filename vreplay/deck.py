@@ -1240,7 +1240,8 @@ def build(cfg: dict, out_dir: Path, team: str | None = None, map_name: str | Non
         if notion is not None and notion_parent and kind == "team":
             from .notion_playbook import export
             try:
-                url = export(notion, cfg, key, rs, by_map[mp], notion_parent, out_dir / "img" / slug, log=log)
+                url = export(notion, cfg, key, rs, by_map[mp], notion_parent, out_dir / "img" / slug, log=log,
+                             reps={(str(rp.get("match_id")), rp.get("order")): rp for rp in reps})
                 log(f"  Notion に書きました：{title} {url}")
             except Exception as e:
                 log(f"  Notion への書き込みに失敗（{title}）：{e}")

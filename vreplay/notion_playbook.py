@@ -8,8 +8,9 @@
     [DEF のデータベース] … 初動の配置の型・リテイク
   ## メモ            … 解説の言及・weak point・データの量
 
-データベースの各行のページは、左に説明（回数・勝率・形・コールアウト・その後の展開・例のラウンドの動画）、
-右にその型のときの位置（マップ画像に重ねたもの）を並べる。
+データベースの各行のページは、左に説明（回数・勝率・形・コールアウト・その後の展開）、
+右にその型のときの位置（マップ画像に重ねたもの）を並べ、その下に例のラウンドの動画と、
+動画のすぐ下にトグルで畳んだそのラウンドの分析（勝因・ミニマップ GIF・開始時の配置図・購入と武器・キル・ULT）を置く。
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ from collections import Counter
 from pathlib import Path
 
 from . import deck as D
-from .notion import Notion, _bullet, _columns, _h, _img, _para, _rt
+from .notion import Notion, _bullet, _columns, _h, _img, _para, _rt, round_blocks
 
 ATTACK, DEFENSE = D.ATTACK, D.DEFENSE
 
@@ -50,8 +51,53 @@ def _db(nt: Notion, parent: str, title: str, kind_options: list[str]) -> str:
     return r["data_sources"][0]["id"]
 
 
+class _Uploader:
+    """1 冊を書くあいだ、同じ画像は 1 回だけアップロードする（例のラウンドは複数の型に出てくる）。"""
+
+    def __init__(self, nt: Notion):
+        self.nt, self.ids = nt, {}
+
+    def __call__(self, path) -> str | None:
+        if not path or not Path(path).exists():
+            return None
+        key = str(path)
+        if key not in self.ids:
+            try:
+                self.ids[key] = self.nt.upload(key)
+            except Exception:
+                self.ids[key] = None
+        return self.ids[key]
+
+
+def _round_toggle(r: dict, rep: dict | None, up) -> dict | None:
+    """例のラウンドの動画の下に置く、畳んだ「このラウンドの分析」。"""
+    if not rep:
+        return None
+    rr = next((x for x in rep.get("rounds") or [] if int(x.get("n") or 0) == int(r["n"])), None)
+    if rr is None:
+        return None
+    a = rr.get("assets") or {}
+    uploads = {p: up(p) for p in a.values() if p}
+    kids = []
+    bits = []
+    if (r.get("rtype") or {}).get("label"):
+        bits.append(f"組み立て：{r['rtype']['label']}")
+    if r.get("setup"):
+        bits.append(f"初動の形：{r['setup'].get('name')}" + (f"（{r['setup']['shape']}）" if r["setup"].get("shape") else ""))
+    if (r.get("branch") or {}).get("tag"):
+        bits.append(f"攻め先：{r['branch']['tag']}")
+    if r.get("opp_setup"):
+        bits.append(f"相手の形：{r['opp_setup'].get('name')}")
+    if bits:
+        kids.append(_para(_rt("　".join(bits), bold=True)))
+    kids += round_blocks(rep, rr, uploads, flat=True)
+    title = (f"このラウンドの分析（{r.get('tag')} vs {r.get('opp_tag')} {r.get('map')} R{r['n']}"
+             f"・ミニマップ GIF・配置図・キル・武器・ULT）")
+    return {"type": "toggle", "toggle": {"rich_text": [_rt(title)], "children": kids[:100]}}
+
+
 def _row(nt: Notion, ds: str, name: str, kind: str, rows: list[dict], tags: list[str], body_left: list,
-         img_path: Path | None, examples: list[dict]):
+         img_path: Path | None, examples: list[dict], reps: dict | None = None, up=None):
     n = len(rows)
     w = sum(r["win"] for r in rows)
     buys = sorted({r["buy"] for r in rows if r.get("buy") and r["buy"] != "?"})
@@ -61,14 +107,23 @@ def _row(nt: Notion, ds: str, name: str, kind: str, rows: list[dict], tags: list
         "回数": {"number": n}, "勝率": {"number": round(w / n, 3) if n else None},
         "購入": {"multi_select": [{"name": b} for b in buys]}})
     left = list(body_left)
-    for r in examples:
-        left.append(_para(_rt(f"vs {r['opp_tag']} R{r['n']}（{'勝ち' if r['win'] else '負け'}"
-                              + (f"・{r['reason_main']}" if r.get("reason_main") else "") + "）")))
-        left.append(_video(r["yt"]))
-    fid = nt.upload(img_path) if img_path else None
+    up = up or _Uploader(nt)
+    fid = up(img_path) if img_path else None
     right = [_img(fid, "この型のときの位置（全ラウンドの重ね合わせ）")] if fid else []
     cl = _columns(left, right)
     nt.append(pg["id"], [cl] if cl else left)
+    # 例のラウンド：動画のすぐ下に、そのラウンドの分析をトグルで畳んで置く
+    # （トグルの中に横並びは入れられない＝入れ子の段数の制限。画像は縦に並べる）
+    ex = []
+    for r in examples:
+        ex.append(_para(_rt(f"vs {r['opp_tag']} R{r['n']}（{'勝ち' if r['win'] else '負け'}"
+                            + (f"・{r['reason_main']}" if r.get("reason_main") else "") + "）", bold=True)))
+        ex.append(_video(r["yt"]))
+        tg = _round_toggle(r, (reps or {}).get((str(r["match_id"]), r["order"])), up)
+        if tg:
+            ex.append(tg)
+    for b in ex:                                        # トグルの中身が多いので 1 つずつ送る
+        nt.append(pg["id"], [b])
 
 
 def _plan_blocks(rows: list[dict], side: str, label: str) -> list[dict]:
@@ -149,7 +204,7 @@ def _summary_lines(llm_text: str | None, side_label: str, strong: list[dict], we
 
 
 def export(nt: Notion, cfg: dict, key: dict, rows: list[dict], base: list[dict], parent: str, img_dir: Path,
-           log=print) -> str:
+           log=print, reps: dict | None = None) -> str:
     """1 冊ぶんを Notion に書く。同じ名前のページが親の下にあれば中身を作り直す。返り値はページ URL。"""
     title = key["title"]
     pid = None
@@ -170,6 +225,7 @@ def export(nt: Notion, cfg: dict, key: dict, rows: list[dict], base: list[dict],
         "動画の自動解析から作った叩き台です")], "icon": {"type": "emoji", "emoji": "📘"}}},
         _h(1, "概要")])
     meta = D.tactics_meta(cfg, key["map"])
+    up = _Uploader(nt)
     for side, label in ((ATTACK, "ATK"), (DEFENSE, "DEF")):
         srows = [r for r in rows if r["side"] == side]
         ms = D.evaluate(rows, base, side)
@@ -197,7 +253,7 @@ def export(nt: Notion, cfg: dict, key: dict, rows: list[dict], base: list[dict],
             img = next((Path(b) for b in g.get("boards") or [] if Path(b).exists()), None) or D.position_png(
                 cfg, key["map"], g["rows"], "1:15", img_dir / f"np_{label}_{D._slug(g['name'])}.jpg", meta)
             _row(nt, ds, f"{_code(g['shape'])} {g['name']}".strip().replace("デフォルト", "default"), "Default", g["rows"],
-                 [g["shape"]] + ct, left, img, _examples(g["rows"]))
+                 [g["shape"]] + ct, left, img, _examples(g["rows"]), reps, up)
         if side == ATTACK:
             for g in D.sets(srows):
                 buys = "・".join(f"{b} {c}" for b, c in g["buys"].most_common())
@@ -209,7 +265,7 @@ def export(nt: Notion, cfg: dict, key: dict, rows: list[dict], base: list[dict],
                     left.append(_bullet(_rt("設置直後の位置（平均人数）：" + pz)))
                 img = D.position_png(cfg, key["map"], g["rows"], None, img_dir / f"np_set_{D._slug(g['name'])}.jpg",
                                      meta, plant=True)
-                _row(nt, ds, g["name"], "Set", g["rows"], _caster_tags(g["rows"]), left, img, _examples(g["rows"]))
+                _row(nt, ds, g["name"], "Set", g["rows"], _caster_tags(g["rows"]), left, img, _examples(g["rows"]), reps, up)
         else:
             for site in D.CORE:
                 rr = [r for r in srows if r["plant_site"] == site]
@@ -224,7 +280,7 @@ def export(nt: Notion, cfg: dict, key: dict, rows: list[dict], base: list[dict],
                 if ul:
                     left.append(_bullet(_rt("リテイクで使った ULT（勝ち/使用）：" + ul)))
                 img = D.position_png(cfg, key["map"], rr, None, img_dir / f"np_retake_{site}.jpg", meta, plant=True)
-                _row(nt, ds, f"{site} retake", "Retake", rr, _caster_tags(rr), left, img, _examples(rr))
+                _row(nt, ds, f"{site} retake", "Retake", rr, _caster_tags(rr), left, img, _examples(rr), reps, up)
     # メモ
     memo = [_h(2, "メモ")]
     it = D.intent_summary(rows)

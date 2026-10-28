@@ -96,11 +96,24 @@ def test_notion_playbook_export(tmp_path, monkeypatch):
             return "fu1" if path else None
 
     reps = [report(str(i), "G2", "SEN", i) for i in range(2)]
+    gif = tmp_path / "r01_minimap.gif"
+    gif.write_bytes(b"GIF89a")
+    for rep in reps:
+        for rr in rep["rounds"]:
+            rr["assets"] = {"minimap_gif": str(gif), "board": str(tmp_path / "missing.jpg")}
     rows = [r for rep in reps for r in deck.records(rep)]
     g2 = [r for r in rows if r["team"] == "G2"]
     nt = FakeNotion()
     key = {"title": "Split G2 Comp PlayBook", "map": "Split", "comp": list(g2[0]["comp"])}
-    url = NP.export(nt, {"output": {"dir": str(tmp_path)}}, key, g2, rows, "parent", tmp_path / "img")
+    url = NP.export(nt, {"output": {"dir": str(tmp_path)}}, key, g2, rows, "parent", tmp_path / "img",
+                    reps={(str(rp["match_id"]), rp["order"]): rp for rp in reps})
+    # 例のラウンドの動画のすぐ下に、そのラウンドの分析のトグル（中に GIF。無い画像は飛ばす）
+    seq = [b for c in nt.calls if c[0] == "APPEND" for b in c[2]]
+    vids = [i for i, b in enumerate(seq) if b.get("type") == "video"]
+    assert vids and all(seq[i + 1]["type"] == "toggle" for i in vids)
+    kids = seq[vids[0] + 1]["toggle"]["children"]
+    assert any(k.get("type") == "image" and "ラウンド中" in str(k) for k in kids)
+    assert not any(k.get("type") == "column_list" for k in kids)            # トグルの中に横並びは入れない
     assert url.startswith("https://www.notion.so/")
     dbs = [c for c in nt.calls if c[1] == "/databases"]
     assert [d[2]["title"][0]["text"]["content"] for d in dbs] == ["ATK", "DEF"]

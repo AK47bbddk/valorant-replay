@@ -274,18 +274,28 @@ def _columns(*cols: list) -> dict | None:
         "children": [{"type": "column", "column": {"children": c}} for c in cols]}}
 
 
-def round_blocks(rep: dict, r: dict, uploads: dict[str, str | None]) -> list[dict]:
+def round_blocks(rep: dict, r: dict, uploads: dict[str, str | None], flat: bool = False) -> list[dict]:
     """1 ラウンドぶん。見出し → 勝因（色つきの囲み）→ 開始時ミニマップと GIF を横並び → 購入・武器 → キル・ULT。
     折りたたまず、スクロールするだけで 1 ラウンドずつ全部が見えるようにする（API の入れ子の制限で、
-    横並びはページの直下に置く）。"""
+    横並びはページの直下に置く）。
+    flat=True：トグルの中に入れる用（見出し・区切り線なし、画像は横並びにせず縦に並べる。入れ子の段数を増やさない）。"""
     from . import summary as S
     t1, t2 = rep["tag1"], rep["tag2"]
     a = r.get("assets") or {}
     out = []
-    head = [_rt(f"R{r['n']}　{S.tag(rep, r.get('winner'))} 勝利　{r.get('score') or ''}　{S.how(r)}")]
-    if r.get("yt_url"):
-        head.append(_rt("　▶", link=r["yt_url"]))
-    out.append({"type": "heading_3", "heading_3": {"rich_text": head}})
+
+    def side_by_side(*bs):
+        bs = [b for b in bs if b]
+        if flat:
+            return bs
+        cl = _columns(*[[b] for b in bs])
+        return [cl] if cl else bs
+
+    if not flat:
+        head = [_rt(f"R{r['n']}　{S.tag(rep, r.get('winner'))} 勝利　{r.get('score') or ''}　{S.how(r)}")]
+        if r.get("yt_url"):
+            head.append(_rt("　▶", link=r["yt_url"]))
+        out.append({"type": "heading_3", "heading_3": {"rich_text": head}})
 
     rs = r.get("reason") or {}
     if rs.get("tags"):
@@ -311,8 +321,7 @@ def round_blocks(rep: dict, r: dict, uploads: dict[str, str | None]) -> list[dic
     start = _img(uploads.get(a.get("minimap_start")), "開始時のミニマップ")
     gif = _img(uploads.get(a.get("minimap_gif")), f"ラウンド中（{rep.get('gif_speed', 4)}倍速・リプレイ除外）")
     board = _img(uploads.get(a.get("board")), "配置図（ラウンド開始時 1:40・アイコン照合）")
-    cl = _columns(*[[b] for b in (start, gif, board) if b])
-    out += [cl] if cl else [b for b in (start, gif, board) if b]
+    out += side_by_side(start, gif, board)
 
     for no, tg in (("1", t1), ("2", t2)):
         bank = r.get(f"bank{no}")
@@ -344,11 +353,11 @@ def round_blocks(rep: dict, r: dict, uploads: dict[str, str | None]) -> list[dic
         out.append(_para(_rt("ULT　", bold=True), _rt("　".join(bits))))
     buy = _img(uploads.get(a.get("buy_panels")), "購入時の装備表")
     strip = _img(uploads.get(a.get("kill_strip")), "キルフィード")
-    cl = _columns([buy], [strip])
-    out += [cl] if cl else [b for b in (buy, strip) if b]
+    out += side_by_side(buy, strip)
     for n in r.get("notes") or []:
         out.append(_para(_rt(n, color="gray")))
-    out.append({"type": "divider", "divider": {}})
+    if not flat:
+        out.append({"type": "divider", "divider": {}})
     return out
 
 
