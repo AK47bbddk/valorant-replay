@@ -33,6 +33,7 @@ PROVIDERS = {
 }
 AUTO_ORDER = ("gemini", "openrouter", "deepseek")
 RETRY_STATUS = (429, 500, 502, 503, 504)       # 混雑・回数制限・一時的な不調。待てば通ることが多い
+_NO_CREDIT: set[str] = set()                    # 前払いのクレジットが切れた（402）プロバイダー。この実行ではもう呼ばない
 # OpenRouter の無料モデルを選ぶ順（id に含まれる語）。文章の要約に向かないもの（音声・画像生成・安全判定）は除く
 FREE_PREFER = ("deepseek", "qwen", "gemma-4-31b", "nemotron-3-super", "nemotron-3-ultra", "llama", "gemma",
                "mistral", "nemotron")
@@ -174,6 +175,11 @@ def _call(name: str, key: str, base: str, model: str, body: str, max_tokens: int
             log(f"  LLM（{name} / {model}）{why}（{r.status_code}）。{w:.0f} 秒待ってやり直します（{attempt + 1}/{retries}）")
             time.sleep(w)
             continue
+        if r.status_code == 402 or "credits are depleted" in r.text:
+            _NO_CREDIT.add(name)
+            log(f"  LLM（{name}）は前払いのクレジットが切れています（402）。待っても通らないので、この実行では使わずに次へ進みます"
+                + ("（AI Studio の［お支払い］でクレジットを追加すると戻ります）" if name == "gemini" else ""))
+            return None
         if r.status_code >= 400:
             if name == "openrouter" and r.status_code in (404, 400) and any(
                     w in r.text for w in ("unavailable", "No endpoints", "not a valid model")):
@@ -201,6 +207,8 @@ def summarize(cfg: dict, data: dict, log=print) -> str | None:
     retries = int(lcfg.get("retries") if lcfg.get("retries") is not None else 4)
     reasoning = lcfg.get("reasoning_effort") or "low"
     for name, key, base, model in chain:
+        if name in _NO_CREDIT:
+            continue
         # Gemini は待ってでも使う（できるだけ 3.8 Flash で書く）。OpenRouter の無料モデルは次の候補があるので早めに切り替える
         rt = retries if (name == "gemini" and model != "gemini-flash-latest") else 1
         mt = max(max_tokens, 4096) if name == "gemini" else max_tokens   # 考える分のトークンも上限に含まれる

@@ -258,3 +258,35 @@ def test_llm_waits_for_gemini_when_busy(monkeypatch, tmp_path):
     assert calls[0][1] == "low" and calls[0][2] >= 4096
     assert sleeps == [10.0, 7.0]                              # 1 回目は 10 秒、2 回目はサーバーの Retry-After
     assert any("混雑" in x for x in logs) and any("要約：gemini / gemini-3.8-flash" in x for x in logs)
+
+
+
+def test_llm_skips_gemini_when_prepaid_credit_is_gone(monkeypatch, tmp_path):
+    """402（前払いのクレジット切れ）は待っても通らない：やり直さず、別名のモデルも呼ばずに次へ。"""
+    for k in ("DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "o")
+    monkeypatch.setattr(llm, "openrouter_free", lambda cfg=None, limit=3: ["x/y:free"])
+    monkeypatch.setattr(llm, "_NO_CREDIT", set())
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    calls = []
+
+    class R:
+        def __init__(self, code, text):
+            self.status_code, self.text, self.headers = code, text, {}
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    def post(url, timeout, headers, json):
+        calls.append(json["model"])
+        if "googleapis" in url:
+            return R(402, '{"error":{"code":402,"message":"Your prepayment credits are depleted."}}')
+        return R(200, "")
+    monkeypatch.setattr(llm.requests, "post", post)
+    cfg = {"output": {"dir": str(tmp_path)}, "llm": {"provider": "auto"}}
+    assert llm.summarize(cfg, {"c": 3}, log=lambda *a: None) == "ok"
+    assert calls == ["gemini-3.8-flash", "x/y:free"]
+    assert llm.summarize(cfg, {"c": 4}, log=lambda *a: None) == "ok"
+    assert calls[2:] == ["x/y:free"]                          # 2 冊目からは Gemini を呼ばない
