@@ -55,7 +55,7 @@ captions:
 
 llm:
   # プレイブックの ATK/DEF summary を書かせる LLM。auto はキーのあるものを順に試す：
-  #   GEMINI_API_KEY（Gemini Flash 無料枠）→ OPENROUTER_API_KEY（そのとき無料のモデルを一覧から探す）→ DEEPSEEK_API_KEY（有料）
+  #   GEMINI_API_KEY（Gemini 3.8 Flash 無料枠。混雑・回数制限は待ってやり直す）→ OPENROUTER_API_KEY（そのとき無料のモデルを一覧から探す）→ DEEPSEEK_API_KEY（有料）
   # 1 つに決めるなら provider: openrouter / gemini / deepseek / anthropic と、必要なら model・base_url
   provider: auto
   model: ""
@@ -63,8 +63,10 @@ llm:
   # auto のときのモデルの上書き（無料モデルの名前が変わったとき用）
   models:
     openrouter: auto      # auto = OpenRouter のモデル一覧から無料のものを探す。決めるなら id（例 google/gemma-4-31b-it:free）
-    gemini: gemini-flash-latest
+    gemini: gemini-3.8-flash
   max_tokens: 1500
+  retries: 4              # Gemini が混雑（503）・回数制限（429）のとき、10・20・40・60 秒待ってやり直す回数
+  reasoning_effort: low   # Gemini の考える量（low / medium / high）。low が速く、要約には十分
 
 playbook:
   notion_parent: ""     # Notion に書くときの親ページ URL（vreplay playbook --notion でも指定できる）

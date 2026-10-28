@@ -1,7 +1,8 @@
 """（任意）集計した数字と解説の字幕から、プレイブックの「ATK summary / DEF summary」の文章を LLM に書かせる。
 
 無料で使える OpenAI 互換の API を、キーがあるものから順に試す（Colab のシークレットに登録）：
-  1. GEMINI_API_KEY     … Google AI Studio の Gemini Flash（無料枠。日本語の文章がいちばん安定）
+  1. GEMINI_API_KEY     … Google AI Studio の Gemini 3.8 Flash（無料枠。日本語の文章がいちばん安定）。
+     混雑（503）・回数制限（429）は数十秒待って何回かやり直してから次へ進む（できるだけ 3.8 Flash で書く）
   2. OPENROUTER_API_KEY … OpenRouter の無料モデル（名前の末尾が :free）。無料のモデルはよく入れ替わる
      （DeepSeek V4 Flash の無料版は 2026 年 10 月に終了）ので、実行のたびに OpenRouter のモデル一覧から
      いま無料の文章向けモデルを探して使う（一覧は output.dir/_cache に 12 時間ためる）
@@ -26,11 +27,12 @@ import requests
 # provider → (環境変数, base_url, 既定のモデル)
 PROVIDERS = {
     "openrouter": ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1", "auto"),
-    "gemini": ("GEMINI_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-flash-latest"),
+    "gemini": ("GEMINI_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.8-flash"),
     "deepseek": ("DEEPSEEK_API_KEY", "https://api.deepseek.com", "deepseek-chat"),
     "anthropic": ("ANTHROPIC_API_KEY", "https://api.anthropic.com/v1", "claude-sonnet-5-5"),
 }
 AUTO_ORDER = ("gemini", "openrouter", "deepseek")
+RETRY_STATUS = (429, 500, 502, 503, 504)       # 混雑・回数制限・一時的な不調。待てば通ることが多い
 # OpenRouter の無料モデルを選ぶ順（id に含まれる語）。文章の要約に向かないもの（音声・画像生成・安全判定）は除く
 FREE_PREFER = ("deepseek", "qwen", "gemma-4-31b", "nemotron-3-super", "nemotron-3-ultra", "llama", "gemma",
                "mistral", "nemotron")
@@ -109,6 +111,10 @@ def _chain(cfg: dict) -> list[tuple[str, str, str, str]]:
             ms += [m for m in openrouter_free(cfg) if m not in ms]
             out += [(name, key, base.rstrip("/"), m) for m in ms]
             continue
+        if name == "gemini" and model != "gemini-flash-latest":
+            # 3.8 Flash の名前が使えなくなったとき用に、最新の Flash（別名）も後ろに並べる
+            out += [(name, key, base.rstrip("/"), model), (name, key, base.rstrip("/"), "gemini-flash-latest")]
+            continue
         out.append((name, key, base.rstrip("/"), model))
     return out
 
@@ -123,7 +129,19 @@ def _clean(text: str) -> str:
     return text.strip()
 
 
-def _call(name: str, key: str, base: str, model: str, body: str, max_tokens: int, log) -> str | None:
+def _wait_seconds(r, attempt: int) -> float:
+    """やり直すまでの秒数。サーバーが Retry-After を返していればそれ、無ければ 10・20・40・60 秒。"""
+    try:
+        ra = float(r.headers.get("Retry-After"))
+        if 0 < ra <= 120:
+            return ra
+    except Exception:
+        pass
+    return float(min(60, 10 * 2 ** attempt))
+
+
+def _call(name: str, key: str, base: str, model: str, body: str, max_tokens: int, log,
+          retries: int = 1, reasoning: str | None = None) -> str | None:
     if name == "anthropic":
         r = requests.post(base + "/messages", timeout=180, headers={
             "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
@@ -139,10 +157,22 @@ def _call(name: str, key: str, base: str, model: str, body: str, max_tokens: int
     payload = {"model": model, "max_tokens": max_tokens, "temperature": 0.3,
                "messages": [{"role": "system", "content": SYSTEM},
                             {"role": "user", "content": "データ（JSON）:\n" + body}]}
-    for attempt in range(3):
-        r = requests.post(base + "/chat/completions", timeout=180, headers=headers, json=payload)
-        if r.status_code == 429 and attempt < 2:      # 無料枠の混雑。少し待ってやり直す
-            time.sleep(8 * (attempt + 1))
+    if reasoning:
+        payload["reasoning_effort"] = reasoning        # Gemini の考える量（low・medium・high）
+    for attempt in range(retries + 1):
+        try:
+            r = requests.post(base + "/chat/completions", timeout=180, headers=headers, json=payload)
+        except requests.RequestException as e:        # 接続の切断・タイムアウトもやり直す
+            if attempt < retries:
+                log(f"  LLM（{name} / {model}）に接続できず（{type(e).__name__}）。10 秒待ってやり直します")
+                time.sleep(10)
+                continue
+            raise
+        if r.status_code in RETRY_STATUS and attempt < retries:
+            w = _wait_seconds(r, attempt)
+            why = "混雑" if r.status_code in (500, 502, 503, 504) else "回数制限"
+            log(f"  LLM（{name} / {model}）{why}（{r.status_code}）。{w:.0f} 秒待ってやり直します（{attempt + 1}/{retries}）")
+            time.sleep(w)
             continue
         if r.status_code >= 400:
             if name == "openrouter" and r.status_code in (404, 400) and any(
@@ -168,9 +198,15 @@ def summarize(cfg: dict, data: dict, log=print) -> str | None:
     cache = Path(cfg["output"]["dir"]) / "_cache" / "llm" / f"{h}.txt"
     if cache.exists():
         return cache.read_text(encoding="utf-8")
+    retries = int(lcfg.get("retries") if lcfg.get("retries") is not None else 4)
+    reasoning = lcfg.get("reasoning_effort") or "low"
     for name, key, base, model in chain:
+        # Gemini は待ってでも使う（できるだけ 3.8 Flash で書く）。OpenRouter の無料モデルは次の候補があるので早めに切り替える
+        rt = retries if (name == "gemini" and model != "gemini-flash-latest") else 1
+        mt = max(max_tokens, 4096) if name == "gemini" else max_tokens   # 考える分のトークンも上限に含まれる
         try:
-            text = _clean(_call(name, key, base, model, body, max_tokens, log) or "")
+            text = _clean(_call(name, key, base, model, body, mt, log, retries=rt,
+                                reasoning=reasoning if name == "gemini" else None) or "")
         except Exception as e:
             log(f"  LLM（{name}）に接続できませんでした（{e}）")
             continue

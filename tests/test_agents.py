@@ -103,7 +103,9 @@ def test_llm_provider_chain_and_call(monkeypatch, tmp_path):
     monkeypatch.setattr(llm.requests, "get", lambda url, timeout: G())
     assert llm.openrouter_free(cfg) == ["google/gemma-4-31b-it:free", "nvidia/nemotron-3-super-120b-a12b:free"]
     chain = llm._chain(cfg)
-    assert [c[0] for c in chain] == ["gemini", "openrouter", "openrouter"]
+    assert [(c[0], c[3]) for c in chain] == [("gemini", "gemini-3.8-flash"), ("gemini", "gemini-flash-latest"),
+                                             ("openrouter", "google/gemma-4-31b-it:free"),
+                                             ("openrouter", "nvidia/nemotron-3-super-120b-a12b:free")]
     cfg["llm"]["provider"] = "openrouter"
     chain = llm._chain(cfg)
     assert [c[3] for c in chain] == ["google/gemma-4-31b-it:free", "nvidia/nemotron-3-super-120b-a12b:free"]
@@ -223,3 +225,36 @@ def test_register_official_map_art_to_broadcast():
     assert iou > 0.93, iou
     base = TT.board_base(bg, got, art=MM.warp_art(art, T, (H, W)))
     assert base.shape[1] == 560 and base[5, 5].min() >= 240                # 床の外は白
+
+
+
+def test_llm_waits_for_gemini_when_busy(monkeypatch, tmp_path):
+    """Gemini が混雑（503）・回数制限（429）なら待ってやり直し、OpenRouter に逃げずに 3.8 Flash で書く。"""
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "o")
+    monkeypatch.setattr(llm, "openrouter_free", lambda cfg=None, limit=3: ["x/y:free"])
+    cfg = {"output": {"dir": str(tmp_path)}, "llm": {"provider": "auto"}}
+    codes = [503, 429, 200]
+    calls, sleeps = [], []
+
+    class R:
+        def __init__(self, code):
+            self.status_code, self.headers = code, ({"Retry-After": "7"} if code == 429 else {})
+            self.text = str(code)
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ATK summary\n- ok"}}]}
+
+    def post(url, timeout, headers, json):
+        calls.append((json["model"], json.get("reasoning_effort"), json["max_tokens"]))
+        return R(codes.pop(0))
+    monkeypatch.setattr(llm.requests, "post", post)
+    monkeypatch.setattr(llm.time, "sleep", sleeps.append)
+    logs = []
+    assert llm.summarize(cfg, {"b": 2}, log=logs.append) == "ATK summary\n- ok"
+    assert [c[0] for c in calls] == ["gemini-3.8-flash"] * 3
+    assert calls[0][1] == "low" and calls[0][2] >= 4096
+    assert sleeps == [10.0, 7.0]                              # 1 回目は 10 秒、2 回目はサーバーの Retry-After
+    assert any("混雑" in x for x in logs) and any("要約：gemini / gemini-3.8-flash" in x for x in logs)
