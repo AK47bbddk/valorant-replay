@@ -36,14 +36,15 @@ def _video(url: str) -> dict:
     return {"type": "video", "video": {"type": "external", "external": {"url": url}}}
 
 
-def _db(nt: Notion, parent: str, title: str, kind_options: list[str]) -> str:
+def _db(nt: Notion, parent: str, title: str, kind_options: list[str] | None = None) -> str:
     r = nt.req("POST", "/databases", {
         "parent": {"type": "page_id", "page_id": parent}, "is_inline": True,
         "title": [_rt(title)],
         "initial_data_source": {"properties": {
             "名前": {"title": {}},
-            "種類": {"select": {"options": [{"name": n} for n in kind_options]}},
-            "タグ": {"multi_select": {}},
+            "種類": {"select": {"options": [{"name": n} for n in (kind_options or D.KINDS)]}},
+            "形": {"multi_select": {}},                  # 人数の形（1-3-1・A1 Mid3 B1）
+            "言及": {"multi_select": {}},                # 解説が口にした言葉（数字とは分ける）
             "回数": {"number": {}},
             "勝率": {"number": {"format": "percent"}},
             "購入": {"multi_select": {}},
@@ -96,14 +97,15 @@ def _round_toggle(r: dict, rep: dict | None, up) -> dict | None:
     return {"type": "toggle", "toggle": {"rich_text": [_rt(title)], "children": kids[:100]}}
 
 
-def _row(nt: Notion, ds: str, name: str, kind: str, rows: list[dict], tags: list[str], body_left: list,
-         img_path: Path | None, examples: list[dict], reps: dict | None = None, up=None):
-    n = len(rows)
-    w = sum(r["win"] for r in rows)
-    buys = sorted({r["buy"] for r in rows if r.get("buy") and r["buy"] != "?"})
+def _row(nt: Notion, ds: str, g: dict, body_left: list, img_path: Path | None,
+         examples: list[dict], reps: dict | None = None, up=None):
+    """1 行＝1 つの型（deck.playbook_rows の 1 要素）。"""
+    n, w = g["n"], g["w"]
+    buys = sorted(b for b in (g.get("buys") or {}) if b and b != "?")
     pg = nt.create_page(ds, {
-        "名前": {"title": [_rt(name)]}, "種類": {"select": {"name": kind}},
-        "タグ": {"multi_select": [{"name": t[:100]} for t in dict.fromkeys(tags) if t][:8]},
+        "名前": {"title": [_rt(g["name"])]}, "種類": {"select": {"name": g["kind"]}},
+        "形": {"multi_select": [{"name": t[:100]} for t in dict.fromkeys(g.get("tags") or []) if t][:4]},
+        "言及": {"multi_select": [{"name": t[:100]} for t in dict.fromkeys(g.get("mentions") or []) if t][:4]},
         "回数": {"number": n}, "勝率": {"number": round(w / n, 3) if n else None},
         "購入": {"multi_select": [{"name": b} for b in buys]}})
     left = list(body_left)
@@ -163,13 +165,9 @@ def _plan_blocks(rows: list[dict], side: str, label: str) -> list[dict]:
 
 
 def _code(shape: str) -> str:
-    """'A1 Mid3 B1' → '1-3-1'（A-MID-B の人数）。C があるマップは 'A1 B2 C1 Mid1' → '1-2-1・MID1'"""
-    z = {m.group(1): int(m.group(2)) for m in re.finditer(r"(A|B|C|Mid)(\d)", shape or "")}
-    if not z:
-        return ""
-    if "C" in z:
-        return f"{z.get('A', 0)}-{z.get('B', 0)}-{z.get('C', 0)}" + (f"・MID{z['Mid']}" if z.get("Mid") else "")
-    return f"{z.get('A', 0)}-{z.get('Mid', 0)}-{z.get('B', 0)}"
+    """'A1 Mid3 B1' → '1-3-1'（A-MID-B の人数）。中身は tactics.shape_code。"""
+    from . import tactics
+    return tactics.shape_code(shape)
 
 
 def _examples(rows: list[dict], k: int = 3) -> list[dict]:
@@ -184,21 +182,14 @@ def _caster_tags(rows: list[dict]) -> list[str]:
 
 
 def _summary_lines(llm_text: str | None, side_label: str, strong: list[dict], weak: list[dict]) -> list[dict]:
+    """その側（ATK／DEF）の要約。LLM の文章が無い・途中で切れていた側だけ、従来の箇条書きに戻す。"""
+    part = []
     if llm_text:
-        # Claude の文章から該当する見出しの下だけ取り出す
-        part, take = [], False
-        for line in llm_text.splitlines():
-            t = line.strip().lstrip("#").strip()
-            if not t:
-                continue
-            if t.lower().startswith(("atk summary", "def summary", "対策メモ")):
-                take = t.lower().startswith(side_label.lower())
-                continue
-            if take:
-                part.append(_bullet(_rt(t.lstrip("-・* "))))
-        if part:
+        from . import llm as L
+        part = [_bullet(_rt(x)) for x in L.sections(llm_text).get(side_label) or []]
+        if len(part) >= 2:
             return part
-    out = [_bullet(_rt("強み：", bold=True), _rt(p["title"])) for p in strong]
+    out = part + [_bullet(_rt("強み：", bold=True), _rt(p["title"])) for p in strong]
     out += [_bullet(_rt("弱み：", bold=True), _rt(p["title"])) for p in weak]
     return out or [_para(_rt("まだデータが少なく、はっきりした傾向は出ていません", color="gray"))]
 
@@ -234,55 +225,26 @@ def export(nt: Notion, cfg: dict, key: dict, rows: list[dict], base: list[dict],
         if not srows:
             continue
         nt.append(pid, _plan_blocks(rows, side, label))
-        ds = _db(nt, pid, label, ["Default", "Set", "PostPlant", "Retake"])
-        for g in D.setup_clusters(srows, k=8):
-            follow = []
-            if side == ATTACK and g["sites"]:
-                follow.append("その後の設置：" + "、".join(f"{s} {c}" for s, c in g["sites"].most_common()))
-            if g["fights"]:
-                follow.append("初動のファイト：" + "、".join(f"{z} {c}" for z, c in g["fights"].most_common(3)))
-            ct = _caster_tags(g["rows"])
-            left = [_para(_rt(f"{g['n']} 回・勝ち {g['w']}（{D._pct(D._rate(g['w'], g['n']))}）・形 {g['shape']}", bold=True)),
-                    _bullet(_rt("よく映る場所：" + ("・".join(g["callouts"]) or "-")))]
-            if g.get("roles"):
-                left.append(_bullet(_rt("担当（アイコン照合）：" + g["roles"])))
-            left += [_bullet(_rt(x)) for x in follow]
-            if ct:
-                left.append(_bullet(_rt("解説の言及：" + "・".join(ct))))
+        ds = _db(nt, pid, label, D.KINDS)
+        for g in D.playbook_rows(srows, side):
+            left = [_para(_rt(g["lines"][0], bold=True))]
+            left += [_bullet(_rt(x)) for x in g["lines"][1:]]
+            if g["mentions"]:
+                left.append(_bullet(_rt("解説の言及：" + "・".join(g["mentions"]))))
             # アイコン照合の配置図（Valotactics 風）があればそれ、無ければ点の位置の重ね描き
-            img = next((Path(b) for b in g.get("boards") or [] if Path(b).exists()), None) or D.position_png(
-                cfg, key["map"], g["rows"], "1:15", img_dir / f"np_{label}_{D._slug(g['name'])}.jpg", meta)
-            _row(nt, ds, f"{_code(g['shape'])} {g['name']}".strip().replace("デフォルト", "default"), "Default", g["rows"],
-                 [g["shape"]] + ct, left, img, _examples(g["rows"]), reps, up)
-        if side == ATTACK:
-            for g in D.sets(srows):
-                buys = "・".join(f"{b} {c}" for b, c in g["buys"].most_common())
-                left = [_para(_rt(f"{g['n']} 回・勝ち {g['w']}（{D._pct(D._rate(g['w'], g['n']))}）"
-                                  + (f"・設置 残り {D._clock(100 - g['plant'])}" if g["plant"] is not None else ""), bold=True)),
-                        _bullet(_rt("購入：" + buys))]
-                pz = D._zones_line([r["plant_zones"] for r in g["rows"] if r["plant_zones"]])
-                if pz:
-                    left.append(_bullet(_rt("設置直後の位置（平均人数）：" + pz)))
-                img = D.position_png(cfg, key["map"], g["rows"], None, img_dir / f"np_set_{D._slug(g['name'])}.jpg",
-                                     meta, plant=True)
-                _row(nt, ds, g["name"], "Set", g["rows"], _caster_tags(g["rows"]), left, img, _examples(g["rows"]), reps, up)
-        else:
-            for site in D.CORE:
-                rr = [r for r in srows if r["plant_site"] == site]
-                if len(rr) < 2:
-                    continue
-                w = sum(r["win"] for r in rr)
-                pz = D._zones_line([r["plant_zones"] for r in rr if r["plant_zones"]])
-                ul = D._ult_line([r for r in rr if any(u["post"] for u in r["ults"])])
-                left = [_para(_rt(f"{site} を設置された {len(rr)} 回・取り返した {w}（{D._pct(D._rate(w, len(rr)))}）", bold=True))]
-                if pz:
-                    left.append(_bullet(_rt("設置された時点の位置（平均人数）：" + pz)))
-                if ul:
-                    left.append(_bullet(_rt("リテイクで使った ULT（勝ち/使用）：" + ul)))
-                img = D.position_png(cfg, key["map"], rr, None, img_dir / f"np_retake_{site}.jpg", meta, plant=True)
-                _row(nt, ds, f"{site} retake", "Retake", rr, _caster_tags(rr), left, img, _examples(rr), reps, up)
+            img = next((Path(b) for b in g.get("boards") or [] if Path(b).exists()), None)
+            if img is None:
+                im = g.get("img") or {}
+                img = D.position_png(cfg, key["map"], g["rows"], im.get("mark"),
+                                     img_dir / f"np_{label}_{g['slug']}.jpg", meta,
+                                     plant=bool(im.get("plant")))
+            _row(nt, ds, g, left, img, D._ex_rows(g["rows"]), reps, up)
     # メモ
     memo = [_h(2, "メモ")]
+    if key.get("llm"):
+        from . import llm as L
+        for x in (L.sections(key["llm"]).get("memo") or [])[:3]:
+            memo.append(_bullet(_rt("対策：", bold=True), _rt(x)))
     it = D.intent_summary(rows)
     for side, label in ((ATTACK, "ATK"), (DEFENSE, "DEF")):
         if it.get(side):

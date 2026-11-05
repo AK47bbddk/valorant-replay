@@ -26,7 +26,9 @@ def test_attack_pattern_from_positions():
         first_kill_team=1, first_kill_t=12,
     )
     assert out["side"] == "攻撃"
-    assert out["default"] == "バランス"
+    # 型の名前はプレイブックと同じ書き方。人数の形・ゾーン別人数も残す
+    assert out["default"] == "2-1-2 A default" and out["setup_shape"] == "A2 Mid1 B2"
+    assert out["setup_style"] == "バランス" and out["setup_counts"] == "A2 B2 Mid1"
     assert "B" in out["mid_change"]
     assert out["final_zone"] == "B"
     assert out["post_plant"]["label"] == "サイト内保持"
@@ -39,6 +41,7 @@ def test_defense_retake_and_rotation():
         team_no=2, side1="攻撃", winner_no=1, how="boom",
     )
     assert out["side"] == "防衛"
+    assert out["setup"] == "守りデフォ（2-1-2）"
     assert out["rotation"] == "A→B"
     assert out["retake"]["label"] == "A一斉"
     assert out["retake"]["route"] == "A Site"
@@ -51,3 +54,14 @@ def test_no_positions_is_unknown():
         winner_no=1, how="elim",
     )
     assert out["confidence"] == 0.0
+
+
+def test_spawn_dots_do_not_change_the_setup():
+    """スポーンの点が混ざっていても初動の型は変わらない。"""
+    pos = _round()
+    spawn = [[1, 10, 0.9, 0.9, 1, 1, "攻撃側", "Spawn"] for _ in range(3)]
+    a = patterns.analyze_round({"start": 0, "end": 100, "plant": 60}, pos,
+                               team_no=1, side1="攻撃", winner_no=1, how="boom")
+    b = patterns.analyze_round({"start": 0, "end": 100, "plant": 60}, pos + spawn,
+                               team_no=1, side1="攻撃", winner_no=1, how="boom")
+    assert a["setup"] == b["setup"] == "2-1-2 A default"

@@ -24,7 +24,8 @@ def test_records_and_strategy_points(tmp_path, monkeypatch):
     lines = deck.concept_lines(zt, deck.DEFENSE, [r for r in g2 if r["side"] == deck.DEFENSE])
     assert any("MID" in x for x in lines)
     ss = deck.sets([r for r in g2 if r["side"] == deck.ATTACK])
-    assert ss and any("Rush" in g["name"] for g in ss)
+    assert ss and any("ラッシュ" in g["name"] for g in ss)
+    assert all(g["kind"] in deck.KINDS for g in ss)
 
 
 def test_build_decks_from_warehouse(tmp_path, monkeypatch):
@@ -43,21 +44,73 @@ def test_build_decks_from_warehouse(tmp_path, monkeypatch):
     assert any(n.startswith("comp_Split_") for n in names)
     page = (out / next(n for n in names if n.startswith("team_G2"))).read_text("utf-8")
     assert "Strategy" in page and "strong point" in page and "Sets" in page and "How to Retake" in page
-    assert "初動の配置" in page and "MID 3 デフォルト" in page
+    assert "Default 一覧" in page and "テイクデフォ" in page and "ポストプラント" in page
+    assert "ファストリテイク" in page and "Pistol" in page
+    assert " #1" not in page and "散開" not in page         # 番号つきの型・スポーンに引っ張られた名前は出さない
     assert (out / "index.html").exists()
 
 
-def test_setup_clusters_group_similar_callouts():
-    def row(name, calls, win=True):
-        return {"setup": {"name": name, "shape": "x", "callouts": calls}, "win": win, "buy": "Buy",
-                "plant_site": None, "first_fight": "A", "yt": None, "opp_tag": "X", "n": 1}
-    rows = [row("MID 2", ["A Site", "A Site", "Mid Top", "Mid Vent", "B Site"]),
-            row("MID 2", ["A Site", "A Site", "Mid Top", "Mid Vent", "B Back"]),
-            row("MID 2", ["A Back", "A Lobby", "Mid Bottom", "Mid Mail", "B Garage"], False),
-            row("A スタック", ["A Site", "A Site", "A Main", "Mid Top", "B Site"])]
+def _row(name, calls, zones, win=True, buy="Buy", area=None):
+    return {"setup": {"name": name, "shape": " ".join(f"{k}{v}" for k, v in zones.items()), "code": "",
+                      "callouts": calls, "zones": zones, "area": area or (calls[0] if calls else None)},
+            "win": win, "buy": buy, "plant_site": None, "first_fight": "A", "yt": None, "opp_tag": "X",
+            "n": 1, "eco": "full", "opp_eco": "full", "pistol": False, "rtype": {"type": "フルバイ"},
+            "caster": {}, "board": None}
+
+
+def test_setup_clusters_merge_by_name_and_shape():
+    """同じ名前は 1 つにまとめ（#1/#2 は付けない）、1 ラウンドだけの型は近い型か「その他」に入れる。"""
+    rows = [_row("B Link テイクデフォ", ["B Link", "Mid Top"], {"A": 1, "Mid": 2, "B": 2}),
+            _row("B Link テイクデフォ", ["B Link", "Mid Bottom"], {"A": 1, "Mid": 2, "B": 2}, win=False),
+            _row("B Link テイクデフォ", ["B Link", "B Site"], {"A": 1, "Mid": 1, "B": 3}),
+            # 人数の差が 1 以内（1 人ぶん映っていない）・同じキーエリア → 上の型にまとめる
+            _row("B Link 寄りデフォ", ["B Link"], {"A": 1, "Mid": 2, "B": 1}, area="B Link"),
+            # どの型とも遠い（L1 距離 4）→ その他
+            _row("A Ramps テイクデフォ", ["A Ramps"], {"A": 4, "Mid": 1}, area="A Ramps")]
     cl = deck.setup_clusters(rows)
-    sizes = sorted((g["name"], g["n"]) for g in cl)
-    assert ("A スタック", 1) in sizes and ("MID 2 #1", 2) in sizes and ("MID 2 #2", 1) in sizes
+    by = {g["name"]: g["n"] for g in cl}
+    assert by["B Link テイクデフォ"] == 4 and by["その他"] == 1
+    assert not any("#" in g["name"] for g in cl)
+    merged = next(g for g in cl if g["name"] == "B Link テイクデフォ")
+    assert "B Link 寄りデフォ" in merged["merged"]
+
+
+def test_pistol_and_eco_are_separate_rows(tmp_path, monkeypatch):
+    """ピストル・エコはデフォルトから外し、Pistol／Anti eco の行にする。購入に Pistol を混ぜない。"""
+    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
+    rows = [r for rep in [report(str(i), "G2", "SEN", i) for i in range(3)] for r in deck.records(rep)]
+    g2 = [r for r in rows if r["team"] == "G2"]
+    for side in (deck.ATTACK, deck.DEFENSE):
+        prs = deck.playbook_rows([r for r in g2 if r["side"] == side], side)
+        kinds = {g["kind"] for g in prs}
+        assert "Pistol" in kinds and "AntiEco" in kinds
+        for g in prs:
+            if g["kind"] != "Pistol":
+                assert "Pistol" not in g["buys"], g["name"]
+                assert not any(r["pistol"] for r in g["rows"]), g["name"]
+            if g["kind"] == "Default":
+                assert not any(deck.is_eco(r) for r in g["rows"]), g["name"]
+
+
+def test_attack_sets_and_defense_rows(tmp_path, monkeypatch):
+    """2 巡目のアクションと守りの型が、コーチの書き方の名前になる。"""
+    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
+    rows = [r for rep in [report(str(i), "G2", "SEN", i) for i in range(4)] for r in deck.records(rep)]
+    g2 = [r for r in rows if r["team"] == "G2"]
+    atk = deck.playbook_rows([r for r in g2 if r["side"] == deck.ATTACK], deck.ATTACK)
+    names = [g["name"] for g in atk]
+    assert any(n.endswith("テイクデフォ") for n in names)
+    assert any("ラッシュ" in n for n in names) and any("execution" in n for n in names)
+    assert any("レイト" in n for n in names)
+    assert any(n.endswith("ポストプラント") for n in names)
+    assert all("（MID" not in n for n in names)              # 経路はタイトルに入れない
+    df = deck.playbook_rows([r for r in g2 if r["side"] == deck.DEFENSE], deck.DEFENSE)
+    dn = [g["name"] for g in df]
+    assert any("リテイク" in n for n in dn) and any("カウンター" in n for n in dn)
+    assert any(n == "タイミングプッシュ" for n in dn)
+    assert any(n.endswith("前目") for n in dn) or any("守りデフォ" in n for n in dn)
+    push = next(g for g in df if g["name"] == "タイミングプッシュ")
+    assert push["kind"] == "Push" and all(r["side"] == deck.DEFENSE for r in push["rows"])
 
 
 def test_notion_playbook_export(tmp_path, monkeypatch):
@@ -117,8 +170,19 @@ def test_notion_playbook_export(tmp_path, monkeypatch):
     assert url.startswith("https://www.notion.so/")
     dbs = [c for c in nt.calls if c[1] == "/databases"]
     assert [d[2]["title"][0]["text"]["content"] for d in dbs] == ["ATK", "DEF"]
-    names = [c[2]["名前"]["title"][0]["text"]["content"] for c in nt.calls if c[0] == "ROW"]
-    assert any(n.startswith("1-3-1") for n in names) and any("retake" in n for n in names)
+    props = dbs[0][2]["initial_data_source"]["properties"]
+    assert "形" in props and "言及" in props and "タグ" not in props     # 形と解説の言及は別のタグにする
+    assert [o["name"] for o in props["種類"]["select"]["options"]] == deck.KINDS
+    rowcalls = [c[2] for c in nt.calls if c[0] == "ROW"]
+    names = [c["名前"]["title"][0]["text"]["content"] for c in rowcalls]
+    assert any(n.endswith("テイクデフォ") for n in names) and any("リテイク" in n for n in names)
+    assert not any("#" in n for n in names)
+    assert all(c["種類"]["select"]["name"] in deck.KINDS for c in rowcalls)
+    for c in rowcalls:
+        if c["種類"]["select"]["name"] != "Pistol":
+            assert "Pistol" not in [x["name"] for x in c["購入"]["multi_select"]]
+    shapes = [x["name"] for c in rowcalls for x in c["形"]["multi_select"]]
+    assert any(x.count("-") == 2 for x in shapes)                        # 「1-3-1」の形が入る
     videos = [b for c in nt.calls if c[0] == "APPEND" for b in c[2] if b.get("type") == "column_list"]
     assert videos
     assert NP.page_id("https://app.notion.com/p/delight-split-vyse-comp-14fd54a7c90b806b967ed86afa4f4e8e") == \
