@@ -23,7 +23,6 @@ from pathlib import Path
 import numpy as np
 
 from . import db, perf, report, vlr
-from . import ocr as ocr_mod
 from .notion import Notion, how_ja, upsert_match, write_map_page
 
 JST = vlr.JST
@@ -624,6 +623,8 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
             with seg_lock:
                 seg_tot[name] += t1_ - t0_
             return t1_
+
+        from . import ocr as ocr_mod  # cv2 を使うので、動画解析のときだけ読む
 
         def work(r):
             o0 = ocr_mod.thread_stats()
