@@ -353,3 +353,146 @@ def test_map_background_falls_back_to_callouts(tmp_path, monkeypatch):
     uri = deck.map_data_uri({"output": {"dir": str(tmp_path)}}, "Split", [], _split_callouts())
     assert uri.startswith("data:image/jpeg;base64,") and len(uri) > 2000
     assert deck.map_data_uri({"output": {"dir": str(tmp_path)}}, "Split", [], []) == ""
+
+
+def _agent_rows(n=4, plant_e=None):
+    """アイコン照合の位置（節目ごと）を持つラウンド。Jett は A Lobby → A Main → A Site、Sova は B へ。"""
+    path = {"Jett": [(0.2, 0.8, "A Lobby"), (0.2, 0.6, "A Main"), (0.2, 0.3, "A Site")],
+            "Sova": [(0.8, 0.8, "B Lobby"), (0.8, 0.6, "B Main"), (0.8, 0.3, "B Site")],
+            "Omen": [(0.5, 0.9, "Mid Bottom"), (0.5, 0.6, "Mid"), (0.5, 0.5, "Mid Top")]}
+    marks = ["1:40", "1:15", "0:40"]
+    rows = []
+    for i in range(n):
+        ag = {m: [(a, x + 0.01 * i, y, area) for a, seq in path.items() for (x, y, area) in [seq[k]]]
+              for k, m in enumerate(marks)}
+        rows.append({"agents": ag, "plant_e": plant_e, "win": i % 2 == 0, "n": i + 1, "opp_tag": "SEN",
+                     "opp": "Sentinels", "date": f"2026-03-0{i + 1}", "yt": f"https://youtu.be/x?t={i}",
+                     "fk_e": 20.0, "fk_own": True, "fk_player": "p1", "agent_of": {"p1": "Jett", "p2": "Sova"},
+                     "kills": [("p1", "e1", 20.0)], "deaths": [("p2", 30.0)], "planted": True,
+                     "plant_site": "A", "ults": [], "reason_main": "設置後の守り"})
+    return rows
+
+
+def test_motion_follows_each_agent_by_name():
+    """動きで見る：エリアではなくエージェントごとに追い、名札は必ずエージェント名。"""
+    g = {"rows": _agent_rows()}
+    fr = deck.motion_frames(g, _split_callouts(), deck.ATTACK)
+    assert fr["source"] == "agents" and fr["marks"] == ["1:40", "1:15", "0:40"]
+    assert {d["label"] for d in fr["dots"]} == {"Jett", "Sova", "Omen"}
+    jett = next(d for d in fr["dots"] if d["label"] == "Jett")
+    assert jett["xy"][0][1] > jett["xy"][-1][1]              # 下（ロビー）から上（サイト）へ
+    assert len(jett["route"]) == len(fr["marks"]) - 1
+    # 設置より後の節目はそのラウンドから外す（全ラウンド 30 秒で設置 → 0:40 は無い）
+    fr2 = deck.motion_frames({"rows": _agent_rows(plant_e=30.0)}, _split_callouts(), deck.ATTACK)
+    assert fr2["marks"] == ["1:40", "1:15"]
+
+
+def test_route_goes_around_walls():
+    """床の上だけを通る道：間に壁があれば回り込み、どの点も床の上。"""
+    import numpy as np
+    n = deck.WALK_N
+    grid = np.zeros((n, n), bool)
+    grid[20:140, 20:140] = True
+    grid[20:120, 75:85] = False                               # 縦の壁（下だけ空いている）
+    p0, p1 = (0.25, 0.3), (0.75, 0.3)
+    r = deck.route(grid, p0, p1)
+    assert r[0] == list(p0) and r[-1] == list(p1) and len(r) >= 3
+    assert max(y for _, y in r) > 0.74                        # 壁の下を回る
+    for x, y in r[1:-1]:
+        assert grid[int(y * n), int(x * n)]
+    # 見通しが利けば直線のまま
+    assert deck.route(grid, (0.2, 0.85), (0.8, 0.85)) == [[0.2, 0.85], [0.8, 0.85]]
+    assert deck.route(None, p0, p1) == [list(p0), list(p1)]
+
+
+def test_example_slide_shows_board_gif_and_moves(tmp_path):
+    """実例：重ね合わせ → 開幕の配置図 → GIF の順に並べ、エージェントごとの動きと起きたことを書く。"""
+    import numpy as np
+    import cv2
+    rows = _agent_rows()
+    day = tmp_path / "2026-03-01" / "1_1_Split"
+    day.mkdir(parents=True)
+    for r in rows:
+        b, gf = day / f"board_r{r['n']:02d}.jpg", day / f"r{r['n']:02d}_minimap.gif"
+        cv2.imwrite(str(b), np.full((20, 20, 3), 200, np.uint8))
+        gf.write_bytes(b"GIF89a")
+        r["board"], r["gif"] = str(b), str(gf)
+    g = {"name": "A Main テイクデフォ", "rows": rows}
+    ex = deck.example_round(g)
+    assert ex["win"] and ex["n"] in (1, 3)
+    st = deck.round_story(ex)
+    jett = next(m for m in st["moves"] if m["agent"] == "Jett")
+    assert jett["line"] == "A Lobby（1:40） → A Main（1:15） → A Site（0:40）"
+    assert any("最初のキル" in e and "Jett" in e for e in st["events"]) and any("設置：A" in e for e in st["events"])
+    out = tmp_path / "playbook"
+    out.mkdir()
+    s = deck.example_slide(g, deck.ATTACK, None, out, "foot")
+    assert "実例：A Main テイクデフォ" in s and "data:image/jpeg;base64," in s
+    assert f'src="../2026-03-01/1_1_Split/r{ex["n"]:02d}_minimap.gif"' in s     # GIF は重いので相対パスで
+    assert "GIF から読み取れる動き" in s and "Jett" in s and "youtu.be" in s
+
+
+def test_yt_plus_and_tiles_link_gif_and_board(tmp_path):
+    assert deck.yt_plus("https://youtu.be/x?t=100", 25.7) == "https://youtu.be/x?t=125"
+    assert deck.yt_plus("https://youtu.be/x?t=100", None) == "https://youtu.be/x?t=100"
+    assert deck.yt_plus(None, 3) is None
+    d = tmp_path / "2026-03-01" / "m"
+    d.mkdir(parents=True)
+    (d / "b.jpg").write_bytes(b"x")
+    (d / "g.gif").write_bytes(b"x")
+    out = tmp_path / "playbook"
+    out.mkdir()
+    r = {"board": str(d / "b.jpg"), "gif": str(d / "g.gif"), "yt": "https://youtu.be/x?t=10", "win": True,
+         "n": 7, "opp_tag": "SEN", "date": "2026-03-01"}
+    t = deck.tile(r, out, at=30)
+    assert 'src="../2026-03-01/m/b.jpg"' in t and 'src="../2026-03-01/m/g.gif"' in t and "t=40" in t
+    # 動画リンクのあるものは全部 GIF つきで並ぶ（k 個まで）
+    g = deck.gallery([r, {**r, "n": 8, "win": False}, {**r, "n": 9, "yt": None, "gif": None}], out, k=4)
+    assert g.count('class="tile"') == 2
+
+
+def test_fights_use_only_the_killfeed():
+    """5 秒以内に 3 キル以上続いたところが集団戦。全滅から補ったキル（feed に無い）は入らない。"""
+    r = {"feed": [(20.0, True), (40.0, True), (42.5, False), (44.0, True), (46.0, True), (70.0, False)],
+         "pos": [(39.0, "B", "B Main"), (41.0, "B", "B Main"), (40.0, "A", "A Main")], "plant_e": None}
+    fs = deck.fights(r)
+    assert len(fs) == 1 and fs[0]["e"] == 40.0 and (fs[0]["k"], fs[0]["d"]) == (3, 1)
+    assert fs[0]["area"] == "B Main" and not fs[0]["post"]
+    assert deck.fights({"feed": [(10.0, True), (30.0, True)], "pos": []}) == []
+    gs = deck.fight_groups([{**r, "win": True}, {**r, "win": False}])
+    assert gs[0]["area"] == "B Main" and gs[0]["n"] == 2 and gs[0]["won"] == 2
+
+
+def test_area_takes_tell_when_and_how(tmp_path):
+    rows = []
+    for i in range(3):
+        rows.append({"setup": {"area": "A Main", "shape": "A3 Mid1 B1"}, "pistol": False, "win": i != 2,
+                     "pos": [(12.0 + i, "A", "A Main"), (5.0, "A", "A Lobby")], "fk_e": 20.0 + i, "fk_own": True,
+                     "yt": "https://youtu.be/x?t=5", "n": i + 1, "opp_tag": "SEN", "date": f"2026-03-0{i + 1}"})
+    gs = deck.area_takes(rows)
+    assert gs[0]["area"] == "A Main" and gs[0]["n"] == 3 and gs[0]["t"] == 13.0
+    assert gs[0]["shapes"][0] == ("A3 Mid1 B1", 3) and gs[0]["fk_own"] == 3
+    sl = deck.area_take_slides(rows, deck.ATTACK, tmp_path, "foot")
+    assert len(sl) == 1 and "エリアテイク：A Main" in sl[0] and "着く時間" in sl[0] and 'class="tile"' in sl[0]
+
+
+def test_board_mark_reads_the_time_from_the_file_name():
+    assert deck.board_mark("/x/_tactics/board_r05_140.jpg") == "1:40"
+    assert deck.board_mark("/x/_tactics/board_r04_115.jpg") == "1:15"
+    assert deck.board_mark(None) == "開幕"
+
+
+def test_alignment_gate_drops_maps_whose_dots_miss_the_floor():
+    """ミニマップ合わせがずれたマップ（点の多くが床の外）の位置は、動きに使わない。"""
+    import numpy as np
+    walk = np.zeros((deck.WALK_N, deck.WALK_N), bool)
+    walk[:, : deck.WALK_N // 2] = True                       # 左半分だけ床
+    good = [{"match_id": "1", "order": 1, "uv": [(5.0, 0.2, 0.5, "A")] * 40} for _ in range(2)]
+    bad = [{"match_id": "2", "order": 1, "uv": [(5.0, 0.8, 0.5, "B")] * 40} for _ in range(2)]
+    al = deck.mark_alignment(good + bad, walk)
+    assert al == {("1", 1): 1.0, ("2", 1): 0.0}
+    assert all(r["align_ok"] for r in good) and not any(r["align_ok"] for r in bad)
+    rows = _agent_rows()
+    for r in rows:
+        r["align_ok"] = False
+    assert deck.agent_tracks({"rows": rows}) is None

@@ -140,6 +140,8 @@ def records(rep: dict) -> list[dict]:
         plant_e = (float(plant_t) - float(t0)) if plant_t is not None and t0 is not None else None
         kills = [k for k in rr.get("kills") or [] if k.get("killer_team") in names.values()]
         kills.sort(key=lambda k: float(k.get("t") or 0))
+        # キルフィードから読めたキルだけ（全滅から補ったものはラウンドの終わりの時刻なので、時刻の分析には使わない）
+        real = [k for k in kills if k.get("source") != "implied" and k.get("t") is not None]
         dur = _secs(rr.get("duration"))
         reason = rr.get("reason") or {}
         start_t = (tac_rounds.get(str(n)) or {}).get("start", t0)
@@ -147,7 +149,7 @@ def records(rep: dict) -> list[dict]:
             me, op = names[no], names[3 - no]
             side = s1 if no == 1 else _opp(s1)
             won = W == no
-            fk = kills[0] if kills else None
+            fk = real[0] if real else None
             fk_own = None if fk is None else fk.get("killer_team") == me
             fk_e = (float(fk["t"]) - float(t0)) if fk is not None and t0 is not None and fk.get("t") is not None else None
             my_eco = rr.get("eco1") if no == 1 else rr.get("eco2")
@@ -164,8 +166,23 @@ def records(rep: dict) -> list[dict]:
             tl_me = {m: (v.get(str(no)) or {}) for m, v in tl.items()}
             tl_op = {m: (v.get(str(3 - no)) or {}) for m, v in tl.items()}
             pz = rt.get("plant_zones") or {}
-            my_kills = [k for k in kills if k.get("killer_team") == me]
+            my_kills = [k for k in real if k.get("killer_team") == me]
+            my_deaths_t = [k for k in real if k.get("victim_team") == me or (k.get("killer_team") == op)]
+            feed = [(round(float(k["t"]) - float(t0), 1), k.get("killer_team") == me)
+                    for k in real] if t0 is not None else []
             my_deaths = [k for k in kills if k.get("victim_team") == me or (k.get("killer_team") == op)]
+            agents_uv: dict[str, list] = {}
+            if T:
+                for mark, ents in ((rt.get("agents") or {}).items()):
+                    lst = []
+                    for e_ in ents or []:
+                        if str(e_.get("team")) != str(no) or not e_.get("agent"):
+                            continue
+                        u_, v_ = _inverse(T, float(e_["x"]), float(e_["y"]))
+                        lst.append((e_["agent"], round(u_, 4), round(v_, 4),
+                                    TC.area_name(e_.get("zone"), e_.get("callout"))))
+                    if lst:
+                        agents_uv[mark] = lst
             uv, pos = [], []
             if start_t is not None:
                 for p in pos_by_n.get(n, []):
@@ -196,6 +213,8 @@ def records(rep: dict) -> list[dict]:
                            if k.get("t") is not None and t0 is not None else None) for k in my_kills],
                 "deaths": [(k.get("victim"), (float(k["t"]) - float(t0))
                             if k.get("t") is not None and t0 is not None else None) for k in my_deaths],
+                "deaths_t": [(k.get("victim"), float(k["t"]) - float(t0)) for k in my_deaths_t if t0 is not None],
+                "feed": feed,                   # キルフィードの (開始からの秒, 自チームが取ったか)
                 "players": players[no], "agent_of": agent_of,
                 "reason_tags": (reason.get("tags") or []) if won else [],
                 "loss_tags": (reason.get("tags") or []) if not won else [],
@@ -206,6 +225,9 @@ def records(rep: dict) -> list[dict]:
                 "caster": rr.get("caster") or {},
                 "reason_main": reason.get("main"), "dur_clock": rr.get("duration"),
                 "board": (rr.get("assets") or {}).get("board"),
+                "gif": (rr.get("assets") or {}).get("minimap_gif"),
+                "start_img": (rr.get("assets") or {}).get("minimap_start"),
+                "agents": agents_uv,            # 節目 → [(エージェント, u, v, エリア)]（マップ画像の 0..1）
                 "rtype": rtypes.get((n, no)), "branch": F.branch(rep, rr, no),
                 "uv_base": tac.get("uv_base") if T else None,
             })
@@ -1457,8 +1479,203 @@ def _slots(counts: Counter, xy: dict, limit: int = 5) -> list[tuple[str, float, 
     return out
 
 
-def motion_frames(g: dict, callouts: list[dict] | None, side: str) -> dict | None:
-    """型の「平均の動き」。節目ごとに駒を置き、近いものどうしをつないで道にする。
+# エージェントのアイコンを照合した節目（tactics.MARKS と同じ名前・開始からの秒）
+AGENT_MARKS = [("1:40", 1), ("1:30", 10), ("1:15", 25), ("1:00", 40), ("0:40", 60), ("0:20", 80)]
+
+
+def _medoid(pts: list[tuple[float, float]]) -> tuple[float, float]:
+    """平均ではなく、実際に誰かが立っていた点のうち真ん中のもの（壁の中に駒が落ちない）。"""
+    if len(pts) <= 2:
+        return pts[0]
+    return min(pts, key=lambda p: sum(math.hypot(p[0] - q[0], p[1] - q[1]) for q in pts))
+
+
+def agent_tracks(g: dict, min_frac: float = 0.3) -> dict | None:
+    """型のラウンドで、エージェントごと・節目ごとの立ち位置（アイコン照合の位置の medoid）。
+
+    設置より後の節目はそのラウンドから外す（設置後の動きを初動に混ぜない）。
+    返り値 {"marks": [...], "agents": {名前: [(u, v) or None, ...]}}。取れなければ None。
+    """
+    rows = [r for r in g.get("rows") or [] if r.get("agents") and r.get("align_ok", True)]
+    if not rows:
+        return None
+    pts: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
+    for r in rows:
+        pe = r.get("plant_e")
+        for mark, e in AGENT_MARKS:
+            if pe is not None and e > float(pe) - 1:
+                continue
+            for ag, u, v, _area in r["agents"].get(mark) or []:
+                if 0 <= u <= 1 and 0 <= v <= 1:
+                    pts[ag][mark].append((u, v))
+    need = max(1, math.ceil(len(rows) * min_frac))
+    marks = [m for m, _ in AGENT_MARKS
+             if sum(1 for ag in pts if len(pts[ag][m]) >= need) >= 3]
+    if len(marks) < 2:
+        return None
+    out = {}
+    for ag, by in pts.items():
+        seq = [_medoid(by[m]) if len(by[m]) >= need else None for m in marks]
+        if sum(1 for x in seq if x) < 2:
+            continue
+        # 見えていない節目は前（無ければ後ろ）の位置にとどめる
+        last = next(x for x in seq if x)
+        for i, x in enumerate(seq):
+            if x is None:
+                seq[i] = last
+            else:
+                last = x
+        out[ag] = seq
+    if len(out) < 3:
+        return None
+    return {"marks": marks, "agents": dict(sorted(out.items())), "n": len(rows)}
+
+
+# ---------------------------------------------------------------- 床の上を通る道
+WALK_N = 160
+
+
+def walk_grid(cfg: dict | None, map_name: str):
+    """公式のマップ画像の不透明部分＝歩ける床（WALK_N 四方の bool 配列）。取れなければ None。"""
+    try:
+        import cv2
+        from . import tactics as TC
+        art = TC.map_art(cfg or {}, map_name)
+        if art is None or art.ndim != 3 or art.shape[2] < 4:
+            return None
+        a = cv2.resize(art[:, :, 3], (WALK_N, WALK_N), interpolation=cv2.INTER_AREA)
+        m = (a > 100).astype(np.uint8)
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))   # 細い通路・扉の切れ目をつなぐ
+        return m.astype(bool)
+    except Exception:
+        return None
+
+
+def mark_alignment(rows: list[dict], walk, th: float = 0.7) -> dict:
+    """マップごとに、ミニマップの点（uv）が公式のマップ画像の床に乗っている割合を見て、
+    低い（＝ミニマップ合わせがずれている）マップの位置は使わない印（align_ok=False）を付ける。"""
+    if walk is None:
+        return {}
+    n = walk.shape[0]
+    by = defaultdict(list)
+    for r in rows:
+        by[(r.get("match_id"), r.get("order"))].append(r)
+    out = {}
+    for k, rs in by.items():
+        pts = [(u, v) for r in rs for _e0, u, v, *_ in r.get("uv") or []]
+        if len(pts) < 30:
+            continue
+        on = sum(1 for u, v in pts if 0 <= u < 1 and 0 <= v < 1 and walk[int(v * n), int(u * n)])
+        frac = on / len(pts)
+        out[k] = round(frac, 2)
+        for r in rs:
+            r["align_ok"] = frac >= th
+            r["align_frac"] = round(frac, 2)
+    return out
+
+
+def _snap(grid, c: tuple[int, int], r: int = 8) -> tuple[int, int] | None:
+    n = grid.shape[0]
+    x, y = min(max(c[0], 0), n - 1), min(max(c[1], 0), n - 1)
+    if grid[y, x]:
+        return x, y
+    best, bd = None, 1e9
+    for yy in range(max(0, y - r), min(n, y + r + 1)):
+        for xx in range(max(0, x - r), min(n, x + r + 1)):
+            if grid[yy, xx]:
+                d = (xx - x) ** 2 + (yy - y) ** 2
+                if d < bd:
+                    best, bd = (xx, yy), d
+    return best
+
+
+def _clear(grid, a, b) -> bool:
+    """a → b の直線が床の上だけを通るか。"""
+    n = max(abs(b[0] - a[0]), abs(b[1] - a[1]), 1)
+    for i in range(n + 1):
+        x = round(a[0] + (b[0] - a[0]) * i / n)
+        y = round(a[1] + (b[1] - a[1]) * i / n)
+        if not grid[y, x]:
+            return False
+    return True
+
+
+def route(grid, p0: tuple[float, float], p1: tuple[float, float]) -> list[list[float]]:
+    """p0 → p1（0..1）を、床の上の最短の道で結ぶ（A*・8 方向）。角だけ残して返す。
+    床が無い・つながらないときは直線（両端だけ）。"""
+    if grid is None:
+        return [list(p0), list(p1)]
+    import heapq
+    n = grid.shape[0]
+    a = _snap(grid, (int(p0[0] * n), int(p0[1] * n)))
+    b = _snap(grid, (int(p1[0] * n), int(p1[1] * n)))
+    if a is None or b is None or a == b:
+        return [list(p0), list(p1)]
+    if _clear(grid, a, b):
+        return [list(p0), list(p1)]
+    H = lambda c: math.hypot(c[0] - b[0], c[1] - b[1])
+    openq = [(H(a), 0.0, a)]
+    came = {a: None}
+    gs = {a: 0.0}
+    steps = [(1, 0, 1), (-1, 0, 1), (0, 1, 1), (0, -1, 1),
+             (1, 1, 1.4142), (1, -1, 1.4142), (-1, 1, 1.4142), (-1, -1, 1.4142)]
+    found = False
+    while openq:
+        _, gc, c = heapq.heappop(openq)
+        if c == b:
+            found = True
+            break
+        if gc > gs.get(c, 1e18):
+            continue
+        for dx, dy, w in steps:
+            nx, ny = c[0] + dx, c[1] + dy
+            if not (0 <= nx < n and 0 <= ny < n) or not grid[ny, nx]:
+                continue
+            if dx and dy and not (grid[c[1], nx] and grid[ny, c[0]]):
+                continue                                  # 角をすり抜けない
+            ng = gc + w
+            if ng < gs.get((nx, ny), 1e18):
+                gs[(nx, ny)] = ng
+                came[(nx, ny)] = c
+                heapq.heappush(openq, (ng + H((nx, ny)), ng, (nx, ny)))
+    if not found:
+        return [list(p0), list(p1)]
+    path = [b]
+    while came[path[-1]] is not None:
+        path.append(came[path[-1]])
+    path.reverse()
+    # 見通しの利くところは 1 本の線にまとめる（角だけ残す）
+    keep = [path[0]]
+    i = 0
+    while i < len(path) - 1:
+        j = len(path) - 1
+        while j > i + 1 and not _clear(grid, path[i], path[j]):
+            j -= 1
+        keep.append(path[j])
+        i = j
+    pts = [[round((x + 0.5) / n, 4), round((y + 0.5) / n, 4)] for x, y in keep[1:-1]]
+    return [list(p0)] + pts + [list(p1)]
+
+
+def motion_frames(g: dict, callouts: list[dict] | None, side: str, walk=None) -> dict | None:
+    """型の動き。エージェントのアイコンを照合した位置があれば、エージェントごとに節目の立ち位置を
+    つなぎ（名札はエージェント名）、床の上を通る道（route）も付ける。無ければエリアの平均人数から作る。
+
+    返り値 {"marks": [...], "dots": [{"label", "xy": [[x, y], …], "route": [[[x, y], …], …]}], "source"}。
+    座標は valorant-api のマップ画像の 0..1。route[i] は節目 i → i+1 の折れ線。
+    """
+    tr = agent_tracks(g)
+    if tr:
+        dots = []
+        for ag, seq in tr["agents"].items():
+            dots.append({"label": ag, "xy": [[round(u, 4), round(v, 4)] for u, v in seq],
+                         "route": [route(walk, seq[i], seq[i + 1]) for i in range(len(seq) - 1)]})
+        return {"marks": tr["marks"], "dots": dots, "source": "agents", "n": tr["n"]}
+    return _area_motion(g, callouts, side, walk)
+
+
+def _area_motion(g: dict, callouts: list[dict] | None, side: str, walk=None) -> dict | None:
+    """（古い解析・アイコン照合が無いとき）エリアごとの平均人数から駒を置き、近いものどうしをつなぐ。
 
     返り値 {"marks": ["1:30", …, "設置"], "dots": [{"label", "xy": [[x, y], …]}]}。
     座標は valorant-api のマップ画像の 0..1。
@@ -1466,7 +1683,7 @@ def motion_frames(g: dict, callouts: list[dict] | None, side: str) -> dict | Non
     xy = _area_xy(callouts)
     if not xy:
         return None
-    rows = g.get("rows") or []
+    rows = [r for r in g.get("rows") or [] if r.get("align_ok", True)]
     marks, frames = [], []
     for name, e in MOTION_MARKS:
         c: Counter = Counter()
@@ -1540,28 +1757,48 @@ def motion_frames(g: dict, callouts: list[dict] | None, side: str) -> dict | Non
     for pth in paths:
         area = pth[anchor][0]
         ags = who.get(area) or []
-        label = ags[used[area]] if used[area] < len(ags) else area
+        label = ags[used[area]] if used[area] < len(ags) else "?"
         used[area] += 1
-        dots.append({"label": label,
-                     "xy": [[round(pth[i][1], 4), round(pth[i][2], 4)] for i in range(len(frames))]})
-    return {"marks": marks, "dots": dots}
+        xy_ = [[round(pth[i][1], 4), round(pth[i][2], 4)] for i in range(len(frames))]
+        dots.append({"label": label, "xy": xy_,
+                     "route": [route(walk, xy_[i], xy_[i + 1]) for i in range(len(xy_) - 1)]})
+    return {"marks": marks, "dots": dots, "source": "areas"}
 
 
 MOTION_JS = """
 <script>
 (function(){
+ var COLORS=['#0017c1','#c44900','#197a4b','#8843f8','#b8860b','#00838f','#d81b60'];
+ function along(pl,f){ // 折れ線 pl の上で、長さの割合 f の点
+  if(!pl||pl.length<2){return pl&&pl[0];}
+  var L=[],tot=0;for(var i=1;i<pl.length;i++){var d=Math.hypot(pl[i][0]-pl[i-1][0],pl[i][1]-pl[i-1][1]);L.push(d);tot+=d;}
+  if(tot<=0){return pl[0];} var r=f*tot;
+  for(var k=0;k<L.length;k++){ if(r<=L[k]||k===L.length-1){var t=L[k]>0?Math.min(1,r/L[k]):0;
+   return [pl[k][0]+(pl[k+1][0]-pl[k][0])*t, pl[k][1]+(pl[k+1][1]-pl[k][1])*t];} r-=L[k]; }
+  return pl[pl.length-1];
+ }
  function run(el){
   const d=JSON.parse(el.dataset.motion), marks=d.marks, dots=d.dots;
-  const box=el.querySelector('.mo-dots'), lab=el.querySelector('.mo-time');
-  const els=dots.map(function(p){const s=document.createElement('span');s.className='mo-dot';
-   s.textContent=p.label;box.appendChild(s);return s;});
+  const box=el.querySelector('.mo-dots'), lab=el.querySelector('.mo-time'), svg=el.querySelector('.mo-trail');
+  dots.forEach(function(p,k){ if(!svg) return; var pts=[];
+   (p.route||[]).forEach(function(seg,i){seg.forEach(function(q,j){if(i>0&&j===0)return;pts.push(q[0]+','+q[1]);});});
+   if(!pts.length){p.xy.forEach(function(q){pts.push(q[0]+','+q[1]);});}
+   var pl=document.createElementNS('http://www.w3.org/2000/svg','polyline');
+   pl.setAttribute('points',pts.join(' '));pl.setAttribute('fill','none');
+   pl.setAttribute('stroke',COLORS[k%COLORS.length]);pl.setAttribute('stroke-width','0.006');
+   pl.setAttribute('stroke-opacity','0.55');pl.setAttribute('stroke-linejoin','round');svg.appendChild(pl);});
+  const els=dots.map(function(p,k){const s=document.createElement('span');s.className='mo-dot';
+   s.style.background=COLORS[k%COLORS.length];s.textContent=p.label;box.appendChild(s);return s;});
   let t=0, playing=true;
   function draw(){
    const i=Math.floor(t), f=t-i, j=Math.min(i+1,marks.length-1);
-   dots.forEach(function(p,k){const a=p.xy[Math.min(i,p.xy.length-1)],b=p.xy[Math.min(j,p.xy.length-1)];
-    els[k].style.left=((a[0]+(b[0]-a[0])*f)*100)+'%';els[k].style.top=((a[1]+(b[1]-a[1])*f)*100)+'%';});
-   lab.textContent=marks[Math.round(t)]||marks[marks.length-1];
-   if(playing){t+=0.012; if(t>marks.length-1+0.8){t=0;}}
+   dots.forEach(function(p,k){var q;
+    if(i>=marks.length-1){q=p.xy[p.xy.length-1];}
+    else if(p.route&&p.route[i]){q=along(p.route[i],f);}
+    else{const a=p.xy[Math.min(i,p.xy.length-1)],b=p.xy[Math.min(j,p.xy.length-1)];q=[a[0]+(b[0]-a[0])*f,a[1]+(b[1]-a[1])*f];}
+    els[k].style.left=(q[0]*100)+'%';els[k].style.top=(q[1]*100)+'%';});
+   lab.textContent=marks[Math.min(Math.round(t),marks.length-1)];
+   if(playing){t+=0.008; if(t>marks.length-1+0.8){t=0;}}
    requestAnimationFrame(draw);
   }
   el.querySelector('.mo-play').addEventListener('click',function(e){playing=!playing;
@@ -1577,7 +1814,9 @@ MOTION_JS = """
 def motion_html(g: dict, fr: dict, bg: str) -> str:
     """動きで見る図（1 つぶん）。背景はマップ画像、駒は名札つきで節目の間を動く。"""
     return (f'<figure class="motion" data-motion=\'{json.dumps(fr, ensure_ascii=False)}\'>'
-            f'<div class="mo-map" style="background-image:url({bg})"><div class="mo-dots"></div></div>'
+            f'<div class="mo-map" style="background-image:url({bg})">'
+            f'<svg class="mo-trail" viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true"></svg>'
+            f'<div class="mo-dots"></div></div>'
             f'<figcaption><b>{_e(g["name"])}</b>　<span class="mo-time"></span>'
             f'　<button class="mo-play" type="button">一時停止</button>'
             f'　<span class="sub">{marks_text(fr)}</span></figcaption></figure>')
@@ -1634,10 +1873,15 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 figure{margin:0}figure img{width:100%;max-height:330px;object-fit:contain;border-radius:4px;background:var(--bg-sub)}
 .cols3 .card figure img{max-height:168px}.cols3 .card figure figcaption{font-size:11px}
 .card .todo{font-size:13px;line-height:1.55}
+.ex figure img{max-height:190px}.ex figcaption{font-size:11px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px;margin-top:8px}
+.tile{margin:0}.tile .pair{display:grid;grid-template-columns:1fr 1fr;gap:4px}
+.tile .pair img{width:100%;max-height:170px;object-fit:contain;border-radius:4px;background:var(--bg-sub)}
+.tile figcaption{font-size:11px}
 .motion{margin:0}
-.mo-map{position:relative;width:100%;aspect-ratio:1/1;max-height:300px;background-size:contain;
+.mo-map{position:relative;width:min(100%,320px);margin:0 auto;aspect-ratio:1/1;background-size:100% 100%;
 background-repeat:no-repeat;background-position:center;border-radius:4px;background-color:var(--bg-sub)}
-.mo-dots{position:absolute;inset:0}
+.mo-dots,.mo-trail{position:absolute;inset:0;width:100%;height:100%}
 .mo-dot{position:absolute;transform:translate(-50%,-50%);background:var(--key);color:#fff;font-size:10px;
 font-weight:700;border-radius:999px;padding:2px 6px;white-space:nowrap;box-shadow:0 0 0 2px #fff;
 transition:none}
@@ -1734,18 +1978,20 @@ def map_data_uri(cfg: dict, map_name: str, rows: list[dict] | None = None,
 
 
 def motion_slides(cfg: dict, map_name: str, prs: dict, rows: list[dict], calls: list[dict],
-                  foot: str, k: int = 3) -> list[str]:
+                  foot: str, k: int = 3, walk=None) -> list[str]:
     """「動きで見る」スライド（攻守それぞれ、よく使う型を 3 つまで）。"""
-    bg = map_data_uri(cfg, map_name, rows, calls)
+    bg = map_data_uri(cfg, map_name, None, calls)        # 公式のマップ画像（道を引いた床と同じもの）
     if not bg:
         return []
+    if walk is None:
+        walk = walk_grid(cfg, map_name)
     out = []
     for side in (ATTACK, DEFENSE):
         figs = []
         for g in prs[side]:
             if g["kind"] in ("Pistol", "AntiEco", "Eco", "PostPlant"):
                 continue
-            fr = motion_frames(g, calls, side)
+            fr = motion_frames(g, calls, side, walk)
             if fr:
                 figs.append(motion_html(g, fr, bg))
             if len(figs) >= k:
@@ -1753,8 +1999,10 @@ def motion_slides(cfg: dict, map_name: str, prs: dict, rows: list[dict], calls: 
         if figs:
             out.append(_slide(SIDE_EN[side], f"動きで見る（{'攻め' if side == ATTACK else '守り'}）",
                               f'<div class="cols3">{"".join(figs)}</div>'
-                              '<p class="sub">節目（1:30・1:15・1:00・0:40・設置後）の平均の位置を結んだ動きです。'
-                              '名札は 1:15 の担当。実際のラウンドの動きは、型ごとの見本の動画で見てください。</p>', foot))
+                              '<p class="sub">ミニマップのアイコン照合で、エージェントごとに節目（1:40・1:30・1:15・1:00・0:40）の'
+                              '立ち位置（その型のラウンドで実際に立っていた点の真ん中）を取り、マップの床の上を通る道で結んでいます。'
+                              '設置した後の位置は混ぜていません。線は 1 人ずつの通り道です。'
+                              '実際の 1 ラウンドの動きは、型ごとの「実例」のスライドで見てください。</p>', foot))
     return out
 
 
@@ -1766,6 +2014,294 @@ def _fig(src, cap: str) -> str:
         import base64
         src = "data:image/jpeg;base64," + base64.b64encode(src.read_bytes()).decode()
     return f'<figure><img src="{_e(src)}" alt="{_e(cap)}" loading="lazy"><figcaption>{_e(cap)}</figcaption></figure>'
+
+
+# ---------------------------------------------------------------- 実例（1 ラウンドを追う）
+EXAMPLE_KINDS = ("Default", "Push", "Rush", "Split", "Execute")
+
+
+def example_round(g: dict) -> dict | None:
+    """型の実例にする 1 ラウンド：開幕の配置図と GIF があり、アイコン照合の人数が多く、勝ったもの・新しいもの。"""
+    rows = g.get("rows") or []
+
+    def has(p):
+        return bool(p) and Path(p).exists()
+
+    cands = [r for r in rows if has(r.get("board")) or has(r.get("gif"))] or [r for r in rows if r.get("agents")]
+    if not cands:
+        return None
+    return max(cands, key=lambda r: (has(r.get("board")) and has(r.get("gif")), bool(r["win"]),
+                                     len((r.get("agents") or {}).get("1:15") or []), str(r.get("date") or "")))
+
+
+def _left(e: float | None) -> str:
+    """開始からの秒 → ラウンドの残り時間（1:40 から数える）。"""
+    return _clock(max(0.0, 100 - float(e))) if e is not None else "?"
+
+
+def round_story(r: dict) -> dict:
+    """1 ラウンドで「誰がどこからどこへ動いたか」と、そのラウンドで起きたこと。
+
+    動きはアイコン照合の節目（1:40・1:30・1:15・1:00・0:40）ごとのエリア名をつないだもの（同じエリアが続けば 1 つに）。
+    設置より後の節目は「設置後」として分ける。
+    """
+    ag = (r.get("agents") or {}) if r.get("align_ok", True) else {}
+    pe = r.get("plant_e")
+    agent_of = r.get("agent_of") or {}
+    names = sorted({a for m, _ in AGENT_MARKS for a, *_ in ag.get(m) or []})
+    moves = []
+    for a in names:
+        seq = []
+        for m, e in AGENT_MARKS:
+            hit = next((x for x in ag.get(m) or [] if x[0] == a), None)
+            if not hit:
+                continue
+            area = hit[3] or "スポーン"
+            post = pe is not None and e > float(pe)
+            if seq and seq[-1][1] == area and seq[-1][2] == post:
+                continue
+            seq.append((m, area, post))
+        if seq:
+            pre = [f"{ar}（{m}）" for m, ar, post in seq if not post]
+            aft = [f"{ar}（{m}）" for m, ar, post in seq if post]
+            moves.append({"agent": a, "line": " → ".join(pre) + (f"　／設置後 {' → '.join(aft)}" if aft else "")})
+    ev = []
+    if r.get("fk_e") is not None and r.get("fk_player"):
+        who = agent_of.get(r["fk_player"]) or r["fk_player"]
+        ev.append(f"最初のキル：{_left(r['fk_e'])} に {who}（{r['fk_player']}）が"
+                  + ("取った" if r.get("fk_own") else "取られた"))
+    ks = [f"{agent_of.get(k) or k} {_left(e)}" for k, _v, e in (r.get("kills") or []) if e is not None]
+    if ks:
+        ev.append("キル：" + "・".join(ks[:6]))
+    ds = [f"{agent_of.get(v) or v} {_left(e)}" for v, e in (r.get("deaths_t") or []) if e is not None]
+    if ds:
+        ev.append("倒された：" + "・".join(ds[:6]))
+    if r.get("planted"):
+        ev.append(f"設置：{r.get('plant_site') or '?'} サイト・残り {_left(pe)}" if pe is not None
+                  else f"設置：{r.get('plant_site') or '?'} サイト")
+    us = [f"{u['agent']} {_left(u['e'])}" for u in r.get("ults") or [] if u.get("e") is not None]
+    if us:
+        ev.append("ULT：" + "・".join(us))
+    ev.append(("勝ち" if r["win"] else "負け") + (f"（{r['reason_main']}）" if r.get("reason_main") else ""))
+    return {"moves": moves, "events": ev}
+
+
+def example_slide(g: dict, side: str, set_img, out_dir: Path, foot: str) -> str | None:
+    """型の実例：重ね合わせ（参考）→ そのラウンドの開幕の配置図 → ラウンド中の GIF、の順に並べ、
+    「誰がどこからどこへ動いたか」「そのラウンドで起きたこと」を書き出す。"""
+    import os
+    r = example_round(g)
+    if r is None:
+        return None
+    figs = []
+    if set_img:
+        figs.append(_fig(set_img, "① 型の重ね合わせ（この型の全ラウンド・参考）"))
+    if r.get("board") and Path(r["board"]).exists():
+        figs.append(_fig(Path(r["board"]), f"② このラウンドの配置（{board_mark(r['board'])}・アイコン照合）"))
+    if r.get("gif") and Path(r["gif"]).exists():
+        try:
+            rel = os.path.relpath(str(r["gif"]), str(out_dir)).replace(os.sep, "/")
+        except ValueError:
+            rel = str(r["gif"])
+        figs.append(f'<figure><img src="{_e(rel)}" alt="ラウンド中のミニマップ" loading="lazy">'
+                    f'<figcaption>③ このラウンドのミニマップ（倍速・リプレイ除外）</figcaption></figure>')
+    st = round_story(r)
+    if not figs and not st["moves"]:
+        return None
+    mv = "".join(f'<li><b>{_e(m["agent"])}</b>　{_e(m["line"])}</li>' for m in st["moves"]) \
+        or '<li class="empty">このラウンドはアイコン照合の位置が取れていません。GIF で動きを見てください。</li>'
+    ev = "".join(f"<li>{_e(x)}</li>" for x in st["events"])
+    link = (f'<p class="sub"><a href="{_e(r["yt"])}">▶ このラウンドを動画で見る（時刻つき）</a></p>'
+            if r.get("yt") else "")
+    title = f"実例：{g['name']}（vs {r.get('opp_tag') or r.get('opp')} R{r['n']}・{'勝ち' if r['win'] else '負け'}）"
+    body = (f'<div class="cols3 ex">{"".join(figs)}</div>'
+            f'<div class="cols"><div><h3>④ GIF から読み取れる動き（エージェントごと）</h3><ul class="plain sub">{mv}</ul></div>'
+            f'<div><h3>このラウンドで起きたこと</h3><ul class="plain sub">{ev}</ul>{link}</div></div>'
+            '<p class="sub">①で型の「いつもの形」をつかみ、②でこのラウンドの開幕の立ち位置、③の GIF で実際の動きを確かめてください。'
+            '④は節目ごと（残り時間）のエリア名をつないだものです。スキルの位置は動画で確かめてください。</p>')
+    out = _slide(SIDE_EN[side], title, body, foot)
+    others = [x for x in g.get("rows") or [] if x is not r]
+    gal = gallery(others, out_dir, k=3)
+    if gal:
+        out += _slide(SIDE_EN[side], f"{g['name']}：同じ型のほかのラウンド",
+                      gal + '<p class="sub">左が配置図、右がラウンド中のミニマップ（GIF）。動画はラウンドの頭から再生します。</p>',
+                      foot)
+    return out
+
+
+# ---------------------------------------------------------------- ミニマップ＋GIF＋動画リンクのタイル
+def board_mark(path) -> str:
+    """配置図のファイル名（board_r04_140.jpg / board_r04_115.jpg）から、何時の配置かを読む。"""
+    m = re.search(r"_(\d)(\d\d)\.(?:jpg|png)$", str(path or ""))
+    return f"{m.group(1)}:{m.group(2)}" if m else "開幕"
+
+
+def yt_plus(url: str | None, sec: float | None) -> str | None:
+    """ラウンド開始の動画リンク（?t=秒）に、開始からの秒を足す。"""
+    if not url:
+        return None
+    if sec is None:
+        return url
+    m = re.search(r"([?&]t=)(\d+)", url)
+    if not m:
+        return url
+    return url[:m.start(2)] + str(max(0, int(m.group(2)) + int(sec))) + url[m.end(2):]
+
+
+def _rel(p, out_dir: Path) -> str:
+    import os
+    try:
+        return os.path.relpath(str(p), str(out_dir)).replace(os.sep, "/")
+    except ValueError:
+        return str(p)
+
+
+def _has(p) -> bool:
+    return bool(p) and Path(p).exists()
+
+
+def tile(r: dict, out_dir: Path, at: float | None = None, note: str = "") -> str:
+    """1 ラウンドぶん：開幕のミニマップ（配置図）＋ラウンド中の GIF ＋ 動画リンク（at があればその時刻から）。
+    画像は重いので埋め込まず、冊子からの相対パスで出す（Drive のフォルダのまま開けば見える）。"""
+    imgs = ""
+    if _has(r.get("board")):
+        imgs += (f'<img src="{_e(_rel(r["board"], out_dir))}" alt="配置（{board_mark(r["board"])}）"'
+                 ' loading="lazy">')
+    elif _has(r.get("start_img")):
+        imgs += f'<img src="{_e(_rel(r["start_img"], out_dir))}" alt="開幕のミニマップ" loading="lazy">'
+    if _has(r.get("gif")):
+        imgs += f'<img src="{_e(_rel(r["gif"], out_dir))}" alt="ラウンド中のミニマップ（GIF）" loading="lazy">'
+    url = yt_plus(r.get("yt"), at)
+    cap = (f'vs {_e(r.get("opp_tag") or r.get("opp"))} R{r.get("n")} {"〇" if r.get("win") else "✕"}'
+           + (f"　{_e(note)}" if note else "")
+           + (f'　<a href="{_e(url)}">▶ 動画（{_e(yt_at(url))}〜）</a>' if url else ""))
+    return f'<figure class="tile"><div class="pair">{imgs}</div><figcaption>{cap}</figcaption></figure>'
+
+
+def gallery(rows: list[dict], out_dir: Path, k: int = 3, at=None, note=None, prefer_win: bool = True) -> str:
+    """動画リンクのあるラウンドを k 個まで、すべて GIF つきのタイルで並べる。"""
+    rs = [r for r in rows if r.get("yt") or _has(r.get("gif"))]
+    rs.sort(key=lambda r: (not (_has(r.get("gif")) and _has(r.get("board"))),
+                           (not r["win"]) if prefer_win else r["win"], str(r.get("date") or "")))
+    rs = rs[:k]
+    if not rs:
+        return ""
+    return ('<div class="tiles">' + "".join(tile(r, out_dir, at(r) if at else None, note(r) if note else "")
+                                            for r in rs) + "</div>")
+
+
+# ---------------------------------------------------------------- エリアテイク・集団戦
+def _arrive(r: dict, area: str | None) -> float | None:
+    """そのエリアに自チームの点が最初に入った時刻（開始からの秒）。"""
+    ts = [float(e) for e, _z, a in r.get("pos") or [] if a == area and e is not None and float(e) >= 3]
+    return min(ts) if ts else None
+
+
+def area_takes(rows: list[dict], min_n: int = 2, k: int = 4) -> list[dict]:
+    """初動で取りに行くエリアごとに：いつ着くか（中央値）、どの形（人数の形）で、最初のファイトとその結果。"""
+    by = defaultdict(list)
+    for r in rows:
+        if r.get("pistol") or not r.get("setup") or not r.get("align_ok", True):
+            continue
+        a = (r["setup"] or {}).get("area")
+        if a:
+            by[a].append(r)
+    out = []
+    for a, rs in by.items():
+        if len(rs) < min_n:
+            continue
+        ts = sorted(t for r in rs if (t := _arrive(r, a)) is not None)
+        fk = [r for r in rs if r.get("fk_e") is not None]
+        shapes = Counter((r["setup"] or {}).get("shape") for r in rs if (r["setup"] or {}).get("shape"))
+        out.append({"area": a, "rows": rs, "n": len(rs), "win": sum(r["win"] for r in rs),
+                    "t": ts[len(ts) // 2] if ts else None, "t_n": len(ts),
+                    "fk_n": len(fk), "fk_own": sum(1 for r in fk if r.get("fk_own")),
+                    "fk_t": sorted(float(r["fk_e"]) for r in fk)[len(fk) // 2] if fk else None,
+                    "shapes": shapes.most_common(2)})
+    out.sort(key=lambda g: -g["n"])
+    return out[:k]
+
+
+def fights(r: dict, gap: float = 5.0, min_k: int = 3) -> list[dict]:
+    """キルフィードのキルが gap 秒以内に min_k 個以上続いたところ＝集団戦。"""
+    ev = sorted(r.get("feed") or [])
+    out, cur = [], []
+    for e, own in ev:
+        if cur and e - cur[-1][0] > gap:
+            if len(cur) >= min_k:
+                out.append(cur)
+            cur = []
+        cur.append((e, own))
+    if len(cur) >= min_k:
+        out.append(cur)
+    res = []
+    for c in out:
+        e0 = c[0][0]
+        near = Counter(a for e, _z, a in (r.get("pos") or [] if r.get("align_ok", True) else [])
+                       if a and abs(float(e) - e0) <= 4)
+        res.append({"e": e0, "e1": c[-1][0], "k": sum(1 for _, o in c if o), "d": sum(1 for _, o in c if not o),
+                    "area": near.most_common(1)[0][0] if near else None,
+                    "post": r.get("plant_e") is not None and e0 >= float(r["plant_e"])})
+    return res
+
+
+def fight_groups(rows: list[dict], k: int = 3) -> list[dict]:
+    """集団戦をエリア（と設置の前後）ごとにまとめる。"""
+    by = defaultdict(list)
+    for r in rows:
+        for f in fights(r):
+            by[(f["area"] or "場所不明", f["post"])].append((r, f))
+    out = []
+    for (a, post), xs in by.items():
+        won = sum(1 for _, f in xs if f["k"] > f["d"])
+        ts = sorted(f["e"] for _, f in xs)
+        out.append({"area": a, "post": post, "items": xs, "n": len(xs), "won": won,
+                    "t": ts[len(ts) // 2], "size": sum(f["k"] + f["d"] for _, f in xs) / len(xs),
+                    "rwin": sum(1 for r, _ in xs if r["win"])})
+    out.sort(key=lambda g: (-g["n"], g["area"] == "場所不明"))
+    return out[:k]
+
+
+def area_take_slides(rows: list[dict], side: str, out_dir: Path, foot: str) -> list[str]:
+    """エリアテイク：取りに行くエリアごとに、いつ・どの形で・どうなったかと、ミニマップ＋GIF＋動画。"""
+    out = []
+    for g in area_takes(rows):
+        a = g["area"]
+        lis = [f"{g['n']} ラウンド・勝ち {g['win']}（{_pct(_rate(g['win'], g['n']))}）"]
+        if g["t"] is not None:
+            lis.append(f"着く時間：残り {_left(g['t'])} ごろ（中央値・{g['t_n']} ラウンドで位置が取れたもの）")
+        if g["shapes"]:
+            lis.append("形：" + "・".join(f"{sh}（{c} 回）" for sh, c in g["shapes"]))
+        if g["fk_n"]:
+            lis.append(f"最初のキル：自チーム {g['fk_own']}/{g['fk_n']}"
+                       + (f"・残り {_left(g['fk_t'])} ごろ" if g["fk_t"] is not None else ""))
+        ul = "".join(f"<li>{_e(x)}</li>" for x in lis)
+        gal = gallery(g["rows"], out_dir, k=3, at=lambda r, a=a: (_arrive(r, a) or 5) - 3,
+                      note=lambda r, a=a: (f"{a} 着 残り {_left(_arrive(r, a))}" if _arrive(r, a) is not None else ""))
+        out.append(_slide(SIDE_EN[side], f"エリアテイク：{a}（{'攻め' if side == ATTACK else '守り'}）",
+                          f'<ul class="plain">{ul}</ul>{gal}'
+                          '<p class="sub">左が開幕の配置（1:40）、右がラウンド中のミニマップ（GIF）。'
+                          '動画はそのエリアに着く少し前から再生します。</p>', foot))
+    return out
+
+
+def fight_slides(rows: list[dict], side: str, out_dir: Path, foot: str) -> list[str]:
+    """集団戦（キルフィードで 5 秒以内に 3 キル以上続いたところ）をエリアごとに。"""
+    out = []
+    for g in fight_groups(rows):
+        lis = [f"{g['n']} 回・撃ち勝ち {g['won']}（{_pct(_rate(g['won'], g['n']))}）・そのラウンドの勝ち {g['rwin']}",
+               f"起きる時間：残り {_left(g['t'])} ごろ（中央値）・平均 {g['size']:.1f} キル"]
+        ul = "".join(f"<li>{_e(x)}</li>" for x in lis)
+        fs = {id(r): f for r, f in g["items"]}
+        rows_ = [r for r, _ in g["items"]]
+        gal = gallery(rows_, out_dir, k=3, at=lambda r: fs[id(r)]["e"] - 4,
+                      note=lambda r: f"残り {_left(fs[id(r)]['e'])}・{fs[id(r)]['k']}キル/{fs[id(r)]['d']}デス")
+        where = g["area"] + ("（設置後）" if g["post"] else "")
+        out.append(_slide(SIDE_EN[side], f"集団戦：{where}（{'攻め' if side == ATTACK else '守り'}）",
+                          f'<ul class="plain">{ul}</ul>{gal}'
+                          '<p class="sub">キルフィードで 5 秒以内に 3 キル以上続いたところを集団戦としています'
+                          '（キルフィードが読めなかったラウンドは入りません）。動画は集団戦の 4 秒前から再生します。</p>', foot))
+    return out
 
 
 def howto_slides(cfg: dict, key: dict, rows: list[dict], prs: dict, foot: str) -> list[str]:
@@ -1946,14 +2482,20 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
                          f'<p class="sub">はじめの 4 枚は「この構成をそのまま真似するための手順」です。'
                          f'そのあとに数字の裏づけ（strong / weak point・型ごとの集計）が続きます。</p>', foot, h1=True))
 
+    # ミニマップ合わせがずれているマップの位置は、動き・実例・エリアテイクに使わない
+    walk = walk_grid(cfg, map_name)
+    al = mark_alignment(rows, walk)
+    bad = [k for k, v in al.items() if v < 0.7]
+    if bad and log:
+        log(f"  {title}: ミニマップ合わせがずれているマップ {len(bad)}/{len(al)} の位置は、動き・実例・エリアテイクに使いません")
     prs = {sd: playbook_rows([r for r in rows if r["side"] == sd], sd) for sd in (DEFENSE, ATTACK)}
     slides += howto_slides(cfg, key, rows, prs, foot)
-    slides += motion_slides(cfg, map_name, prs, rows, calls, foot)
+    slides += motion_slides(cfg, map_name, prs, rows, calls, foot, walk=walk)
     cheat = build_cheatsheet(cfg, key, rows, prs, out_dir)
     export_positions(cfg, key, prs, calls, out_dir)
     try:                                  # 作戦ボードアプリ（TactiVal）に読み込ませる JSON
         from . import tactival as TV
-        TV.export(cfg, key, prs, out_dir, lambda g, side: motion_frames(g, calls, side), log=log,
+        TV.export(cfg, key, prs, out_dir, lambda g, side: motion_frames(g, calls, side, walk), log=log,
                   areas_xy=_area_xy(calls))
     except Exception as e:
         log(f"  TactiVal のボードを作れませんでした（{e}）")
@@ -2002,7 +2544,7 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
             if not part:
                 continue
             for k0 in range(0, len(part), 3):
-                cards = []
+                cards, examples = [], []
                 for g in part[k0:k0 + 3]:
                     im = g.get("img") or {}
                     # 初動の型は「5 人がどこに立つか」の図、2 巡目やリテイクは位置の重ね合わせ
@@ -2012,6 +2554,8 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
                     if f_ is None:
                         f_ = position_png(cfg, map_name, g["rows"], im.get("mark"),
                                           img_dir / f"{g['slug']}.jpg", calls, plant=bool(im.get("plant")))
+                    if g["kind"] in EXAMPLE_KINDS:
+                        examples.append((g, f_))
                     cap = "5 人の立ち位置（数字は平均人数）" if g["kind"] in ("Default", "Push") else "この型のときの位置"
                     fig = _fig(f_, cap) if f_ else ""
                     d = g.get("difficulty") or {}
@@ -2034,6 +2578,14 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
                 slides.append(_slide(en, head + (f" {k0 // 3 + 1}" if n_part > 1 else ""),
                                      f'<div class="cols3">{"".join(cards)}</div>'
                                      + (f'<p class="sub">{_e(note)}</p>' if note else ""), foot))
+                # 型ごとに 1 ラウンドを追う（重ね合わせ → 開幕の配置 → GIF → 動きの読み取り）
+                for g, f_ in examples:
+                    ex = example_slide(g, side, f_, out_dir, foot)
+                    if ex:
+                        slides.append(ex)
+        # エリアテイク（初動で取りに行く場所・時間・形）と集団戦（キルが続いたところ）
+        slides += area_take_slides(srows, side, out_dir, foot)
+        slides += fight_slides(srows, side, out_dir, foot)
         if side == DEFENSE:
             for s_ in CORE:
                 rr = [r for r in srows if r["plant_site"] == s_]
@@ -2051,8 +2603,10 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
                         f'{w - sum(r["win"] for r in fast)}</li>'
                         + (f"<li>設置された時点の自チームの位置（平均人数）：{_e(pz)}</li>" if pz else "")
                         + (f"<li>リテイクで使った ULT（勝ち/使用）：{_e(ul_)}</li>" if ul_ else "")
-                        + f'<li>例：{_ex_links(rr)}</li></ul></div>'
-                        f'<div>{_fig(fig, "設置後 10 秒の自チームの位置")}</div></div>')
+                        + '</ul></div>'
+                        f'<div>{_fig(fig, "設置後 10 秒の自チームの位置")}</div></div>'
+                        + gallery(rr, out_dir, k=4, at=lambda r: (r["plant_e"] or 0) - 2,
+                                  note=lambda r: f"設置 残り {_left(r['plant_e'])}" if r.get("plant_e") is not None else ""))
                 slides.append(_slide(en, f"How to Retake {s_} Site", body, foot))
         else:
             for s_ in CORE:
@@ -2067,8 +2621,10 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
                         f'（{_pct(_rate(w, len(rr)))}）</li>'
                         + (f"<li>設置直後の自チームの位置（平均人数）：{_e(pz)}</li>" if pz else "")
                         + (f"<li>設置後に使った ULT（勝ち/使用）：{_e(ul_)}</li>" if ul_ else "")
-                        + f'<li>例：{_ex_links(rr)}</li></ul></div>'
-                        f'<div>{_fig(fig, "設置後 10 秒の自チームの位置")}</div></div>')
+                        + '</ul></div>'
+                        f'<div>{_fig(fig, "設置後 10 秒の自チームの位置")}</div></div>'
+                        + gallery(rr, out_dir, k=4, at=lambda r: (r["plant_e"] or 0) - 2,
+                                  note=lambda r: f"設置 残り {_left(r['plant_e'])}" if r.get("plant_e") is not None else ""))
                 slides.append(_slide(en, f"{s_} Site PostPlant", body, foot))
 
     # 12 ラウンドの組み立て（ピストル → アンチエコ → ボーナス → フルバイ…）と、同じ初動の形からの分岐
