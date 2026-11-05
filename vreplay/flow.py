@@ -7,9 +7,10 @@
   例：「フルバイ＋ULT2（対オペ）」
 
 分岐（攻撃側）：
-  1:15 前後の初動の配置（tactics の setups）でいちばん人数の多いゾーンと、実際に設置した（設置が無ければ 0:40 に
-  いちばん人数の多い）サイトを比べる。違えば「フェイク A→B」、MID から入れば「MID→B」、同じなら「A 直行」。
-  同じ形のラウンドを並べると、前半に見せた形から後半でフェイクに変えた、といった組み立てが見える。
+  1:15 の初動のキーエリア（tactics の setups の area）と、実際に設置した（設置が無ければ 0:40 に
+  いちばん人数の多い）サイトを比べる。サイトを見せて別のサイトに行っていれば「B Main 捨て A スプリット」、
+  MID から入れば「MID→B」、同じなら「A 直行」。
+  同じ形のラウンドを並べると、前半に見せた形から後半で別のサイトに変えた、といった組み立てが見える。
 """
 from __future__ import annotations
 
@@ -135,14 +136,21 @@ def _top_zone(zones: dict | None, prefer=SITES + ("Mid",)) -> str | None:
 
 
 def branch(rep: dict, rr: dict, no: int) -> dict | None:
-    """攻撃側の 1 ラウンドの「見せた形 → 実際の攻め先」。"""
+    """攻撃側の 1 ラウンドの「1:15 に見せた場所 → 実際の攻め先」。
+
+    見せた場所は初動のキーエリア（「B Main」「Mid Top」など）。サイトを見せて別のサイトに行っていれば
+    コーチの書き方の「<見せた場所> 捨て <サイト> スプリット」にする（fake）。MID 経由は「MID→B」。
+    """
     if _side_of(rr, no) != "攻撃":
         return None
     rt = rr.get("tactics") or {}
     su = (rt.get("setups") or {}).get(str(no)) or {}
     if not su:
         return None
-    start = _top_zone(su.get("zones"))
+    area = su.get("area")
+    start = su.get("area_zone") or _top_zone(su.get("zones"))
+    if start is None and area:
+        start = next((z for z in SITES + ("Mid",) if str(area).startswith(z + " ")), None)
     final = rt.get("plant_site") if rt.get("plant_site") in SITES else None
     if final is None:
         tl = (rt.get("timeline") or {})
@@ -150,6 +158,7 @@ def branch(rep: dict, rr: dict, no: int) -> dict | None:
             final = _top_zone((tl.get(mark) or {}).get(str(no)), prefer=SITES)
             if final:
                 break
+    fake = bool(final and start in SITES and start != final)
     if not final:
         tag = None
     elif not start:
@@ -159,9 +168,9 @@ def branch(rep: dict, rr: dict, no: int) -> dict | None:
     elif start == "Mid":
         tag = f"MID→{final}"
     else:
-        tag = f"フェイク {start}→{final}"
-    return {"setup": su.get("name"), "shape": su.get("shape"), "start": start, "final": final, "tag": tag,
-            "planted": rt.get("plant_site") in SITES}
+        tag = f"{area or start} 捨て {final} スプリット"
+    return {"setup": su.get("name"), "shape": su.get("shape"), "area": area, "start": start, "final": final,
+            "tag": tag, "fake": fake, "planted": rt.get("plant_site") in SITES}
 
 
 def branches(rep: dict) -> list[dict]:

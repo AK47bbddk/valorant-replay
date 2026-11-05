@@ -36,6 +36,9 @@ MARK_E = {"1:30": 10, "1:15": 25, "1:00": 40, "0:40": 60, "0:20": 80}
 CORE = ("A", "B", "C")
 ZONES = ("A", "Mid", "B", "C")
 GUN = {"full", "half", "semi-buy"}
+# データベースの「種類」の選択肢（Notion・HTML 共通）
+KINDS = ["Default", "Execute", "Split", "Rush", "PostPlant", "Retake", "Counter", "Push", "Pistol", "AntiEco",
+         "Eco"]
 ECO = {"eco", "semi-eco"}
 K_SHRINK = 3.0
 MIN_N = 4
@@ -113,14 +116,16 @@ def records(rep: dict) -> list[dict]:
     T = tac.get("transform") if tac.get("aligned") else None
     tac_rounds = tac.get("rounds") or {}
     from . import flow as F
+    from . import tactics as TC
     rtypes = F.all_types(rep)
+    # エリア名 → 両スポーンからの距離。守りの「前目」やタイミングプッシュの判定に使う
+    ranks = TC.area_ranks(tac.get("callouts_placed") or [])
     pos_by_n = defaultdict(list)
-    if T:
-        for p in tac.get("positions") or []:
-            try:
-                pos_by_n[int(p[0])].append(p)
-            except (TypeError, ValueError, IndexError):
-                continue
+    for p in tac.get("positions") or []:
+        try:
+            pos_by_n[int(p[0])].append(p)
+        except (TypeError, ValueError, IndexError):
+            continue
     for rr in rep.get("rounds") or []:
         s1 = _side1(rr)
         W = rr.get("winner_no")
@@ -161,13 +166,19 @@ def records(rep: dict) -> list[dict]:
             pz = rt.get("plant_zones") or {}
             my_kills = [k for k in kills if k.get("killer_team") == me]
             my_deaths = [k for k in kills if k.get("victim_team") == me or (k.get("killer_team") == op)]
-            uv = []
-            if T and start_t is not None:
+            uv, pos = [], []
+            if start_t is not None:
                 for p in pos_by_n.get(n, []):
                     if int(p[4]) != no:
                         continue
-                    u, v = _inverse(T, float(p[2]), float(p[3]))
-                    uv.append((round(float(p[1]) - float(start_t), 1), u, v, p[6]))
+                    e = round(float(p[1]) - float(start_t), 1)
+                    if T:
+                        u, v = _inverse(T, float(p[2]), float(p[3]))
+                        uv.append((e, u, v, p[6]))
+                    call = p[7] if len(p) > 7 else None
+                    area = TC.area_name(p[6], call)
+                    if area and not TC.is_spawn(p[6], call):
+                        pos.append((e, p[6], area))
             out.append({
                 "match_id": str(rep.get("match_id")), "order": rep.get("order"), "date": rep.get("date"),
                 "event": rep.get("event"), "stage": rep.get("stage"),
@@ -188,7 +199,7 @@ def records(rep: dict) -> list[dict]:
                 "players": players[no], "agent_of": agent_of,
                 "reason_tags": (reason.get("tags") or []) if won else [],
                 "loss_tags": (reason.get("tags") or []) if not won else [],
-                "yt": rr.get("yt_url"), "uv": uv,
+                "yt": rr.get("yt_url"), "uv": uv, "pos": pos, "ranks": ranks,
                 "setup": (rt.get("setups") or {}).get(str(no)) if aligned else None,
                 "opp_setup": (rt.get("setups") or {}).get(str(3 - no)) if aligned else None,
                 "first_fight": rt.get("first_fight") if aligned else None,
@@ -445,7 +456,11 @@ def zone_table(rows: list[dict], marks=MARKS) -> dict:
 
 def concept_lines(zt: dict, side: str, rows: list[dict]) -> list[str]:
     lines = []
-    get = lambda m, z: (zt.get(m) or {}).get("avg", {}).get(z)
+    # その節目のデータがあれば、ゾーンが載っていない＝0 人として扱う（MID から人を減らす動きを拾うため）
+    def get(m, z):
+        d = zt.get(m)
+        return None if not d else float((d.get("avg") or {}).get(z) or 0.0)
+
     a, b = get("1:30", "Mid"), get("0:40", "Mid")
     if a is not None and b is not None:
         if side == DEFENSE and a >= 1.0 and b <= a - 0.5:
@@ -485,37 +500,67 @@ def _clock(sec: float) -> str:
     return f"{sec // 60}:{sec % 60:02d}"
 
 
+# ---------------------------------------------------------------- ラウンドの種類（デフォルトの集計から外すもの）
+def is_pistol(r: dict) -> bool:
+    return bool(r.get("pistol")) or (r.get("rtype") or {}).get("type") == "ピストル"
+
+
+def is_eco(r: dict) -> bool:
+    """エコ（セーブ）。デフォルトの集計には入れない。"""
+    if is_pistol(r):
+        return False
+    return (r.get("rtype") or {}).get("type") == "エコ" or r.get("eco") in ECO
+
+
+def is_anti_eco(r: dict) -> bool:
+    if is_pistol(r):
+        return False
+    return ((r.get("rtype") or {}).get("type") == "アンチエコ"
+            or (r.get("eco") in GUN and r.get("opp_eco") in ECO))
+
+
+def for_default(rows: list[dict]) -> list[dict]:
+    """デフォルト（型）の集計に使うラウンド。ピストルとエコは外す。"""
+    return [r for r in rows if not is_pistol(r) and not is_eco(r)]
+
+
+def key_areas(r: dict, lo: float, hi: float) -> Counter:
+    """その時間帯（開始からの秒）に自チームが入っていたエリアの人数。"""
+    c: Counter = Counter()
+    for e, _zone, area in r.get("pos") or []:
+        if lo <= float(e) <= hi and area:
+            c[area] += 1
+    return c
+
+
 def _setup_name(z: dict) -> tuple[str, str]:
-    """1:15 の配置（平均ではなくそのラウンドの点の数）から型の名前。"""
+    """1:15 のゾーン別人数（そのラウンドの点の数）から、型の名前と形。キーエリアが無いとき用。"""
+    from . import tactics
     r = {k: int(round(v)) for k, v in z.items() if k in ZONES and round(v) > 0}
     if not r:
         return "不明", ""
     shape = " ".join(f"{k}{r[k]}" for k in ZONES if k in r)
-    if r.get("Mid", 0) >= 3:
-        return "MID 3", shape
-    top = max(((k, v) for k, v in r.items() if k in CORE), key=lambda kv: kv[1], default=(None, 0))
-    if top[1] >= 3:
-        return f"{top[0]} スタック", shape
-    if r.get("Mid", 0) >= 2:
-        return "MID 寄り", shape
-    if top[1] >= 2 and sum(1 for k in CORE if r.get(k)) >= 2:
-        return "バランス", shape
-    return "分散", shape
+    return tactics.setup_name(r, None), shape
 
 
-def defaults(rows: list[dict], mark: str = "1:15", k: int = 5) -> list[dict]:
-    groups: dict[tuple, list] = defaultdict(list)
-    for r in rows:
+def defaults(rows: list[dict], mark: str = "1:15", k: int = 6) -> list[dict]:
+    """初動の配置（setup）が無いときの保険。1:15 のゾーン別人数だけで型を分ける。"""
+    from . import tactics
+    groups: dict[str, list] = defaultdict(list)
+    for r in for_default(rows):
         z = r["tl"].get(mark)
         if not z or sum(z.values()) < 3:
             continue
-        name, shape = _setup_name(z)
-        groups[(name, r["buy"])].append((r, shape))
+        zz = {kk: int(round(v)) for kk, v in z.items() if kk in ZONES and round(v) > 0}
+        shape = " ".join(f"{kk}{zz[kk]}" for kk in ZONES if kk in zz)
+        name = tactics.setup_name(zz, r["side"], code=tactics.shape_code(shape))
+        groups[name].append((r, shape))
     out = []
-    for (name, buy), items in groups.items():
+    for name, items in groups.items():
         rs = [x for x, _ in items]
-        shapes = Counter(s for _, s in items)
-        out.append({"name": f"{name} Default", "buy": buy, "n": len(rs), "w": sum(r["win"] for r in rs),
+        shapes = Counter(sh for _, sh in items)
+        out.append({"name": name, "buy": Counter(r["buy"] for r in rs).most_common(1)[0][0],
+                    "n": len(rs), "w": sum(r["win"] for r in rs),
                     "shape": shapes.most_common(1)[0][0], "rows": rs,
                     "sites": Counter(r["plant_site"] for r in rs if r["plant_site"])})
     out.sort(key=lambda g: (-g["n"], g["name"]))
@@ -549,7 +594,7 @@ def intent_summary(rows: list[dict]) -> dict:
 
 
 def summary_data(rows: list[dict], base: list[dict]) -> dict:
-    """Claude に渡す集計（数字・型の名前・解説の一節）。"""
+    """LLM に渡す集計（数字・型の名前・解説の一節）。型の名前はプレイブックの行とそろえる。"""
     out = {"team": rows[0]["team"] if rows else None, "map": rows[0]["map"] if rows else None,
            "comp": list(rows[0]["comp"]) if rows else [], "maps": len({(r["match_id"], r["order"]) for r in rows})}
     for side in (DEFENSE, ATTACK):
@@ -559,10 +604,14 @@ def summary_data(rows: list[dict], base: list[dict]) -> dict:
             "rounds": len(srows),
             "metrics": [{"name": m["label"], "team": f"{m['w']}/{m['n']}", "league": _pct(m["base"])}
                         for m in ms if m["n"]],
-            "setups": [{"name": g["name"], "n": g["n"], "win": g["w"], "shape": g["shape"], "callouts": g["callouts"],
+            "setups": [{"name": g["name"], "kind": g["kind"], "n": g["n"], "win": g["w"],
+                        "shape": g.get("shape") or "", "code": g.get("code") or "",
+                        "area": g.get("area"), "callouts": g.get("callouts") or [],
                         "roles": g.get("roles") or ""}
-                       for g in setup_clusters(srows)],
-            "sets": [{"name": g["name"], "n": g["n"], "win": g["w"]} for g in sets(srows)] if side == ATTACK else [],
+                       for g in playbook_rows(srows, side) if g["kind"] in ("Default", "Push")],
+            "sets": [{"name": g["name"], "kind": g["kind"], "n": g["n"], "win": g["w"]}
+                     for g in playbook_rows(srows, side)
+                     if g["kind"] not in ("Default", "Push")],
             "caster": intent_summary(rows).get(side, {}),
         }
     return out
@@ -665,75 +714,475 @@ def plan_slides(rows: list[dict], foot: str) -> list[str]:
     return slides
 
 
-def setup_clusters(rows: list[dict], th: float = 0.5, k: int = 6) -> list[dict]:
-    """初動の配置（ラウンドごとのタグ）を、コールアウトの重なり（Jaccard）で似たものどうしまとめる。
-    まず同じ名前（「MID 3」「A スタック」…）で分け、その中でコールアウトが近いものを 1 つの型にする。"""
-    groups: list[dict] = []
-    items = [r for r in rows if r.get("setup") and r["setup"].get("callouts")]
-    by_name = defaultdict(list)
+def _zone_vec(zs: dict) -> tuple:
+    return tuple(float(zs.get(z) or 0) for z in ZONES)
+
+
+def _l1(a: tuple, b: tuple) -> float:
+    return sum(abs(x - y) for x, y in zip(a, b))
+
+
+def _cluster(name: str, rs: list[dict], merged: list[str] | None = None) -> dict:
+    calls = Counter(c for r in rs for c in set((r.get("setup") or {}).get("callouts") or []))
+    shapes = Counter((r.get("setup") or {}).get("shape") or "" for r in rs)
+    areas = Counter(a for r in rs if (a := (r.get("setup") or {}).get("area")))
+    shape = shapes.most_common(1)[0][0]
+    # 立ち位置：エリアごとの平均人数（「B Link 2人・Mid Top 1人」と読める形）
+    tot: Counter = Counter()
+    for r in rs:
+        tot.update((r.get("setup") or {}).get("areas") or {})
+    spread = {a: round(v / len(rs), 1) for a, v in tot.items() if v / len(rs) >= 0.5}
+    from . import tactics
+    return {"name": name, "n": len(rs), "w": sum(r["win"] for r in rs), "rows": rs, "spread": spread,
+            "shape": shape, "code": (rs[0].get("setup") or {}).get("code") or tactics.shape_code(shape),
+            "area": areas.most_common(1)[0][0] if areas else None,
+            "callouts": [c for c, cn in calls.most_common(6) if cn >= max(1, len(rs) * 0.4)],
+            "buys": Counter(r["buy"] for r in rs),
+            "sites": Counter(r["plant_site"] for r in rs if r["plant_site"]),
+            "fights": Counter(r["first_fight"] for r in rs if r.get("first_fight")),
+            "roles": _roles(rs), "merged": merged or [],
+            "boards": [r["board"] for r in rs if r.get("board")][:3]}
+
+
+def setup_clusters(rows: list[dict], th: float = 0.5, k: int = 6, min_n: int = 2) -> list[dict]:
+    """初動の配置を型ごとにまとめる。
+
+    名前（「<キーエリア> テイクデフォ」「守りデフォ（2-1-2）」など）が同じラウンドは 1 つの型にする
+    （「#1/#2」の番号は付けない）。1 ラウンドだけの型は、人数の差（A/Mid/B の L1 距離）1 以内で
+    いちばん近い型（同じキーエリアを優先）にまとめ、近い型が無ければ「その他」に入れる。
+    ピストル・エコのラウンドは入れない（別の行にする）。多い順に k 個まで。
+    """
+    items = [r for r in for_default(rows) if (r.get("setup") or {}).get("name")]
+    by_name: dict[str, list] = defaultdict(list)
     for r in items:
         by_name[r["setup"]["name"]].append(r)
-    for name, rs in by_name.items():
-        local: list[dict] = []
-        for r in sorted(rs, key=lambda r: -len(r["setup"]["callouts"])):
-            cs = r["setup"]["callouts"]
-            g = max(local, key=lambda g: _jaccard(cs, g["rep"]), default=None)
-            if g is not None and _jaccard(cs, g["rep"]) >= th:
-                g["rows"].append(r)
-            else:
-                local.append({"name": name, "rep": cs, "rows": [r]})
-        groups += local
-    out = []
-    for g in groups:
-        rs = g["rows"]
-        calls = Counter(c for r in rs for c in set(r["setup"]["callouts"]))
-        shapes = Counter(r["setup"]["shape"] for r in rs)
-        out.append({"name": g["name"], "n": len(rs), "w": sum(r["win"] for r in rs), "rows": rs,
-                    "shape": shapes.most_common(1)[0][0],
-                    "callouts": [c for c, n in calls.most_common(6) if n >= max(1, len(rs) * 0.4)],
-                    "buys": Counter(r["buy"] for r in rs),
-                    "sites": Counter(r["plant_site"] for r in rs if r["plant_site"]),
-                    "fights": Counter(r["first_fight"] for r in rs if r.get("first_fight")),
-                    "roles": _roles(rs), "boards": [r["board"] for r in rs if r.get("board")][:3]})
-    out.sort(key=lambda g: (-g["n"], g["name"]))
-    # 同じ名前の型が複数あれば番号をつける
-    seen, dup = Counter(), Counter(g["name"] for g in out)
-    for g in out:
-        if dup[g["name"]] > 1:
-            seen[g["name"]] += 1
-            g["name"] = f"{g['name']} #{seen[g['name']]}"
-    return out[:k]
+    groups = []
+    for nm, rs in by_name.items():
+        vecs = Counter(_zone_vec((r["setup"].get("zones") or {})) for r in rs)
+        groups.append({"name": nm, "rows": rs, "area": Counter(
+            a for r in rs if (a := r["setup"].get("area"))).most_common(1),
+            "vec": vecs.most_common(1)[0][0]})          # いちばん多い人数の形で近さを測る
+    big = [g for g in groups if len(g["rows"]) >= min_n]
+    small = [g for g in groups if len(g["rows"]) < min_n]
+    if not big:                                   # まだ全部 1 ラウンドずつ（試合が少ない）ときはそのまま出す
+        big, small = sorted(groups, key=lambda g: g["name"]), []
+    other: list[dict] = []
+    for g in small:
+        cand = [h for h in big if _l1(g["vec"], h["vec"]) <= 1.0]
+        same = [h for h in cand if h["area"] and g["area"] and h["area"][0][0] == g["area"][0][0]]
+        tgt = min(same or cand, key=lambda h: (_l1(g["vec"], h["vec"]), -len(h["rows"]))) if cand else None
+        if tgt is None:
+            other += g["rows"]
+        else:
+            tgt["rows"] += g["rows"]
+            tgt.setdefault("merged", []).append(g["name"])
+    big.sort(key=lambda g: (-len(g["rows"]), g["name"]))
+    if len(big) > k:
+        other += [r for g in big[k:] for r in g["rows"]]
+        big = big[:k]
+    out = [_cluster(g["name"], g["rows"], g.get("merged")) for g in big]
+    if other:
+        out.append(_cluster("その他", other))
+    return out
+
+
+def _jaccard_groups(rows: list[dict], th: float = 0.5) -> list[list[dict]]:
+    """（以前の方法）コールアウトの重なりで分ける。いまは使わないが、比較用に残す。"""
+    local: list[dict] = []
+    for r in sorted(rows, key=lambda r: -len((r.get("setup") or {}).get("callouts") or [])):
+        cs = (r.get("setup") or {}).get("callouts") or []
+        g = max(local, key=lambda g: _jaccard(cs, g["rep"]), default=None)
+        if g is not None and _jaccard(cs, g["rep"]) >= th:
+            g["rows"].append(r)
+        else:
+            local.append({"rep": cs, "rows": [r]})
+    return [g["rows"] for g in local]
+
+
+# ---------------------------------------------------------------- 攻めの 2 巡目のアクション
+def _area_zone(area: str | None) -> str | None:
+    """「A Ramps」→「A」。エリア名の頭のゾーン。"""
+    return next((z for z in CORE + ("Mid",) if str(area or "").startswith(z + " ")), None)
+
+
+def _shown(r: dict) -> tuple[str | None, str | None]:
+    """1:15 に見せた場所（キーエリア）と、そのゾーン。"""
+    su = r.get("setup") or {}
+    area = su.get("area")
+    return area, su.get("area_zone") or _area_zone(area)
+
+
+def late_take(r: dict) -> str | None:
+    """後取り：1:15 では取っていなかった場所を、1:05〜設置前（相手のシグネチャーが戻る前後）に取る。
+
+    「Cメインテイク → Aメイン後取り → 最終セット」の 2 番目にあたる。設置サイト側の場所だけを見る。
+    """
+    site = r.get("plant_site")
+    if site not in CORE:
+        return None
+    early = set(((r.get("setup") or {}).get("areas") or {}))
+    lo = MARK_E["1:00"] - 5                           # 1:05（開幕のシグネチャーが戻るころ）
+    hi = float(r["plant_e"]) - 3 if r.get("plant_e") is not None else MARK_E["0:20"]
+    if hi <= lo:
+        return None
+    # サイトそのものに入るのは「後取り」ではなく最終セットなので数えない（取り直すのはメインなどの手前のエリア）
+    c = {a: v for a, v in key_areas(r, lo, hi).items()
+         if a not in early and _area_zone(a) == site and a.lower() != f"{site} site".lower()}
+    if not c:
+        return None
+    return max(c.items(), key=lambda kv: (kv[1], kv[0]))[0]
+
+
+def _set_kind(r: dict) -> tuple[str, str, str | None]:
+    """そのラウンドの 2 巡目のアクション（種類, 設置サイト, 名前に使う場所）。"""
+    s, e = r["plant_site"], r["plant_e"]
+    area, zone = _shown(r)
+    fake = bool((r.get("branch") or {}).get("fake")) or (zone in CORE and s in CORE and zone != s)
+    if e is not None and e <= 30:
+        return "Rush", s, area
+    if fake:
+        return "Split", s, area or zone
+    back = late_take(r)
+    if back:
+        return "LateTake", s, back
+    if e is not None and e >= 60:
+        return "Late", s, area
+    return "Execute", s, area
 
 
 def sets(rows: list[dict], k: int = 8) -> list[dict]:
-    """攻めの設置ラウンドを「サイト × 攻め方」でまとめる。"""
-    groups: dict[str, list] = defaultdict(list)
+    """攻めの設置ラウンドを 2 巡目のアクションでまとめる。
+
+    「<サイト> ラッシュ」（30 秒以内の設置）／「<見せた場所> 捨て <サイト> スプリット」（1:15 の
+    キーエリアと設置サイトが違う）／「<サイト> レイト」（60 秒以降の設置）／「<サイト> execution」。
+    「MID → A」のような経路はタイトルに入れず、本文に書く。
+    """
+    buckets: dict[tuple, list] = defaultdict(list)
     for r in rows:
         if not r["planted"] or not r["plant_site"]:
             continue
-        s, e = r["plant_site"], r["plant_e"]
-        before = None
-        for m in ("0:40", "1:00", "1:15"):
-            if e is not None and MARK_E[m] < e and r["tl"].get(m):
-                before = r["tl"][m]
-                break
-        if e is not None and e <= 30:
-            kind = f"{s} Site Rush"
-        elif before and before.get("Mid", 0) >= 1 and before.get(s, 0) >= 1 and before.get("Mid", 0) + before.get(s, 0) >= 4:
-            kind = f"{s} Split（MID → {s}）"
-        elif e is not None and e >= 60:
-            kind = f"{s} Late Set"
-        else:
-            kind = f"{s} Site Set"
-        groups[kind].append(r)
+        kind, site, area = _set_kind(r)
+        buckets[(kind, site)].append((r, area))
     out = []
-    for kind, rs in groups.items():
+    for (kind, site), items in buckets.items():
+        rs = [r for r, _ in items]
+        shown = Counter(a for _, a in items if a).most_common(1)
+        if kind == "Rush":
+            name = f"{site} ラッシュ"
+        elif kind == "Split":
+            name = f"{shown[0][0] if shown else 'MID'} 捨て {site} スプリット"
+        elif kind == "LateTake":
+            name = f"{shown[0][0] if shown else site} 後取り"
+        elif kind == "Late":
+            name = f"{site} レイト"
+        else:
+            name = f"{site} execution"
         pe = [r["plant_e"] for r in rs if r["plant_e"] is not None]
-        out.append({"name": kind, "n": len(rs), "w": sum(r["win"] for r in rs), "rows": rs,
+        out.append({"name": name, "kind": "Rush" if kind == "Rush" else "Split" if kind == "Split" else "Execute",
+                    "n": len(rs), "w": sum(r["win"] for r in rs), "rows": rs, "site": site,
+                    "shown": shown[0][0] if shown else None, "set_kind": kind,
                     "plant": float(np.median(pe)) if pe else None,
                     "buys": Counter(r["buy"] for r in rs)})
     out.sort(key=lambda g: (-g["n"], g["name"]))
     return out[:k]
+
+
+def post_plants(rows: list[dict], min_n: int = 2) -> list[dict]:
+    """サイト別のポストプラント（設置後の勝率）。"""
+    out = []
+    for site in CORE:
+        rs = [r for r in rows if r["plant_site"] == site]
+        if len(rs) < min_n:
+            continue
+        out.append({"name": f"{site} ポストプラント", "kind": "PostPlant", "n": len(rs),
+                    "w": sum(r["win"] for r in rs), "rows": rs, "site": site,
+                    "buys": Counter(r["buy"] for r in rs)})
+    return out
+
+
+# ---------------------------------------------------------------- 守りの型（リテイク・カウンター・プッシュ）
+def fast_retake(r: dict, win: float = 12.0) -> bool:
+    """設置から 12 秒以内に取り返しのキルが出ている（ファストリテイク）。"""
+    pe = r.get("plant_e")
+    if pe is None:
+        return False
+    return any(t is not None and pe <= float(t) <= pe + win for _, _, t in r.get("kills") or [])
+
+
+def timing_push(r: dict) -> bool:
+    """デフォルトのあと 1:15〜1:00 ごろ（設置前）に、攻め側のエリアへ出ている（タイミングプッシュ）。"""
+    if r["side"] != DEFENSE:
+        return False
+    from . import tactics
+    ranks = r.get("ranks") or {}
+    if not ranks:
+        return False
+    if tactics.attacker_half((r.get("setup") or {}).get("area"), ranks):
+        return False                               # 最初から前目に置いている型は「前目」で数える
+    lo, hi = MARK_E["1:15"], MARK_E["1:00"] + 5
+    if r.get("plant_e") is not None:
+        hi = min(hi, float(r["plant_e"]) - 1)      # 設置後に寄った位置は数えない
+    if hi <= lo:
+        return False
+    return any(tactics.attacker_half(a, ranks) for a in key_areas(r, lo, hi))
+
+
+def counter_place(r: dict) -> str | None:
+    """設置前に守りが早い先制キル（20 秒以内）で取ったラウンドの、当たった場所。"""
+    if r["side"] != DEFENSE or not r["win"] or r["planted"]:
+        return None
+    if not r.get("fk_own") or r.get("fk_e") is None or float(r["fk_e"]) > 20:
+        return None
+    return r.get("first_fight") or ((r.get("setup") or {}).get("area_zone")) or None
+
+
+def def_sets(rows: list[dict], min_n: int = 2) -> list[dict]:
+    """守りの 2 巡目以降の型：「<サイト> リテイク」（ファスト／遅い）・「<場所> カウンター」・
+    「タイミングプッシュ」。"""
+    out = []
+    for site in CORE:
+        rs = [r for r in rows if r["plant_site"] == site]
+        if len(rs) < min_n:
+            continue
+        fast = [r for r in rs if fast_retake(r)]
+        slow = [r for r in rs if not fast_retake(r)]
+        if len(fast) >= min_n and len(slow) >= min_n:
+            for nm, part in ((f"{site} ファストリテイク", fast), (f"{site} 遅いリテイク", slow)):
+                out.append({"name": nm, "kind": "Retake", "n": len(part), "w": sum(r["win"] for r in part),
+                            "rows": part, "site": site, "fast": len(part) if "ファスト" in nm else 0})
+        else:
+            out.append({"name": f"{site} リテイク", "kind": "Retake", "n": len(rs),
+                        "w": sum(r["win"] for r in rs), "rows": rs, "site": site,
+                        "fast": len(fast), "fast_w": sum(r["win"] for r in fast),
+                        "slow": len(slow), "slow_w": sum(r["win"] for r in slow)})
+    places: dict[str, list] = defaultdict(list)
+    for r in rows:
+        pl = counter_place(r)
+        if pl:
+            places[pl].append(r)
+    for pl, rs in sorted(places.items(), key=lambda kv: -len(kv[1])):
+        if len(rs) >= min_n:
+            out.append({"name": f"{pl} カウンター", "kind": "Counter", "n": len(rs),
+                        "w": sum(r["win"] for r in rs), "rows": rs})
+    pushes = [r for r in rows if timing_push(r)]
+    if len(pushes) >= min_n:
+        out.append({"name": "タイミングプッシュ", "kind": "Push", "n": len(pushes),
+                    "w": sum(r["win"] for r in pushes), "rows": pushes})
+    return out
+
+
+# ---------------------------------------------------------------- 相手の形を見てどうするか
+def reads(rows: list[dict], side: str, min_n: int = 2, k: int = 6) -> list[dict]:
+    """「相手がこう来たらこうする」。相手の 1:15 の形ごとに、こちらの攻め先（守りなら設置された
+    サイト）と勝率を並べる。初心者がいちばん迷うところなので、数字のまま出す。"""
+    by: dict[str, list] = defaultdict(list)
+    for r in for_default(rows):
+        op = (r.get("opp_setup") or {})
+        nm = op.get("name")
+        if not nm:
+            continue
+        by[nm].append(r)
+    out = []
+    for nm, rs in by.items():
+        if len(rs) < min_n:
+            continue
+        sites = Counter(r["plant_site"] for r in rs if r["plant_site"])
+        best = None
+        if sites:
+            cand = [(s, c, sum(x["win"] for x in rs if x["plant_site"] == s)) for s, c in sites.items()]
+            best = max(cand, key=lambda t: ((t[2] / t[1]) if t[1] else 0, t[1]))
+        out.append({"opp": nm, "n": len(rs), "w": sum(r["win"] for r in rs), "sites": sites,
+                    "best": best, "rows": rs,
+                    "acts": Counter(g["name"] for g in sets(rs, k=3) for _ in range(g["n"]))
+                    if side == ATTACK else Counter()})
+    out.sort(key=lambda g: -g["n"])
+    return out[:k]
+
+
+def read_line(g: dict, side: str) -> str:
+    """reads の 1 行を文にする。"""
+    if side == ATTACK:
+        act = "、".join(f"{a} {c}" for a, c in g["acts"].most_common(2)) or "-"
+        tail = ""
+        if g["best"]:
+            s, c, w = g["best"]
+            tail = f"　→ いちばん勝てているのは {s}（{w}/{c}）"
+        return f"相手が「{g['opp']}」で来たとき（{g['n']} 回・勝ち {g['w']}）：{act}{tail}"
+    sites = "、".join(f"{s} {c}" for s, c in g["sites"].most_common()) or "設置させず勝つことが多い"
+    tail = ""
+    if g["sites"]:
+        s0, c0 = g["sites"].most_common(1)[0]
+        w0 = sum(r["win"] for r in g["rows"] if r["plant_site"] == s0)
+        tail = f"　→ {s0} に来ることが多い（{c0}/{g['n']}）。{s0} を厚めにして、取り返しは {w0}/{c0}"
+    return f"相手が「{g['opp']}」で来たとき（{g['n']} 回・勝ち {g['w']}）：設置されたサイト {sites}{tail}"
+
+
+# ---------------------------------------------------------------- ピストル・アンチエコ
+def buy_rows(rows: list[dict], min_n: int = 1) -> list[dict]:
+    out = []
+    for name, kind, pick in (("Pistol", "Pistol", is_pistol), ("Anti eco", "AntiEco", is_anti_eco),
+                             ("Eco", "Eco", is_eco)):
+        rs = [r for r in rows if pick(r)]
+        if len(rs) < min_n:
+            continue
+        out.append({"name": name, "kind": kind, "n": len(rs), "w": sum(r["win"] for r in rs), "rows": rs,
+                    "setups": Counter((r.get("setup") or {}).get("name") for r in rs
+                                      if (r.get("setup") or {}).get("name")),
+                    "sites": Counter(r["plant_site"] for r in rs if r["plant_site"])})
+    return out
+
+
+# ---------------------------------------------------------------- 行（Notion のデータベース・HTML 共通）
+def yt_at(url: str | None) -> str:
+    """YouTube の ?t=秒 → 「1:23:45」。無ければ空。"""
+    m = re.search(r"[?&]t=(\d+)", str(url or ""))
+    if not m:
+        return ""
+    t = int(m.group(1))
+    return f"{t // 3600}:{t % 3600 // 60:02d}:{t % 60:02d}" if t >= 3600 else f"{t // 60}:{t % 60:02d}"
+
+
+def video_line(rows: list[dict], k: int = 3) -> str:
+    """「スキルの出し方は動画で見る」ための見本（どの試合の何分から）。"""
+    ex = _ex_rows(rows, k)
+    if not ex:
+        return ""
+    body = "、".join(f"vs {r['opp_tag']} R{r['n']}（{'勝ち' if r['win'] else '負け'}"
+                     + (f"・{yt_at(r['yt'])} から" if yt_at(r["yt"]) else "") + "）" for r in ex)
+    return "見本の動画（スキルの出し方はここで見る）：" + body
+
+
+def _ex_rows(rows: list[dict], k: int = 3) -> list[dict]:
+    rs = [r for r in rows if r.get("yt")]
+    rs.sort(key=lambda r: (not r["win"], str(r["date"]), r["n"]))
+    return rs[:k]
+
+
+def _lines_default(g: dict, side: str) -> list[str]:
+    out = [f"{g['n']} 回・勝ち {g['w']}（{_pct(_rate(g['w'], g['n']))}）・形 {g['shape']}"
+           + (f"（{g['code']}）" if g.get("code") else "")]
+    if g.get("callouts"):
+        out.append("よく映る場所：" + "・".join(g["callouts"]))
+    if g.get("roles"):
+        out.append("担当（アイコン照合）：" + g["roles"])
+    if g.get("merged"):
+        out.append("まとめた近い型：" + "・".join(g["merged"]))
+    if side == ATTACK and g.get("sites"):
+        out.append("その後の設置：" + "、".join(f"{s} {c}" for s, c in g["sites"].most_common()))
+    if g.get("fights"):
+        out.append("初動のファイト：" + "、".join(f"{z} {c}" for z, c in g["fights"].most_common(3)))
+    return out
+
+
+def _lines_set(g: dict) -> list[str]:
+    out = [f"{g['n']} 回・勝ち {g['w']}（{_pct(_rate(g['w'], g['n']))}）"
+           + (f"・設置 残り {_clock(100 - g['plant'])}" if g.get("plant") is not None else "")]
+    if g.get("set_kind") == "LateTake" and g.get("shown"):
+        out.append(f"1:15 では取っていなかった {g['shown']} を 1:05 以降に取り返して {g['site']} へ（後取り）")
+    elif g.get("shown") and g.get("site"):
+        out.append(f"見せた場所：{g['shown']}（1:15）→ 設置：{g['site']}")
+    zs = [r["tl"].get("1:15") for r in g["rows"] if r["tl"].get("1:15")]
+    if zs:
+        out.append("1:15 の位置（平均人数・経路）：" + _zones_line(zs))
+    if g.get("buys"):
+        out.append("購入：" + "・".join(f"{b} {c}" for b, c in g["buys"].most_common()))
+    return out
+
+
+def _lines_post(g: dict) -> list[str]:
+    out = [f"{g['site']} 設置 {g['n']} 回・勝ち {g['w']}（{_pct(_rate(g['w'], g['n']))}）"]
+    pz = _zones_line([r["plant_zones"] for r in g["rows"] if r["plant_zones"]])
+    if pz:
+        out.append("設置直後の位置（平均人数）：" + pz)
+    ul = _ult_line([r for r in g["rows"] if any(u["post"] for u in r["ults"])])
+    if ul:
+        out.append("設置後に使った ULT（勝ち/使用）：" + ul)
+    return out
+
+
+def _lines_retake(g: dict) -> list[str]:
+    out = [f"{g['site']} を設置された {g['n']} 回・取り返した {g['w']}（{_pct(_rate(g['w'], g['n']))}）"]
+    if g.get("slow") is not None:
+        out.append(f"ファスト（設置 12 秒以内に取り返しのキル）{g['fast']} 回・勝ち {g.get('fast_w', 0)}／"
+                   f"遅いリテイク {g['slow']} 回・勝ち {g.get('slow_w', 0)}")
+    pz = _zones_line([r["plant_zones"] for r in g["rows"] if r["plant_zones"]])
+    if pz:
+        out.append("設置された時点の位置（平均人数）：" + pz)
+    ul = _ult_line([r for r in g["rows"] if any(u["post"] for u in r["ults"])])
+    if ul:
+        out.append("リテイクで使った ULT（勝ち/使用）：" + ul)
+    return out
+
+
+def _lines_plain(g: dict, side: str) -> list[str]:
+    out = [f"{g['n']} 回・勝ち {g['w']}（{_pct(_rate(g['w'], g['n']))}）"]
+    if g["kind"] == "Counter":
+        fk = [r["fk_e"] for r in g["rows"] if r.get("fk_e") is not None]
+        if fk:
+            out.append(f"先制キルは開始 {float(np.median(fk)):.0f} 秒ごろ（設置前に止めたラウンド）")
+        who = _who(g["rows"], "fk")
+        if who:
+            out.append("先制を取った選手：" + who)
+    if g["kind"] == "Push":
+        out.append("デフォルトのあと 1:15〜1:00 ごろに攻め側のエリアへ出たラウンド")
+    if g.get("setups"):
+        out.append("初動の形：" + "、".join(f"{t} {c}" for t, c in g["setups"].most_common(3)))
+    if g["kind"] in ("Pistol", "AntiEco", "Eco") and side == ATTACK:
+        acts = sets(g["rows"], k=3)
+        if acts:
+            out.append("この中での攻め方：" + "、".join(f"{a['name']} {a['n']}" for a in acts))
+    if g.get("sites"):
+        key = "設置サイト" if side == ATTACK else "設置されたサイト"
+        out.append(f"{key}：" + "、".join(f"{s} {c}" for s, c in g["sites"].most_common()))
+    return out
+
+
+def playbook_rows(rows: list[dict], side: str, k: int = 6) -> list[dict]:
+    """Notion のデータベースの行＝HTML のスライドのカード。攻守で並べる順も決める。
+
+    返り値 [{"name", "kind", "n", "w", "rows", "lines", "img", "tags", "slug"}]
+    """
+    srows = [r for r in rows if r["side"] == side]
+    base = for_default(srows)          # ピストル・エコは型に混ぜず、下の Pistol／Anti eco の行で見る
+    out = []
+    cl = setup_clusters(base, k=k)
+    for g in (cl or [{**d, "code": "", "callouts": [], "merged": []} for d in defaults(base, k=k)]):
+        kind = "Push" if g["name"].endswith("前目") else "Default"
+        out.append({**g, "kind": kind, "lines": _lines_default(g, side), "img": {"mark": "1:15"},
+                    "tags": [x for x in (g.get("code"), g.get("shape")) if x]})
+    if side == ATTACK:
+        for g in sets(base):
+            out.append({**g, "lines": _lines_set(g), "img": {"plant": True}, "tags": []})
+        for g in post_plants(base):
+            out.append({**g, "lines": _lines_post(g), "img": {"plant": True}, "tags": []})
+    else:
+        for g in def_sets(base):
+            retake = g["kind"] == "Retake"
+            lines = _lines_retake(g) if retake else _lines_plain(g, side)
+            out.append({**g, "lines": lines, "tags": [],
+                        "img": {"plant": True} if retake else {"mark": "1:15"}})
+    for g in buy_rows(srows):
+        out.append({**g, "lines": _lines_plain(g, side), "img": {"mark": "1:15"}, "tags": []})
+    from . import howto as H
+    for g in out:
+        g.setdefault("tags", [])
+        g["todo"] = H.row_todo(g, side)                 # 初心者向けの「やること」
+        g["difficulty"] = H.difficulty(g, side)         # 真似するときの難しさ
+        g["mentions"] = _caster_tags(g["rows"])
+        v = video_line(g["rows"])
+        if v:
+            g["lines"] = list(g["lines"]) + [v]
+        g["buys"] = Counter(r["buy"] for r in g["rows"] if r.get("buy") and r["buy"] != "?")
+        if g["kind"] != "Pistol":
+            g["buys"].pop("Pistol", None)          # ピストルでない型の購入に Pistol を付けない
+        g["examples"] = _ex_rows(g["rows"])
+        g["slug"] = _slug(f"{side}_{g['name']}")
+    return out
+
+
+def _caster_tags(rows: list[dict], k: int = 3) -> list[str]:
+    c = Counter(t for r in rows for t in (r.get("caster") or {}).get("tags", []))
+    return [t for t, _ in c.most_common(k)]
 
 
 def ult_table(rows: list[dict]) -> list[dict]:
@@ -857,6 +1306,287 @@ def position_png(cfg: dict, map_name: str, rows: list[dict], mark: str | None, p
     return path
 
 
+def _area_xy(callouts: list[dict]) -> dict[str, tuple[float, float]]:
+    """エリア名（「A Site」「Mid Vent」）→ マップ画像の 0..1 座標。"""
+    from . import tactics
+    out = {}
+    for c in callouts or []:
+        z = tactics.zone_of(c)
+        nm = tactics.area_name(z, c.get("name"))
+        if nm:
+            out[nm] = (float(c["x"]), float(c["y"]))
+    return out
+
+
+def _agent_icons(cfg: dict, names: list[str]) -> dict:
+    """エージェントのアイコン（valorant-api、キャッシュ済みなら通信しない）。取れなければ空。"""
+    try:
+        from . import agents
+        return agents.load_icons(cfg, [n for n in dict.fromkeys(names) if n], log=None)
+    except Exception:
+        return {}
+
+
+def row_arrows(g: dict, side: str) -> list[tuple[str, str]]:
+    """その型で引く矢印（どこからどこへ動くか）。[(出発のエリア, 行き先のエリア)]"""
+    kind, name = g.get("kind") or "", g.get("name") or ""
+    site = g.get("site") or (g["sites"].most_common(1)[0][0] if g.get("sites") else None)
+    if not site:
+        return []
+    goal = f"{site} Site"
+    if side == DEFENSE:
+        if kind == "Retake":                       # リテイクは外から中へ
+            return [(a, goal) for a in sorted((g.get("spread") or {}), key=lambda a: -g["spread"][a])[:3]
+                    if a != goal]
+        return []
+    if kind in ("Default", "Push"):                # デフォルトはキーエリア →（よく行く）サイト
+        return [(g.get("area") or "", goal)] if g.get("area") else []
+    if kind == "Split" and g.get("shown"):         # 見せた場所 → 本命のサイト
+        return [(g["shown"], goal)]
+    if "後取り" in name:
+        back = name.replace(" 後取り", "")
+        return [(back, goal)]
+    if kind in ("Rush", "Execute") and g.get("shown"):
+        return [(g["shown"], goal)]                # 2 巡目は「見せた場所 → サイト」
+    return [(a, goal) for a in sorted((g.get("spread") or {}), key=lambda a: -g["spread"][a])[:2] if a != goal]
+
+
+def setup_png(cfg: dict, map_name: str, g: dict, path: Path, callouts: list[dict] | None = None,
+              rows: list[dict] | None = None, side: str | None = None) -> Path | None:
+    """型の配置図（Valotactics のような見た目）：公式のマップ画像の上に、担当エージェントの
+    アイコン（取れなければ名前つきの丸）を立ち位置に置き、動く先へ矢印を引く。
+
+    ヒートマップより「誰がどこに立って、どこへ動くか」が分かるので、初心者向けのカードはこれを使う。
+    文字は地図の上に置くのでローマ字（コールアウトとエージェント名）だけにする。
+    """
+    import cv2
+    spread = {a: v for a, v in (g.get("spread") or {}).items() if v >= 0.5}
+    xy = _area_xy(callouts)
+    pts = [(a, v, xy[a]) for a, v in spread.items() if a in xy]
+    if len(pts) < 2:
+        return None
+    who: dict[str, Counter] = defaultdict(Counter)
+    for r in g.get("rows") or []:
+        for area, ags in ((r.get("setup") or {}).get("who_area") or {}).items():
+            for ag in ags:
+                who[area][ag] += 1
+    bg = None
+    for r in (rows if rows is not None else g.get("rows") or []):
+        p_ = r.get("uv_base")
+        if p_ and Path(p_).exists():
+            bg = cv2.resize(cv2.imread(p_), (512, 512))
+            break
+    if bg is None:
+        bg = _icon(cfg, map_name)
+    if bg is None:
+        bg = np.full((512, 512, 3), 245, np.uint8)
+        for c in callouts or []:
+            cv2.circle(bg, (int(c["x"] * 512), int(c["y"] * 512)), 3, (180, 180, 180), -1)
+    img = (bg.astype(np.float32) * 0.5 + 255 * 0.5).astype(np.uint8)         # うすくして上の駒を目立たせる
+    S = img.shape[0]
+    key = (193, 23, 0)                                   # デジタル庁のキーカラー #0017C1（BGR）
+    # 矢印（どこからどこへ動くか）を先に引いて、駒の下に敷く
+    for a0, a1 in row_arrows(g, side or DEFENSE if side else ATTACK):
+        if a0 in xy and a1 in xy and a0 != a1:
+            p0 = (int(xy[a0][0] * S), int(xy[a0][1] * S))
+            p1 = (int(xy[a1][0] * S), int(xy[a1][1] * S))
+            cv2.arrowedLine(img, p0, p1, (255, 255, 255), 9, cv2.LINE_AA, tipLength=0.08)
+            cv2.arrowedLine(img, p0, p1, key, 4, cv2.LINE_AA, tipLength=0.08)
+    icons = _agent_icons(cfg, [n for c in who.values() for n, _ in c.most_common(2)])
+    used: list[tuple[int, int, int]] = []
+    for a, v, (ux, uy) in sorted(pts, key=lambda t: -t[1]):
+        x, y = int(ux * S), int(uy * S)
+        ags = [n for n, _ in who[a].most_common(max(1, int(round(v))))] if who.get(a) else []
+        n_ = max(1, len(ags) or int(round(v)))
+        for i in range(n_):
+            dx = int((i - (n_ - 1) / 2) * 34)             # 同じエリアに複数いるときは横に並べる
+            cx, cy, r_ = x + dx, y, 15
+            ag = ags[i] if i < len(ags) else None
+            ic = icons.get(ag) if ag else None
+            if ic is not None:
+                t_ = cv2.resize(ic, (2 * r_, 2 * r_))
+                m = np.zeros((2 * r_, 2 * r_), np.uint8)
+                cv2.circle(m, (r_, r_), r_ - 1, 255, -1)
+                x0, y0 = cx - r_, cy - r_
+                ax0, ay0 = max(0, x0), max(0, y0)
+                ax1, ay1 = min(S, x0 + 2 * r_), min(S, y0 + 2 * r_)
+                if ax1 > ax0 and ay1 > ay0:
+                    sub = m[ay0 - y0:ay1 - y0, ax0 - x0:ax1 - x0] > 0
+                    img[ay0:ay1, ax0:ax1][sub] = t_[ay0 - y0:ay1 - y0, ax0 - x0:ax1 - x0][sub]
+            else:
+                cv2.circle(img, (cx, cy), r_, (255, 255, 255), -1, cv2.LINE_AA)
+                cv2.circle(img, (cx, cy), r_, key, 2, cv2.LINE_AA)
+                tag = (ag[:2] if ag else str(int(round(v))))
+                (tw0, _), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 2)
+                cv2.putText(img, tag, (cx - tw0 // 2, cy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                            key, 2, cv2.LINE_AA)
+            cv2.circle(img, (cx, cy), r_, key, 2, cv2.LINE_AA)
+        label = a + (f"  {'/'.join(ags[:2])}" if ags else f"  {v:g}")
+        (tw, th_), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+        lx, ly = min(max(2, x - tw // 2), S - tw - 2), y + 15 + 16
+        while any(abs(ly - uy2) < 13 and lx < ux2 + uw and ux2 < lx + tw for ux2, uy2, uw in used):
+            ly += 14                                      # 文字が重なったら下にずらす
+        used.append((lx, ly, tw))
+        for col, th in (((255, 255, 255), 4), ((26, 26, 26), 1)):
+            cv2.putText(img, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.42, col, th, cv2.LINE_AA)
+    for c in callouts or []:
+        if c.get("super") in CORE and str(c.get("name", "")).lower() == "site":
+            x, y = int(c["x"] * S), int(c["y"] * S)
+            for col, th in (((255, 255, 255), 5), ((26, 26, 26), 2)):
+                cv2.putText(img, c["super"], (x - 30, y + 8), cv2.FONT_HERSHEY_SIMPLEX, 0.9, col, th, cv2.LINE_AA)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(path), img, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    return path
+
+
+# ---------------------------------------------------------------- 動きで見る（時間に沿った駒の動き）
+MOTION_MARKS = [("1:30", 10), ("1:15", 25), ("1:00", 40), ("0:40", 60)]
+
+
+def _slots(counts: Counter, xy: dict, limit: int = 5) -> list[tuple[str, float, float]]:
+    """エリアごとの平均人数 → 駒の位置（最大 5 個）。同じエリアに 2 人なら横にずらす。"""
+    out = []
+    for area, v in sorted(counts.items(), key=lambda kv: -kv[1]):
+        if area not in xy:
+            continue
+        for i in range(max(1, int(round(v)))):
+            if len(out) >= limit:
+                return out
+            x, y = xy[area]
+            out.append((area, x + (i - 0.5 if int(round(v)) > 1 else 0) * 0.035, y))
+    return out
+
+
+def motion_frames(g: dict, callouts: list[dict] | None, side: str) -> dict | None:
+    """型の「平均の動き」。節目ごとに駒を置き、近いものどうしをつないで道にする。
+
+    返り値 {"marks": ["1:30", …, "設置"], "dots": [{"label", "xy": [[x, y], …]}]}。
+    座標は valorant-api のマップ画像の 0..1。
+    """
+    xy = _area_xy(callouts)
+    if not xy:
+        return None
+    rows = g.get("rows") or []
+    marks, frames = [], []
+    for name, e in MOTION_MARKS:
+        c: Counter = Counter()
+        n = 0
+        for r in rows:
+            hi = e + 4
+            if r.get("plant_e") is not None:
+                hi = min(hi, float(r["plant_e"]) - 1)     # 設置後の位置はこの節目に混ぜない
+            if hi <= e - 4:
+                continue
+            k = key_areas(r, e - 4, hi)
+            if k:
+                c.update(k)
+                n += 1
+        if not n:
+            continue
+        avg = Counter({a: v / n for a, v in c.items() if v / n >= 0.4})
+        sl = _slots(avg, xy)
+        if sl:
+            marks.append(name)
+            frames.append(sl)
+    plant = Counter()
+    np_ = 0
+    for r in rows:
+        if r.get("plant_e") is None:
+            continue
+        k = key_areas(r, float(r["plant_e"]), float(r["plant_e"]) + 10)
+        if k:
+            plant.update(k)
+            np_ += 1
+    if np_:
+        sl = _slots(Counter({a: v / np_ for a, v in plant.items() if v / np_ >= 0.4}), xy)
+        if sl:
+            marks.append("設置後")
+            frames.append(sl)
+    if len(frames) < 2:
+        return None
+    # 駒の道：いちばん人数が見えている節目（ふつうは 1:15）を起点に、前後へ近い駒をつないでいく
+    anchor = marks.index("1:15") if "1:15" in marks else 0
+    if len(frames[anchor]) < 4 and len(frames[anchor]) < max(len(f) for f in frames):
+        anchor = max(range(len(frames)), key=lambda i: len(frames[i]))
+    paths: list[dict[int, tuple]] = [{anchor: pt} for pt in frames[anchor]]
+    for step in (1, -1):
+        i = anchor
+        while 0 <= i + step < len(frames):
+            j, taken = i + step, set()
+            for pth in paths:
+                px, py = pth[i][1], pth[i][2]
+                best, bd = None, 9.0
+                for n_, cand in enumerate(frames[j]):
+                    if n_ in taken:
+                        continue
+                    d = (px - cand[1]) ** 2 + (py - cand[2]) ** 2
+                    if d < bd:
+                        best, bd = n_, d
+                if best is None:
+                    pth[j] = pth[i]                   # 見えていない節目はその場に残す
+                else:
+                    taken.add(best)
+                    pth[j] = frames[j][best]
+            i = j
+    # 名札：1:15（無ければ起点の節目）でその駒がいるエリアの担当エージェント
+    who: dict[str, list[str]] = defaultdict(list)
+    for r in rows:
+        for area, ags in ((r.get("setup") or {}).get("who_area") or {}).items():
+            for a in ags:
+                if a not in who[area]:
+                    who[area].append(a)
+    used: Counter = Counter()
+    dots = []
+    for pth in paths:
+        area = pth[anchor][0]
+        ags = who.get(area) or []
+        label = ags[used[area]] if used[area] < len(ags) else area
+        used[area] += 1
+        dots.append({"label": label,
+                     "xy": [[round(pth[i][1], 4), round(pth[i][2], 4)] for i in range(len(frames))]})
+    return {"marks": marks, "dots": dots}
+
+
+MOTION_JS = """
+<script>
+(function(){
+ function run(el){
+  const d=JSON.parse(el.dataset.motion), marks=d.marks, dots=d.dots;
+  const box=el.querySelector('.mo-dots'), lab=el.querySelector('.mo-time');
+  const els=dots.map(function(p){const s=document.createElement('span');s.className='mo-dot';
+   s.textContent=p.label;box.appendChild(s);return s;});
+  let t=0, playing=true;
+  function draw(){
+   const i=Math.floor(t), f=t-i, j=Math.min(i+1,marks.length-1);
+   dots.forEach(function(p,k){const a=p.xy[Math.min(i,p.xy.length-1)],b=p.xy[Math.min(j,p.xy.length-1)];
+    els[k].style.left=((a[0]+(b[0]-a[0])*f)*100)+'%';els[k].style.top=((a[1]+(b[1]-a[1])*f)*100)+'%';});
+   lab.textContent=marks[Math.round(t)]||marks[marks.length-1];
+   if(playing){t+=0.012; if(t>marks.length-1+0.8){t=0;}}
+   requestAnimationFrame(draw);
+  }
+  el.querySelector('.mo-play').addEventListener('click',function(e){playing=!playing;
+   e.target.textContent=playing?'一時停止':'再生';});
+  draw();
+ }
+ document.querySelectorAll('.motion').forEach(run);
+})();
+</script>
+"""
+
+
+def motion_html(g: dict, fr: dict, bg: str) -> str:
+    """動きで見る図（1 つぶん）。背景はマップ画像、駒は名札つきで節目の間を動く。"""
+    return (f'<figure class="motion" data-motion=\'{json.dumps(fr, ensure_ascii=False)}\'>'
+            f'<div class="mo-map" style="background-image:url({bg})"><div class="mo-dots"></div></div>'
+            f'<figcaption><b>{_e(g["name"])}</b>　<span class="mo-time"></span>'
+            f'　<button class="mo-play" type="button">一時停止</button>'
+            f'　<span class="sub">{marks_text(fr)}</span></figcaption></figure>')
+
+
+def marks_text(fr: dict) -> str:
+    return " → ".join(fr["marks"])
+
+
 # ============================================================== 5. HTML
 def _e(s) -> str:
     return html.escape(str(s if s is not None else ""))
@@ -902,11 +1632,29 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 .card{border:1px solid var(--line-weak);border-radius:var(--radius);padding:12px 14px;min-height:0;overflow:hidden}
 .card p{margin:0 0 4px;font-size:14px}
 figure{margin:0}figure img{width:100%;max-height:330px;object-fit:contain;border-radius:4px;background:var(--bg-sub)}
+.cols3 .card figure img{max-height:168px}.cols3 .card figure figcaption{font-size:11px}
+.card .todo{font-size:13px;line-height:1.55}
+.motion{margin:0}
+.mo-map{position:relative;width:100%;aspect-ratio:1/1;max-height:300px;background-size:contain;
+background-repeat:no-repeat;background-position:center;border-radius:4px;background-color:var(--bg-sub)}
+.mo-dots{position:absolute;inset:0}
+.mo-dot{position:absolute;transform:translate(-50%,-50%);background:var(--key);color:#fff;font-size:10px;
+font-weight:700;border-radius:999px;padding:2px 6px;white-space:nowrap;box-shadow:0 0 0 2px #fff;
+transition:none}
+.mo-play{font:inherit;font-size:12px;border:1px solid var(--line);background:var(--bg);border-radius:4px;
+padding:1px 8px;cursor:pointer}.mo-play:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.mo-time{font-weight:700;color:var(--key)}
+@media (prefers-reduced-motion:reduce){.mo-dot{transition:none}}
 figcaption{font-size:13px;color:var(--text-sub)}
 ul.plain{margin:0;padding-left:1.2em}ul.plain li{margin:0 0 6px}
 .empty{color:var(--text-sub);font-size:14px}
 .chips span{display:inline-block;background:var(--key-weak);border-radius:999px;padding:0 10px;margin:0 6px 6px 0;
 font-size:14px}
+.todo{background:var(--key-weak);border-left:6px solid var(--key);border-radius:4px;padding:8px 10px;
+font-size:14px;margin:0 0 6px}
+ol.steps{margin:0;padding-left:1.4em}ol.steps>li{margin:0 0 10px;font-size:15px}
+ol.steps ul{margin:2px 0 0}ol.steps ul li{margin:0 0 3px;font-size:14px;line-height:1.6}
+ul.cols2{columns:2;column-gap:28px}
 @media (max-width:900px){.slide{aspect-ratio:auto;padding:24px 20px 40px}.cols,.cols3{grid-template-columns:1fr}
 .slide h1{font-size:30px}.slide h2{font-size:22px}.foot{left:20px;right:20px}}
 @media print{body{background:#fff}.toolbar{display:none}.deck{padding:0;max-width:none}
@@ -955,6 +1703,61 @@ def _zone_html(zt: dict) -> str:
             f'<p class="sub">サンプル：{_e(ns)}</p>')
 
 
+def map_data_uri(cfg: dict, map_name: str, rows: list[dict] | None = None,
+                 callouts: list[dict] | None = None) -> str:
+    """動きで見る図の下地（マップ画像）を data URI で 1 回だけ作る。
+
+    公式のマップ画像が取れないときは、コールアウトの点とサイトの文字だけの下地にする。
+    """
+    import base64
+    import cv2
+    img = None
+    for r in rows or []:
+        p_ = r.get("uv_base")
+        if p_ and Path(p_).exists():
+            img = cv2.resize(cv2.imread(p_), (512, 512))
+            break
+    if img is None:
+        img = _icon(cfg, map_name)
+    if img is None:
+        if not callouts:
+            return ""
+        img = np.full((512, 512, 3), 246, np.uint8)
+        for c in callouts:
+            cv2.circle(img, (int(c["x"] * 512), int(c["y"] * 512)), 3, (196, 196, 196), -1, cv2.LINE_AA)
+            if c.get("super") in CORE and str(c.get("name", "")).lower() == "site":
+                cv2.putText(img, c["super"], (int(c["x"] * 512) - 30, int(c["y"] * 512) + 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (150, 150, 150), 2, cv2.LINE_AA)
+    img = (img.astype(np.float32) * 0.55 + 255 * 0.45).astype(np.uint8)
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    return "data:image/jpeg;base64," + base64.b64encode(buf).decode() if ok else ""
+
+
+def motion_slides(cfg: dict, map_name: str, prs: dict, rows: list[dict], calls: list[dict],
+                  foot: str, k: int = 3) -> list[str]:
+    """「動きで見る」スライド（攻守それぞれ、よく使う型を 3 つまで）。"""
+    bg = map_data_uri(cfg, map_name, rows, calls)
+    if not bg:
+        return []
+    out = []
+    for side in (ATTACK, DEFENSE):
+        figs = []
+        for g in prs[side]:
+            if g["kind"] in ("Pistol", "AntiEco", "Eco", "PostPlant"):
+                continue
+            fr = motion_frames(g, calls, side)
+            if fr:
+                figs.append(motion_html(g, fr, bg))
+            if len(figs) >= k:
+                break
+        if figs:
+            out.append(_slide(SIDE_EN[side], f"動きで見る（{'攻め' if side == ATTACK else '守り'}）",
+                              f'<div class="cols3">{"".join(figs)}</div>'
+                              '<p class="sub">節目（1:30・1:15・1:00・0:40・設置後）の平均の位置を結んだ動きです。'
+                              '名札は 1:15 の担当。実際のラウンドの動きは、型ごとの見本の動画で見てください。</p>', foot))
+    return out
+
+
 def _fig(src, cap: str) -> str:
     """画像は HTML に埋め込む（Drive からダウンロードしても、Colab に表示しても崩れないように）。"""
     if not src:
@@ -963,6 +1766,163 @@ def _fig(src, cap: str) -> str:
         import base64
         src = "data:image/jpeg;base64," + base64.b64encode(src.read_bytes()).decode()
     return f'<figure><img src="{_e(src)}" alt="{_e(cap)}" loading="lazy"><figcaption>{_e(cap)}</figcaption></figure>'
+
+
+def howto_slides(cfg: dict, key: dict, rows: list[dict], prs: dict, foot: str) -> list[str]:
+    """初心者がそのまま真似するための最初の数枚：手順・構成と担当・読み合い・用語。"""
+    from . import howto as H
+    out = []
+    comp = H.comp_notes(H.agent_roles(cfg, list(key.get("comp") or []), log=None))
+    duty = H.duties(rows)
+    st = H.steps(prs[ATTACK], prs[DEFENSE], comp, duty)
+    if st:
+        for k0 in range(0, len(st), 3):
+            part = st[k0:k0 + 3]
+            lis = ""
+            for g in part:
+                kids = "".join(f'<li><b>{_e(it["name"])}</b>　{_e(it["todo"])}</li>' for it in g["items"])
+                lis += f'<li><b>{_e(g["title"])}</b><ul class="plain sub">{kids}</ul></li>'
+            out.append(_slide("How to copy", "まず覚えること（この順番でそろえる）"
+                              + (f" {k0 // 3 + 1}" if len(st) > 3 else ""),
+                              f'<ol class="steps">{lis}</ol>'
+                              '<p class="sub">カッコの中は回数と勝率です。回数が少ない型は「たまたま」のこともあるので、'
+                              '回数の多いものから覚えてください。</p>', foot))
+    # 構成と担当
+    ag = "".join(f'<tr><td>{_e(a["agent"])}</td><td>{_e(a["role"])}</td>'
+                 f'<td>{_e("・".join(f"{x[0]}（{x[1]} 回）" for x in next((d["areas"] for d in duty if d["agent"] == a["agent"]), [])[:2]) or "-")}</td></tr>'
+                 for a in comp["agents"])
+    sw = ("".join(f'<li>{_e(x)}</li>' for x in comp["strong"]),
+          "".join(f'<li>{_e(x)}</li>' for x in comp["weak"]))
+    out.append(_slide("Comp", "この構成の形（5 人の役割と担当）",
+                      f'<p>{_e(comp["line"])}</p>'
+                      f'<div class="cols"><div><table><thead><tr><th>エージェント</th><th>役割</th>'
+                      f'<th>よく立つ場所</th></tr></thead><tbody>{ag}</tbody></table>'
+                      '<p class="sub">「よく立つ場所」はミニマップのアイコン照合ができたラウンドだけの集計です。</p></div>'
+                      f'<div><span class="label ok">構成の形から言えること</span><ul class="plain sub">{sw[0]}</ul>'
+                      f'<span class="label ng">気をつけること</span><ul class="plain sub">{sw[1]}</ul></div></div>',
+                      foot))
+    # エージェントが足りないとき（同じ役割で代える）
+    alt = H.alternatives(comp.get("roles") or {}, cfg)
+    if alt:
+        trs = "".join(f'<tr><td>{_e(a["agent"])}</td><td>{_e(a["role"])}</td>'
+                      f'<td>{_e(a["subgroup"] or "-")}</td><td>{_e("、".join(a["picks"]) or "-")}</td></tr>'
+                      for a in alt)
+        out.append(_slide("Comp", "エージェントが足りないとき（同じ役割で代える）",
+                          f'<table><thead><tr><th>いないとき</th><th>役割</th><th>できること</th>'
+                          f'<th>代わりになりやすい</th></tr></thead><tbody>{trs}</tbody></table>'
+                          '<p class="sub">役割が同じというだけで、スキルの中身は違います。'
+                          '「できること」が同じもの（壁型スモーク・設置型センチネルなど）から先に試してください。'
+                          'スモークの位置や合わせ方は、型ごとの見本の動画を見て作り直す必要があります。</p>', foot))
+    # 相手の形を見てどうするか
+    cols = []
+    for side in (ATTACK, DEFENSE):
+        rs = reads([r for r in rows if r["side"] == side], side)
+        if not rs:
+            continue
+        lis = "".join(f'<li>{_e(read_line(g, side))}</li>' for g in rs)
+        cols.append(f'<div><h3>{"攻め" if side == ATTACK else "守り"}</h3><ul class="plain sub">{lis}</ul></div>')
+    if cols:
+        out.append(_slide("Read", "相手の形を見てどうするか", f'<div class="cols">{"".join(cols)}</div>'
+                          '<p class="sub">相手の 1:15 の形ごとに、このチームが実際に選んだ攻め先と勝ち負けを並べています。'
+                          '「人数の少ない方に行く」が基本です。</p>', foot))
+    # 用語
+    texts = [g["name"] for sd in (ATTACK, DEFENSE) for g in prs[sd]] + [g["todo"] for sd in (ATTACK, DEFENSE) for g in prs[sd]]
+    gl = H.glossary_for(texts)
+    if gl:
+        lis = "".join(f'<li><b>{_e(w)}</b>：{_e(d)}</li>' for w, d in gl)
+        out.append(_slide("Words", "この冊子で使っている言葉", f'<ul class="plain sub cols2">{lis}</ul>', foot))
+    return out
+
+
+CHEAT_CSS = """
+:root{--key:#0017c1;--key-weak:#e8f1fe;--text:#1a1a1a;--text-sub:#4d4d4d;--line-weak:#d9d9d9;--bg:#fff;
+--ok:#197a4b;--ng:#ce0000}
+*{box-sizing:border-box}
+body{margin:0;background:#e6e6e6;color:var(--text);font:12px/1.55 "Noto Sans JP",system-ui,sans-serif}
+.sheet{width:210mm;min-height:297mm;margin:0 auto;background:var(--bg);padding:12mm 10mm}
+h1{font-size:19px;margin:0 0 2px}h2{font-size:13px;margin:10px 0 4px;color:var(--key);
+border-bottom:2px solid var(--key);padding-bottom:2px}
+p{margin:0 0 4px}.sub{color:var(--text-sub);font-size:11px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:6mm}
+ol,ul{margin:0;padding-left:1.2em}li{margin:0 0 3px}
+table{border-collapse:collapse;width:100%;font-size:11px}
+th,td{border-bottom:1px solid var(--line-weak);padding:2px 4px;text-align:left;vertical-align:top}
+th{background:#f2f2f2}
+.tag{display:inline-block;border-radius:999px;padding:0 6px;font-size:10px;color:#fff;background:var(--text-sub)}
+.tag.ok{background:var(--ok)}.tag.ng{background:var(--ng)}
+.name{font-weight:700}
+@media print{body{background:#fff}.sheet{width:auto;min-height:0;padding:0}@page{size:A4;margin:10mm}}
+"""
+
+
+def build_cheatsheet(cfg: dict, key: dict, rows: list[dict], prs: dict, out_dir: Path) -> Path:
+    """「まず覚えること」だけを A4 1 枚に。練習前に 5 人で見るための紙。"""
+    from . import howto as H
+    comp = H.comp_notes(H.agent_roles(cfg, list(key.get("comp") or []), log=None))
+    duty = H.duties(rows)
+    st = H.steps(prs[ATTACK], prs[DEFENSE], comp, duty)
+    secs = []
+    for g in st:
+        lis = "".join(f'<li><span class="name">{_e(it["name"])}</span> {_e(it["todo"])}</li>' for it in g["items"])
+        secs.append(f'<h2>{g["no"]}. {_e(g["title"])}</h2><ul>{lis}</ul>')
+    reads_html = ""
+    for side, label in ((ATTACK, "攻め"), (DEFENSE, "守り")):
+        rs = reads([r for r in rows if r["side"] == side], side, k=3)
+        if rs:
+            reads_html += (f'<h2>相手の形を見てどうするか（{label}）</h2><ul>'
+                           + "".join(f"<li>{_e(read_line(g, side))}</li>" for g in rs) + "</ul>")
+    hard = [g for sd in (ATTACK, DEFENSE) for g in prs[sd]
+            if (g.get("difficulty") or {}).get("level") == "むずかしい"][:5]
+    hard_html = ("<h2>そろってから使う型</h2><ul>"
+                 + "".join(f'<li><span class="name">{_e(g["name"])}</span> '
+                           f'{_e((g.get("difficulty") or {}).get("note"))}</li>' for g in hard) + "</ul>") if hard else ""
+    gl = H.glossary_for([g["name"] for sd in prs for g in prs[sd]]
+                        + [g.get("todo") or "" for sd in prs for g in prs[sd]], k=8)
+    gl_html = ("<h2>言葉</h2><ul class=\"sub\">"
+               + "".join(f"<li><b>{_e(w)}</b>：{_e(d)}</li>" for w, d in gl) + "</ul>") if gl else ""
+    maps = len({(r["match_id"], r["order"]) for r in rows})
+    page = (f'<!doctype html><html lang="ja"><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<title>{_e(key["title"])}（1 枚）</title>'
+            f'<link rel="preconnect" href="https://fonts.googleapis.com">'
+            f'<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&display=swap" rel="stylesheet">'
+            f'<style>{CHEAT_CSS}</style></head><body><main class="sheet">'
+            f'<h1>{_e(key["title"])}　まず覚えること</h1>'
+            f'<p class="sub">{_e(" / ".join(key.get("comp") or []))}｜{maps} マップ・'
+            f'{len({(r["match_id"], r["order"], r["n"]) for r in rows})} ラウンドから。'
+            f'カッコの中は回数と勝率。印刷すると A4 1 枚になります。</p>'
+            f'<div class="two"><div>{"".join(secs)}</div>'
+            f'<div>{reads_html}{hard_html}{gl_html}</div></div>'
+            f'<p class="sub">スキル（スモーク・フラッシュ）の出し方は動画でしか分かりません。'
+            f'冊子の型ごとに見本の動画の時刻が書いてあります。</p>'
+            f'</main></body></html>')
+    f = out_dir / f"{key['slug']}_cheat.html"
+    f.write_text(page, encoding="utf-8")
+    return f
+
+
+def export_positions(cfg: dict, key: dict, prs: dict, calls: list[dict], out_dir: Path) -> Path:
+    """型ごとの立ち位置と動きを JSON に出す（Valotactics など別のツールで描き直す用）。
+
+    座標は valorant-api のマップ画像の 0..1（左上が 0,0）。この形式はこのリポジトリ独自のもので、
+    Valotactics の読み込み形式とは別。コールアウトの座標も一緒に入れてある。
+    """
+    data = {"map": key["map"], "title": key["title"], "comp": key.get("comp") or [],
+            "note": "座標は valorant-api のマップ画像の 0..1。marks は節目、dots は駒の道。",
+            "callouts": [{"name": n, "x": round(x, 4), "y": round(y, 4)}
+                         for n, (x, y) in sorted(_area_xy(calls).items())],
+            "types": []}
+    for side, label in ((ATTACK, "attack"), (DEFENSE, "defense")):
+        for g in prs[side]:
+            fr = motion_frames(g, calls, side)
+            data["types"].append({
+                "side": label, "name": g["name"], "kind": g["kind"], "n": g["n"], "win": g["w"],
+                "todo": g.get("todo"), "spread": g.get("spread") or {},
+                "arrows": [{"from": a, "to": b} for a, b in row_arrows(g, side)],
+                "marks": (fr or {}).get("marks") or [], "dots": (fr or {}).get("dots") or []})
+    f = out_dir / f"{key['slug']}_positions.json"
+    f.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    return f
 
 
 def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir: Path, log=print) -> Path:
@@ -983,8 +1943,20 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
     opps = "、".join(f"{o}（{d or '?'}）" for _, _, d, o in maps[-6:])
     slides.append(_slide(map_name, title, f'<p class="sub" style="font-size:20px">{_e(comp)}</p>'
                          f'<p class="sub">元にした試合：{_e(opps)}</p>'
-                         f'<p class="sub">strong / weak point は同じマップの全チーム平均との差から自動で選んでいます。'
-                         f'人の解説（なぜそうするか）を足して完成させてください。</p>', foot, h1=True))
+                         f'<p class="sub">はじめの 4 枚は「この構成をそのまま真似するための手順」です。'
+                         f'そのあとに数字の裏づけ（strong / weak point・型ごとの集計）が続きます。</p>', foot, h1=True))
+
+    prs = {sd: playbook_rows([r for r in rows if r["side"] == sd], sd) for sd in (DEFENSE, ATTACK)}
+    slides += howto_slides(cfg, key, rows, prs, foot)
+    slides += motion_slides(cfg, map_name, prs, rows, calls, foot)
+    cheat = build_cheatsheet(cfg, key, rows, prs, out_dir)
+    export_positions(cfg, key, prs, calls, out_dir)
+    try:                                  # 作戦ボードアプリ（TactiVal）に読み込ませる JSON
+        from . import tactival as TV
+        TV.export(cfg, key, prs, out_dir, lambda g, side: motion_frames(g, calls, side), log=log,
+                  areas_xy=_area_xy(calls))
+    except Exception as e:
+        log(f"  TactiVal のボードを作れませんでした（{e}）")
 
     for side in (DEFENSE, ATTACK):
         srows = [r for r in rows if r["side"] == side]
@@ -1012,79 +1984,92 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
                              f'<div class="cols"><div><ul class="plain">{ul}</ul>{_zone_html(zt)}</div>'
                              f'<div class="cols" style="grid-template-columns:1fr 1fr;gap:12px">{"".join(figs) or "<p class=empty>位置の画像はまだ作れません</p>"}</div></div>',
                              foot))
-        # 初動の配置（ラウンドごとのタグを、似たものどうしまとめた型）
-        cl = setup_clusters(srows)
-        if cl:
-            cards = []
-            for g in cl:
-                buys = "・".join(f"{b} {c}" for b, c in g["buys"].most_common())
-                fights = "、".join(f"{z} {c}" for z, c in g["fights"].most_common(3))
-                sites = "、".join(f"{z} {c}" for z, c in g["sites"].most_common())
-                cards.append(f'<div class="card"><h3>{_e(g["name"])}</h3>'
-                             f'<p>{g["w"]}/{g["n"]} 勝（{_pct(_rate(g["w"], g["n"]))}）・{_e(g["shape"])}</p>'
-                             f'<p class="sub">{_e("・".join(g["callouts"]) or "-")}</p>'
-                             + (f'<p class="sub">担当：{_e(g["roles"])}</p>' if g.get("roles") else "")
-                             + f'<p class="sub">{_e(buys)}' + (f'／初動のファイト：{_e(fights)}' if fights else "")
-                             + (f'／設置：{_e(sites)}' if side == ATTACK and sites else "") + '</p>'
-                             f'<p class="sub">{_ex_links(g["rows"])}</p></div>')
-            slides.append(_slide(en, "初動の配置（似た配置をまとめた型）", f'<div class="cols3">{"".join(cards)}</div>'
-                                 '<p class="sub">開始 6〜20 秒にミニマップで見えた位置。名前は人数の偏りから自動でつけ、'
-                                 'コールアウトの重なりが半分以上のラウンドを 1 つの型にまとめています。</p>', foot))
-        # デフォルト
-        ds = [] if cl else defaults(srows)
-        if ds:
-            cards = []
-            for g in ds:
-                sites = "、".join(f"{s} {c}" for s, c in g["sites"].most_common()) if g["sites"] else "-"
-                cards.append(f'<div class="card"><h3>{_e(g["name"])}（{_e(g["buy"])}）</h3>'
-                             f'<p>{g["w"]}/{g["n"]} 勝（{_pct(_rate(g["w"], g["n"]))}）・1:15 の形 {_e(g["shape"])}</p>'
-                             + (f'<p class="sub">設置サイト：{_e(sites)}</p>' if side == ATTACK else "")
-                             + f'<p class="sub">{_ex_links(g["rows"])}</p></div>')
-            slides.append(_slide(en, "Default 一覧", f'<div class="cols3">{"".join(cards)}</div>', foot))
+        # 型の一覧（Notion のデータベースと同じ名前・同じ行）
+        for grp, head, hint in (
+            (["Default", "Push"], "Default 一覧（初動の配置）",
+             "1:15（取れなければ 6〜20 秒）にミニマップで見えた位置から、取りに行く場所（キーエリア）で型を分けています。"
+             "スポーンの点は数えません。ピストル・エコは下の行で見てください。"),
+            (["Rush", "Split", "Execute"], "2 巡目のアクション（Sets）",
+             "ラッシュ＝0:30 以内の設置／捨て〜スプリット＝1:15 に見せた場所と設置サイトが違う／"
+             "レイト＝1:00 以降の設置／execution＝デフォルトからのサイト取り。"),
+            (["Retake", "Counter"], "リテイク・カウンター",
+             "ファストリテイク＝設置から 12 秒以内に取り返しのキル。カウンター＝設置前に開始 20 秒以内の先制キルで取ったラウンド。"),
+            (["PostPlant"], "サイト別のポストプラント", ""),
+            (["Pistol", "AntiEco"], "ピストル・アンチエコ",
+             "デフォルトの集計からは外し、ここだけで見ます。"),
+        ):
+            part = [g for g in prs[side] if g["kind"] in grp]
+            if not part:
+                continue
+            for k0 in range(0, len(part), 3):
+                cards = []
+                for g in part[k0:k0 + 3]:
+                    im = g.get("img") or {}
+                    # 初動の型は「5 人がどこに立つか」の図、2 巡目やリテイクは位置の重ね合わせ
+                    f_ = None
+                    if g["kind"] in ("Default", "Push"):
+                        f_ = setup_png(cfg, map_name, g, img_dir / f"{g['slug']}_set.jpg", calls, rows)
+                    if f_ is None:
+                        f_ = position_png(cfg, map_name, g["rows"], im.get("mark"),
+                                          img_dir / f"{g['slug']}.jpg", calls, plant=bool(im.get("plant")))
+                    cap = "5 人の立ち位置（数字は平均人数）" if g["kind"] in ("Default", "Push") else "この型のときの位置"
+                    fig = _fig(f_, cap) if f_ else ""
+                    d = g.get("difficulty") or {}
+                    lv = {"やさしい": "ok", "ふつう": "", "むずかしい": "ng"}.get(d.get("level"), "")
+                    # 図に出ている情報（よく映る場所・担当）はカードの文からは省く
+                    skip = ("見本の動画", "よく映る場所", "担当（")
+                    keep = [x for x in g["lines"][1:] if not x.startswith(skip)][:2]
+                    body = "".join(f'<p class="sub">{_e(x)}</p>' for x in keep)
+                    vid = next((x for x in g["lines"] if x.startswith("見本の動画")), "")
+                    cards.append(f'<div class="card"><h3>{_e(g["name"])}<span class="sub"> {_e(g["kind"])}</span>'
+                                 + (f'<span class="label {lv}">{_e(d.get("level"))}</span>' if d else "") + '</h3>'
+                                 f'<p class="todo">{_e(g.get("todo") or "")}</p>{fig}'
+                                 f'<p>{_e(g["lines"][0])}</p>{body}'
+                                 + (f'<p class="sub">そろえること：{_e(d.get("note"))}</p>' if d.get("note") else "")
+                                 + (f'<p class="sub">{_e(vid)}</p>' if vid else "")
+                                 + f'<p class="sub">{_ex_links(g["rows"])}</p></div>')
+                n_part = (len(part) + 2) // 3
+                note = (hint + "スキル（スモーク・フラッシュ）の出し方は数字からは分からないので、"
+                        "各カードの見本の動画をその時刻から見てください。") if hint and k0 == 0 else ""
+                slides.append(_slide(en, head + (f" {k0 // 3 + 1}" if n_part > 1 else ""),
+                                     f'<div class="cols3">{"".join(cards)}</div>'
+                                     + (f'<p class="sub">{_e(note)}</p>' if note else ""), foot))
         if side == DEFENSE:
-            for s in CORE:
-                rr = [r for r in srows if r["plant_site"] == s]
+            for s_ in CORE:
+                rr = [r for r in srows if r["plant_site"] == s_]
                 if len(rr) < 2:
                     continue
                 w = sum(r["win"] for r in rr)
+                fast = [r for r in rr if fast_retake(r)]
                 pz = _zones_line([r["plant_zones"] for r in rr if r["plant_zones"]])
                 ul_ = _ult_line([r for r in rr if any(u["post"] for u in r["ults"])])
-                fig = position_png(cfg, map_name, rr, None, img_dir / f"retake_{s}.jpg", calls, plant=True)
-                body = (f'<div class="cols"><div><ul class="plain"><li>{s} を設置されたラウンド {len(rr)}・取り返した {w}'
+                fig = position_png(cfg, map_name, rr, None, img_dir / f"retake_{s_}.jpg", calls, plant=True)
+                body = (f'<div class="cols"><div><ul class="plain"><li>{s_} を設置されたラウンド {len(rr)}・取り返した {w}'
                         f'（{_pct(_rate(w, len(rr)))}）</li>'
+                        f'<li>ファストリテイク（設置 12 秒以内に取り返しのキル）{len(fast)} 回・勝ち '
+                        f'{sum(r["win"] for r in fast)}／遅いリテイク {len(rr) - len(fast)} 回・勝ち '
+                        f'{w - sum(r["win"] for r in fast)}</li>'
                         + (f"<li>設置された時点の自チームの位置（平均人数）：{_e(pz)}</li>" if pz else "")
                         + (f"<li>リテイクで使った ULT（勝ち/使用）：{_e(ul_)}</li>" if ul_ else "")
                         + f'<li>例：{_ex_links(rr)}</li></ul></div>'
                         f'<div>{_fig(fig, "設置後 10 秒の自チームの位置")}</div></div>')
-                slides.append(_slide(en, f"How to Retake {s} Site", body, foot))
+                slides.append(_slide(en, f"How to Retake {s_} Site", body, foot))
         else:
-            ss = sets(srows)
-            if ss:
-                cards = []
-                for g in ss:
-                    buys = "・".join(f"{b} {c}" for b, c in g["buys"].most_common())
-                    cards.append(f'<div class="card"><h3>{_e(g["name"])}</h3>'
-                                 f'<p>{g["w"]}/{g["n"]} 勝（{_pct(_rate(g["w"], g["n"]))}）'
-                                 + (f'・設置 残り {_clock(100 - g["plant"])}' if g["plant"] is not None else "")
-                                 + f'</p><p class="sub">{_e(buys)}</p><p class="sub">{_ex_links(g["rows"])}</p></div>')
-                slides.append(_slide(en, "Sets（サイト × 攻め方）", f'<div class="cols3">{"".join(cards)}</div>'
-                                     '<p class="sub">Rush＝0:30 以内に設置／Split＝設置前に MID とサイトの両方に人がいる'
-                                     '／Late Set＝1:00 以降に設置</p>', foot))
-            for s in CORE:
-                rr = [r for r in srows if r["plant_site"] == s]
+            for s_ in CORE:
+                rr = [r for r in srows if r["plant_site"] == s_]
                 if len(rr) < 2:
                     continue
                 w = sum(r["win"] for r in rr)
                 pz = _zones_line([r["plant_zones"] for r in rr if r["plant_zones"]])
                 ul_ = _ult_line([r for r in rr if any(u["post"] for u in r["ults"])])
-                fig = position_png(cfg, map_name, rr, None, img_dir / f"postplant_{s}.jpg", calls, plant=True)
-                body = (f'<div class="cols"><div><ul class="plain"><li>{s} 設置 {len(rr)} 回・勝ち {w}'
+                fig = position_png(cfg, map_name, rr, None, img_dir / f"postplant_{s_}.jpg", calls, plant=True)
+                body = (f'<div class="cols"><div><ul class="plain"><li>{s_} 設置 {len(rr)} 回・勝ち {w}'
                         f'（{_pct(_rate(w, len(rr)))}）</li>'
                         + (f"<li>設置直後の自チームの位置（平均人数）：{_e(pz)}</li>" if pz else "")
                         + (f"<li>設置後に使った ULT（勝ち/使用）：{_e(ul_)}</li>" if ul_ else "")
                         + f'<li>例：{_ex_links(rr)}</li></ul></div>'
                         f'<div>{_fig(fig, "設置後 10 秒の自チームの位置")}</div></div>')
-                slides.append(_slide(en, f"{s} Site PostPlant", body, foot))
+                slides.append(_slide(en, f"{s_} Site PostPlant", body, foot))
 
     # 12 ラウンドの組み立て（ピストル → アンチエコ → ボーナス → フルバイ…）と、同じ初動の形からの分岐
     slides += plan_slides(rows, foot)
@@ -1094,6 +2079,7 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
         srows = sorted([r for r in rows if r["side"] == side], key=lambda r: (str(r["date"]), r["match_id"], r["n"]))
         if not srows:
             continue
+        srows = srows[-26:]                 # 生のログなので直近 26 ラウンドだけ（残りは元データから追える）
         for k0 in range(0, len(srows), 13):
             part = srows[k0:k0 + 13]
             trs = "".join(
@@ -1106,7 +2092,8 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
                 f"<td>{_e('・'.join((r.get('caster') or {}).get('tags', [])[:3]))}</td>"
                 f"<td>{('<a href=' + chr(34) + _e(r['yt']) + chr(34) + '>▶</a>') if r['yt'] else ''}</td></tr>"
                 for r in part)
-            slides.append(_slide(SIDE_EN[side], f"ラウンドの流れ（{side}）" + (f" {k0 // 13 + 1}" if len(srows) > 13 else ""),
+            slides.append(_slide(SIDE_EN[side], f"ラウンドの流れ（{side}・直近）"
+                                 + (f" {k0 // 13 + 1}" if len(srows) > 13 else ""),
                                  f'<table><thead><tr><th>ラウンド</th><th>組み立て</th><th>初動の配置・攻め先</th><th>初動ファイト</th>'
                                  f'<th>設置（残り）</th><th>結果・勝因</th><th>解説の言及</th><th></th></tr></thead>'
                                  f'<tbody>{trs}</tbody></table>', foot))
@@ -1124,10 +2111,20 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
                              '<p class="sub">放送の自動字幕から、ラウンド中に解説が口にした言葉（ラッシュ・フェイク・ラーク・'
                              'リテイクなど）を数えています。相手チームの話のこともあるので目安です。</p>', foot))
     if key.get("llm"):
-        body = "".join(f"<p>{_e(line)}</p>" if not line.startswith(("-", "・", "*"))
-                       else f"<li>{_e(line.lstrip('-・* '))}</li>" for line in key["llm"].splitlines() if line.strip())
-        slides.insert(1, _slide("Summary", "ATK / DEF summary（LLM が数字から書いた叩き台）",
-                                f'<div class="sub" style="font-size:15px">{body}</div>', foot))
+        from . import llm as L
+        sec = L.sections(key["llm"])
+        cols = []
+        for lab, head in (("ATK", "ATK summary"), ("DEF", "DEF summary"), ("memo", "対策メモ")):
+            if not sec.get(lab):
+                continue
+            lis = "".join(f"<li>{_e(x)}</li>" for x in sec[lab])
+            cols.append(f'<div><h3>{_e(head)}</h3><ul class="plain sub">{lis}</ul></div>')
+        if cols:
+            note = ("" if L.complete(key["llm"]) else
+                    '<p class="sub">※ 文章が途中で切れていた分は落としています。'
+                    '書けなかった側は strong / weak point を見てください。</p>')
+            slides.insert(1, _slide("Summary", "ATK / DEF summary（LLM が数字から書いた叩き台）",
+                                    f'<div class="cols3">{"".join(cols)}</div>{note}', foot))
 
     # ULT・選手・経済
     cards = []
@@ -1174,8 +2171,10 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
             f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>{_e(title)}</title>'
             f'<link rel="preconnect" href="https://fonts.googleapis.com">'
             f'<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&display=swap" rel="stylesheet">'
-            f'<style>{CSS}</style></head><body><main class="deck"><div class="toolbar"><p><a href="index.html">← 一覧</a></p>'
-            f'<p>印刷（PDF 保存）すると 1 スライド 1 ページになります</p></div>{"".join(slides)}</main></body></html>')
+            f'<style>{CSS}</style></head><body><main class="deck"><div class="toolbar">'
+            f'<p><a href="index.html">← 一覧</a>　<a href="{_e(cheat.name)}">📄 まず覚えること（A4 1 枚・印刷用）</a></p>'
+            f'<p>印刷（PDF 保存）すると 1 スライド 1 ページになります</p></div>{"".join(slides)}</main>'
+            f'{MOTION_JS}</body></html>')
     f = out_dir / f"{slug}.html"
     f.write_text(page, encoding="utf-8")
     data = {"key": {k: v for k, v in key.items() if k != "rows"}, "rounds": len(rows),

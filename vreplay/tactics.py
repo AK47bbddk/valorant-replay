@@ -105,6 +105,8 @@ def load_map(name: str, cfg: dict, log=None) -> dict | None:
         "icon": m.get("displayIcon"),
         "callouts": callouts,
         "spawns": _spawns(callouts),
+        # ゲーム内座標 ↔ 画像の 0..1 の係数（作戦ボードアプリ向けに戻すときに使う）
+        "scale": {"xm": xm, "ym": ym, "xa": xa, "ya": ya, "inside": bool(inside)},
     }
 
 
@@ -505,6 +507,7 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
     by_sample: dict[tuple[int, float], dict[int, Counter]] = {}
 
     reg = MM.region_labels(mask, placed) if (mask is not None and T.get("ok")) else None
+    ranks = area_ranks(meta)                      # エリア名 → 両スポーンからの距離（前後・陣地の判定）
     # 生存人数より多く数えないように、重なりの人数（k）を減らす
     if alive_fn is not None:
         by_t: dict = {}
@@ -583,7 +586,8 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         rt["timeline"] = tl
         rt["setups"] = {str(tm): su for tm in (1, 2)
                         if (su := setup_of([p for p in positions if p[0] == n and p[4] == tm], st,
-                                           ATTACK if (rt["side1"] == ATTACK) == (tm == 1) else DEFENSE))}
+                                           ATTACK if (rt["side1"] == ATTACK) == (tm == 1) else DEFENSE,
+                                           ranks=ranks))}
         plant = rt.get("plant")
         rt["plant_site"] = None
         if plant is not None:
@@ -606,7 +610,7 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         agent_info = _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed, aspect,
                                       T if T.get("ok") else None, background, out_dir, round_tac, log,
                                       icons=icons, icon_frac=icon_frac, alive_fn=alive_fn, art=art_crop)
-        _agent_setups(agent_info, round_tac)
+        _agent_setups(agent_info, round_tac, ranks)
     top_callouts = [{"name": n, "count": c} for n, c in callouts_all.most_common(12)]
     top_sites = [{"site": s, "count": c} for s, c in sites_all.most_common()]
     mean_dots = sum(s["n_dots"] for s in samples) / len(samples)
@@ -641,52 +645,156 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
 
 
 CORE_ZONES = ("A", "Mid", "B", "C")
+SPAWN_ZONES = ("攻撃側", "防衛側")
+SETUP_WINDOW = (15.0, 25.0)        # 散ったあと（1:15 の節目まで）。ここで取れなければ 6〜20 秒
+SETUP_FALLBACK = (6.0, 20.0)
 
 
-def setup_name(zones: dict, side: str | None) -> str:
-    """初動（開始 6〜20 秒）のゾーン別人数から、配置の名前。"""
-    r = {k: int(v) for k, v in zones.items() if k in CORE_ZONES and v}
-    if not r:
-        return "不明"
-    top_z, top_n = max(r.items(), key=lambda kv: (kv[1], kv[0] != "Mid"))
-    many = [z for z, v in r.items() if v >= 2]
-    if side == ATTACK:
-        if top_n >= 4:
-            return f"{top_z} 寄せ" if top_z != "Mid" else "MID 寄せ"
-        if r.get("Mid", 0) >= 3:
-            return "MID 3 デフォルト"
-        if top_n >= 3:
-            return f"{top_z} 寄りデフォルト"
-        if len(many) >= 2:
-            return f"{'/'.join(sorted(many))} 分割"
-        return "散開デフォルト"
-    if top_n >= 3 and top_z != "Mid":
-        return f"{top_z} スタック"
-    if r.get("Mid", 0) >= 3:
-        return "MID 3"
-    if r.get("Mid", 0) == 2:
-        return "MID 2"
-    if r.get("Mid", 0) == 0 and len([z for z in r if z != "Mid"]) >= 2:
-        return "サイト守り（MID なし）"
-    return "バランス"
-
-
-def setup_of(ps: list, start: float, side: str | None, t0: float = 6.0, t1: float = 20.0) -> dict | None:
-    """1 チーム・1 ラウンドの初動の配置。点がいちばん多く見えたサンプルのコールアウトとゾーン。"""
-    by_t: dict[float, list] = {}
-    for p in ps:
-        e = float(p[1]) - start
-        if t0 <= e <= t1:
-            by_t.setdefault(float(p[1]), []).append(p)
-    if not by_t:
+def area_name(zone: str | None, callout: str | None) -> str | None:
+    """ゾーンとコールアウトから、コーチの呼び方のエリア名（「B Main」「Mid Vent」「A Ramps」）。"""
+    c = str(callout or "").strip()
+    if not c or c == "?":
         return None
-    t, arr = max(by_t.items(), key=lambda kv: (min(len(kv[1]), 5), kv[0]))
+    z = str(zone or "")
+    if z in CORE_ZONES and not c.startswith(z + " "):
+        return f"{z} {c}"
+    return c
+
+
+def is_spawn(zone: str | None, callout: str | None = None) -> bool:
+    """スポーン（攻撃側／防衛側の区域）か。初動の形には数えない。"""
+    return str(zone or "") in SPAWN_ZONES or "spawn" in str(callout or "").lower()
+
+
+def shape_code(shape: str) -> str:
+    """'A1 Mid3 B1' → '1-3-1'（A-MID-B の人数）。C があるマップは 'A1 B2 C1 Mid1' → '1-2-1・MID1'"""
+    z = {m.group(1): int(m.group(2)) for m in re.finditer(r"(A|B|C|Mid)(\d+)", shape or "")}
+    if not z:
+        return ""
+    if "C" in z:
+        return f"{z.get('A', 0)}-{z.get('B', 0)}-{z.get('C', 0)}" + (f"・MID{z['Mid']}" if z.get("Mid") else "")
+    return f"{z.get('A', 0)}-{z.get('Mid', 0)}-{z.get('B', 0)}"
+
+
+def area_ranks(meta) -> dict[str, tuple[float, float]]:
+    """エリア名 → （攻撃側スポーンからの距離, 防衛側スポーンからの距離）。
+    どちらの陣地の場所か（守りの「前目」）と、どこがいちばん前かを測るのに使う。"""
+    calls = meta.get("callouts") if isinstance(meta, dict) else meta
+    sp: dict[str, tuple[float, float]] = {}
+    for c in calls or []:
+        if str(c.get("name") or "").lower() != "spawn":
+            continue
+        low = str(c.get("super") or "").lower()
+        if "attacker" in low:
+            sp[ATTACK] = (float(c["x"]), float(c["y"]))
+        elif "defender" in low:
+            sp[DEFENSE] = (float(c["x"]), float(c["y"]))
+    out = {}
+    for c in calls or []:
+        z = zone_of(c)
+        nm = area_name(z, c.get("name"))
+        if not nm or is_spawn(z, c.get("name")):
+            continue
+        d = []
+        for side in (ATTACK, DEFENSE):
+            if side in sp:
+                d.append(math.hypot(float(c["x"]) - sp[side][0], float(c["y"]) - sp[side][1]))
+            else:
+                d.append(None)
+        out[nm] = (d[0], d[1])
+    return out
+
+
+def attacker_half(area: str | None, ranks: dict | None, margin: float = 0.4) -> bool:
+    """そのエリアが攻め側の陣地（攻撃側スポーンの方がはっきり近い）か。守りがここにいれば「前目」。
+
+    マップの角の部分（B Garage など）は直線距離だと攻め側スポーンの方が近く出てしまうので、
+    「攻めスポーンからの距離 ÷ 両スポーンからの距離の和」が margin より小さいときだけ攻め側とする。
+    """
+    da, dd = (ranks or {}).get(area or "", (None, None))
+    if da is None or dd is None or da + dd <= 0:
+        return False
+    return da / (da + dd) < margin
+
+
+def key_area(counts: dict, side: str | None = None, ranks: dict | None = None, min_count: int = 2) -> str | None:
+    """取りに行く場所（キーエリア）。2 人以上入っているエリア、無ければいちばん前に出ている所。"""
+    c = {k: int(v) for k, v in (counts or {}).items() if k and v}
+    if not c:
+        return None
+    top = max(c.values())
+    cand = [k for k, v in c.items() if v == top] if top >= min_count else list(c)
+    if len(cand) == 1:
+        return cand[0]
+    i = 1 if side == ATTACK else 0            # 攻めは守りスポーンに近い方、守りは攻めスポーンに近い方が「前」
+    return min(cand, key=lambda k: ((ranks or {}).get(k, (9.0, 9.0))[i] if ranks else 9.0, k))
+
+
+def setup_name(zones: dict, side: str | None, area: str | None = None, ranks: dict | None = None,
+               code: str | None = None) -> str:
+    """初動のゾーン別人数とキーエリアから、コーチの書き方に合わせた型の名前。
+
+    攻め：「<キーエリア> テイクデフォ」（決まらなければ「<形> <ゾーン> default」）
+    守り：「<場所> 前目」「<サイト> 3人守り」（＝<サイト>強気）「mid focus」「守りデフォ（<形>）」
+    　　　どのゾーンにも 2 人いない散った形は「広がる配置（<形>）」
+    """
+    r = {k: int(v) for k, v in (zones or {}).items() if k in CORE_ZONES and v}
+    if code is None:
+        code = shape_code(" ".join(f"{z}{r[z]}" for z in CORE_ZONES if r.get(z)))
+    if not r and not area:
+        return "不明"
+    top_z, top_n = max(r.items(), key=lambda kv: (kv[1], kv[0] != "Mid")) if r else (None, 0)
+    if side == ATTACK:
+        if area:
+            return f"{area} テイクデフォ"
+        zone = "MID" if top_z == "Mid" else top_z
+        return " ".join(x for x in (code, zone, "default") if x)
+    if attacker_half(area, ranks):
+        return f"{area} 前目"
+    if top_z and top_z != "Mid" and top_n >= 3:
+        return f"{top_z} 3人守り"
+    if r.get("Mid", 0) >= 2:
+        return "mid focus"
+    if r and max(r.values()) <= 1:
+        return f"広がる配置（{code}）" if code else "広がる配置"
+    return f"守りデフォ（{code}）" if code else "守りデフォ"
+
+
+def setup_of(ps: list, start: float, side: str | None, ranks: dict | None = None,
+             t0: float | None = None, t1: float | None = None) -> dict | None:
+    """1 チーム・1 ラウンドの初動の配置。
+
+    スポーン（攻撃側／防衛側の区域）の点は数えず、散ったあと（既定 15〜25 秒・1:15 の節目に近い方を優先、
+    そこで取れなければ 6〜20 秒）で、点がいちばん多く見えたサンプルのエリアとゾーンを使う。
+    """
+    def pick(lo: float, hi: float):
+        by_t: dict[float, list] = {}
+        for p in ps:
+            if is_spawn(p[6] if len(p) > 6 else None, p[7] if len(p) > 7 else None):
+                continue
+            e = float(p[1]) - start
+            if lo <= e <= hi:
+                by_t.setdefault(float(p[1]), []).append(p)
+        if not by_t:
+            return None
+        return max(by_t.items(), key=lambda kv: (min(len(kv[1]), 5), -abs(kv[0] - start - MARKS["1:15"])))
+
+    lo, hi = (t0 if t0 is not None else SETUP_WINDOW[0], t1 if t1 is not None else SETUP_WINDOW[1])
+    got = pick(lo, hi) or pick(*SETUP_FALLBACK)
+    if not got:
+        return None
+    t, arr = got
     if len(arr) < 3:
         return None
-    zones = Counter(p[6] for p in arr if p[6] and p[6] != "?")
-    calls = sorted(str(p[7]) for p in arr if p[7] and p[7] != "?")
+    zones = Counter(p[6] for p in arr if p[6] in CORE_ZONES)
+    areas = Counter(a for p in arr if (a := area_name(p[6], p[7] if len(p) > 7 else None)))
     shape = " ".join(f"{z}{zones[z]}" for z in CORE_ZONES if zones.get(z))
-    return {"name": setup_name(zones, side), "shape": shape, "zones": dict(zones), "callouts": calls,
+    code = shape_code(shape)
+    area = key_area(areas, side, ranks)
+    az = next((p[6] for p in arr if area_name(p[6], p[7] if len(p) > 7 else None) == area), None)
+    return {"name": setup_name(zones, side, area=area, ranks=ranks, code=code), "shape": shape, "code": code,
+            "zones": dict(zones), "areas": dict(areas), "area": area, "area_zone": az,
+            "callouts": sorted(areas.elements()),
             "t": round(t - start, 1), "side": side, "n": len(arr)}
 
 
@@ -756,7 +864,7 @@ def _warm_team1(samples: list[dict], placed: list[dict], starts: dict, alive_fn=
     return yes >= no, f"スポーンと生存人数で {max(yes, no)}/{yes + no}"
 
 
-def _agent_setups(agent_info: dict | None, round_tac: dict) -> None:
+def _agent_setups(agent_info: dict | None, round_tac: dict, ranks: dict | None = None) -> None:
     """アイコンで 4 人以上を読めたチームは、初動の配置（型・形）をエージェントの位置で上書きする。
     点の数え方（重なり・スモークの誤検出）より確か。誰がどこにいるか（'A: Sova・Jett'）も付ける。"""
     if not agent_info:
@@ -772,20 +880,31 @@ def _agent_setups(agent_info: dict | None, round_tac: dict) -> None:
             if not best:
                 continue
             label, ents = best
-            zones = Counter(e["zone"] for e in ents if e.get("zone") and e["zone"] != "?")
+            ents = [e for e in ents if not is_spawn(e.get("zone"), e.get("callout"))]
+            zones = Counter(e["zone"] for e in ents if e.get("zone") in CORE_ZONES)
             if sum(zones.values()) < 4:
                 continue
             side = ATTACK if (rt.get("side1") == ATTACK) == (tm == 1) else DEFENSE
-            who = {}
+            who, who_area = {}, {}
             for e in sorted((e for e in ents if e.get("agent")), key=lambda e: e["agent"]):
                 who.setdefault(e.get("zone") or "?", []).append(e["agent"])
+                if (a := area_name(e.get("zone"), e.get("callout"))):
+                    who_area.setdefault(a, []).append(e["agent"])
             old_su = (rt.get("setups") or {}).get(str(tm)) or {}
+            areas = Counter(a for e in ents if (a := area_name(e.get("zone"), e.get("callout"))))
+            shape = " ".join(f"{z}{zones[z]}" for z in CORE_ZONES if zones.get(z))
+            code = shape_code(shape)
+            area = key_area(areas, side, ranks)
+            az = next((e.get("zone") for e in ents
+                       if area_name(e.get("zone"), e.get("callout")) == area), None)
             rt.setdefault("setups", {})[str(tm)] = {
-                **old_su, "name": setup_name(zones, side),
-                "shape": " ".join(f"{z}{zones[z]}" for z in CORE_ZONES if zones.get(z)),
-                "zones": dict(zones), "callouts": sorted(e["callout"] for e in ents if e.get("callout") != "?"),
+                **old_su, "name": setup_name(zones, side, area=area, ranks=ranks, code=code),
+                "shape": shape, "code": code,
+                "zones": dict(zones), "areas": dict(areas), "area": area, "area_zone": az,
+                "callouts": sorted(areas.elements()),
                 "side": side, "n": len(ents), "source": "agents", "mark": label,
                 "who": {z: v for z, v in who.items() if z in CORE_ZONES},
+                "who_area": who_area,           # 誰がどのエリアに立つか（5 人の担当）
                 "dots_shape": old_su.get("shape")}
 
 

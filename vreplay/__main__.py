@@ -87,6 +87,14 @@ def main():
     pb.add_argument("--no-llm", action="store_true", help="LLM の API キーがあっても要約を書かせない")
     pb.add_argument("--config")
 
+    tv = sub.add_parser("tactival", help="作戦ボードアプリ TactiVal 用の座標合わせ")
+    tv.add_argument("--calibrate", help="4 点に駒を置いて書き出した TactiVal の JSON（これで合わせる）")
+    tv.add_argument("--board", action="store_true",
+                    help="座標合わせ用のボードを作る（アプリで駒を正しい場所へ動かして書き出す）")
+    tv.add_argument("--map", required=True, help="マップ名（例 Sunset）")
+    tv.add_argument("--out", help="--board の出力先（既定 output.dir/tactival_calib_<map>.json）")
+    tv.add_argument("--config")
+
     rd = sub.add_parser("rounds", help="解析済みの report.json から Notion のラウンドDB を作る・更新する")
     rd.add_argument("--notion", help="ラウンドDB を置く親ページの URL（初回だけ。既定は config の notion.rounds_parent）")
     rd.add_argument("--from", dest="start", help="この日以降（YYYY-MM-DD）")
@@ -148,6 +156,36 @@ def main():
                    notion=nt, notion_parent=parent)
         if not a.team and not a.map:
             build(cfg, out / "stats", min_maps=a.min_maps)      # 以前の集計ページ（ヒートマップ・型の表）
+    elif a.cmd == "tactival":
+        import json as J
+
+        from . import tactics as T
+        from . import tactival as TV
+        meta = T.load_map(a.map, cfg, log=print)
+        if not meta:
+            raise SystemExit(f"{a.map} のコールアウトを valorant-api から取れませんでした")
+        tpl = TV.load_template(cfg)
+        mid = TV.map_id(tpl, a.map)
+        if not mid:
+            raise SystemExit(f"TactiVal に {a.map} がありません")
+        if a.board:
+            out = Path(a.out) if a.out else Path(cfg["output"]["dir"]) / f"tactival_calib_{mid}.json"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            b = TV.calib_board(cfg, a.map, meta, tpl, guess=TV.load_calib(cfg).get(mid))
+            out.write_text(J.dumps(b, ensure_ascii=False, indent=1), "utf-8")
+            print(f"座標合わせ用のボード → {out}\n"
+                  f"  TactiVal で開き、Jett=攻撃スポーン / Sage=防衛スポーン / Omen=A / Viper=B"
+                  f"（3 サイトなら Cypher=C）に動かして書き出し、\n"
+                  f"  vreplay tactival --calibrate <書き出した.json> --map {a.map}")
+        elif a.calibrate:
+            data = J.loads(Path(a.calibrate).read_text("utf-8"))
+            c = TV.calibrate(data, meta)
+            path = TV.save_calib(cfg, mid, c)
+            how = (f"回転 {c['rotation']} 度・{c['points']} 点" if c.get("m")
+                   else f"倍率 {c['scale']}・原点 ({c['ox']}, {c['oy']})")
+            print(f"{a.map}（{mid}）の座標合わせ：{how}・ずれ {c['rms']}px → {path}")
+        else:
+            raise SystemExit("--board か --calibrate のどちらかを指定してください")
     elif a.cmd == "rounds":
         import os
         from . import notion_rounds as NR

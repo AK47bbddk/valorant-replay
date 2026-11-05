@@ -28,6 +28,11 @@ def _zone(p) -> str:
     return "Other"
 
 
+def _no_spawn(ps: list) -> list:
+    """スポーン（攻撃側／防衛側の区域）の点を外す。初動の形がスポーンに引っ張られないように。"""
+    return [p for p in ps if _zone(p) != "Spawn"]
+
+
 def _counts(ps: list, t0: float, t1: float) -> dict[str, float]:
     """時間帯ごとの 1 サンプル平均人数。同時刻の点を 1 サンプルとして数える。"""
     by_t: dict[float, list] = {}
@@ -142,9 +147,11 @@ def analyze_round(rt: dict, positions: list, *, team_no: int, side1: str | None,
     if not ps:
         return {"confidence": 0.0, "side": side}
 
-    early = _counts(ps, start + 5, start + 18)
+    # 初動は散ったあと（15〜25 秒＝1:15 の節目まで）を優先し、取れなければ 6〜20 秒。スポーンの点は数えない
+    spread = _no_spawn(ps)
+    early = _counts(spread, start + 15, start + 25) or _counts(spread, start + 6, start + 20)
     if not early:
-        early = _counts(ps, start, min(end, start + 20))
+        early = _counts(spread, start, min(end, start + 25))
     mid = _counts(ps, start + 18, min(end, start + 50))
     pre = [p for p in ps if plant is None or float(p[1]) < plant]
     pre_end = plant if plant is not None else end + 1
@@ -156,10 +163,16 @@ def analyze_round(rt: dict, positions: list, *, team_no: int, side1: str | None,
     if final_zone not in CORE and rt.get("site") in CORE:
         final_zone = rt["site"]
 
+    from .tactics import setup_name, shape_code
+    ez = {z: int(round(v)) for z, v in early.items() if z in CORE + ("Mid",) and round(v) > 0}
+    shape = " ".join(f"{z}{ez[z]}" for z in ("A", "Mid", "B", "C") if ez.get(z))
     out = {
         "confidence": round(min(1.0, len(ps) / 25.0), 2),
         "side": side,
-        "setup": _fmt(early),
+        # 型の名前はプレイブックと同じ書き方（「B 3人守り」「1-3-1 MID default」）
+        "setup": setup_name(ez, side, code=shape_code(shape)) if ez else "不明",
+        "setup_shape": shape,
+        "setup_counts": _fmt(early),
         "setup_style": _style(early),
         "mid": _fmt(mid),
         "late": _fmt(late),
@@ -193,7 +206,7 @@ def analyze_round(rt: dict, positions: list, *, team_no: int, side1: str | None,
                 "rounds": 1,
             }
     elif side == ATTACK:
-        out["default"] = _style(early)
+        out["default"] = out["setup"]
         out["default_zone"] = e_zone
         out["mid_change"] = _trajectory([e_zone, m_zone, l_zone])
         out["mid_zone"] = m_zone

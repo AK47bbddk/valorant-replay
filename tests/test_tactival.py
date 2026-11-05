@@ -1,0 +1,237 @@
+"""作戦ボードアプリ TactiVal 用の書き出し（schemaVersion 3）。"""
+import json
+
+from vreplay import tactics as T
+from vreplay import tactival as TV
+
+from .deckfx import areas
+
+# TactiVal がじっさいに書き出す駒（キーの確認用。位置と uuid 以外はそのまま）
+REAL_AGENT = {
+    "id": "1793860177790-12mteeg2q", "type": "agent", "x": 35.68, "y": 154.31,
+    "width": 48, "height": 48, "angle": 0,
+    "style": {"stroke": "transparent", "fill": "transparent", "strokeWidth": 0, "strokeStyle": "solid"},
+    "order": 0, "groupId": None,
+    "data": {"agentId": "ddd5a15c-4fbe-42fa-3789-11a55ca5ee04", "name": None, "team": "neutral",
+             "alive": True, "health": 100, "showHealth": True, "directionAngle": 0,
+             "showDirection": True, "showAudioRange": False, "castRanges": [], "activeBuffs": [],
+             "buffAngle": 3.141592653589793, "buffSize": 0.6, "buffModifier": "none",
+             "deathGreyscale": False, "deathMarker": "none", "ownerId": None, "altIcon": None,
+             "useAltIcon": False}}
+
+
+def _meta(map_name="sunset"):
+    calls = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]}
+             for v in areas(map_name).values()]
+    return {"name": map_name.title(), "callouts": calls, "spawns": T._spawns(calls)}
+
+
+def _export(agents):
+    """TactiVal の書き出しのかたち（駒だけ差し替え）。"""
+    tpl = TV.load_template(None)
+    return {**tpl, "mapId": "sunset",
+            "steps": [{"id": "s1", "label": "", "transition": 1.5, "hold": 0,
+                       "elements": agents, "zoneVisibility": {}, "overrides": {}}]}
+
+
+def test_template_has_maps_and_agents():
+    tpl = TV.load_template(None)
+    assert tpl["schemaVersion"] == 3
+    assert TV.map_id(tpl, "Split") == "split" and TV.map_id(tpl, "sunset") == "sunset"
+    assert TV.map_id(tpl, "ないマップ") is None
+    ids = TV.agent_ids(tpl)
+    assert ids["viper"] == "707eab51-4836-f488-046a-cda6bf494859" and "kay/o" in ids
+    assert "bot" not in ids
+
+
+def test_agent_element_matches_the_app_format():
+    el = TV.agent_element("707eab51-4836-f488-046a-cda6bf494859", 100.0, 200.0, 3)
+    assert set(el) == set(REAL_AGENT) and set(el["data"]) == set(REAL_AGENT["data"])
+    assert el["type"] == "agent" and el["width"] == el["height"] == 48
+    assert el["x"] == 100.0 and el["y"] == 200.0 and el["order"] == 3
+    assert el["data"]["agentId"] == "707eab51-4836-f488-046a-cda6bf494859"
+    assert el["data"]["team"] == "neutral" and el["id"] != TV.agent_element(None, 0, 0)["id"]
+
+
+def test_calibrate_from_two_spawns():
+    """スポーンに置いた 2 体から、0..1 → ピクセルの倍率と原点を出す。"""
+    meta = _meta()
+    s, ox, oy = 1324.0, 37.5, -12.25
+    # 駒の x/y は左上なので、真ん中から 24px 引いて置く
+    px = [(x * s + ox - 24, y * s + oy - 24) for x, y in (meta["spawns"]["攻撃"], meta["spawns"]["防衛"])]
+    data = _export([{**REAL_AGENT, "x": px[0][0], "y": px[0][1]},
+                    {**REAL_AGENT, "x": px[1][0], "y": px[1][1]}])
+    c = TV.calibrate(data, meta)
+    assert abs(c["scale"] - s) < 0.5 and abs(c["ox"] - ox) < 0.5 and abs(c["oy"] - oy) < 0.5
+    assert c["rms"] < 0.5
+    # 置く順番が逆でも同じ答えになる
+    rev = TV.calibrate(_export([{**REAL_AGENT, "x": px[1][0], "y": px[1][1]},
+                                {**REAL_AGENT, "x": px[0][0], "y": px[0][1]}]), meta)
+    assert abs(rev["scale"] - s) < 0.5
+    # 2 体でなければ断る
+    try:
+        TV.calibrate(_export([REAL_AGENT]), meta)
+        raise AssertionError("2 体でないのに通ってしまった")
+    except ValueError as e:
+        assert "2 体" in str(e)
+
+
+def test_board_turns_marks_into_steps(tmp_path):
+    frames = {"marks": ["1:30", "1:15", "設置後"],
+              "dots": [{"label": "Viper", "xy": [[0.2, 0.3], [0.4, 0.5], [0.6, 0.7]]},
+                       {"label": "Jett", "xy": [[0.1, 0.1], [0.2, 0.2], [0.3, 0.3]]}]}
+    calib = {"scale": 1000.0, "ox": 10.0, "oy": -20.0}
+    b = TV.board(None, "Split", "B Link テイクデフォ", frames, calib)
+    assert b["schemaVersion"] == 3 and b["mapId"] == "split" and b["mapFlipped"] is False
+    assert [st["label"] for st in b["steps"]] == ["B Link テイクデフォ　1:30",
+                                                  "B Link テイクデフォ　1:15",
+                                                  "B Link テイクデフォ　設置後"]
+    assert all(len(st["elements"]) == 2 for st in b["steps"])
+    first = b["steps"][0]["elements"][0]
+    assert first["x"] == 0.2 * 1000 + 10 - 24 and first["y"] == 0.3 * 1000 - 20 - 24
+    assert first["data"]["agentId"] == TV.agent_ids(TV.load_template(None))["viper"]
+    assert b["patchSnapshot"]["maps"]["split"]["multiplier"] == 7.8e-05   # 雛形をそのまま持つ
+    assert json.loads(json.dumps(b))                                     # JSON にできる
+
+
+def test_export_needs_calibration(tmp_path):
+    """座標合わせの済んでいないマップではボードを作らない。Split は既定値を同梱している。"""
+    from vreplay import deck as D
+    frames = {"marks": ["1:15"], "dots": [{"label": "Viper", "xy": [[0.5, 0.5]]}]}
+    prs = {D.ATTACK: [{"name": "B Link テイクデフォ", "kind": "Default"}], D.DEFENSE: []}
+    cfg = {"output": {"dir": str(tmp_path)}}
+    msgs = []
+    haven = {"map": "Haven", "slug": "h", "title": "T"}
+    assert TV.export(cfg, haven, prs, tmp_path, lambda g, s: frames, log=msgs.append) == []
+    assert any("座標合わせ" in m for m in msgs)
+    TV.save_calib(cfg, "haven", {"scale": 1000.0, "ox": 0.0, "oy": 0.0})
+    out = TV.export(cfg, haven, prs, tmp_path, lambda g, s: frames, log=lambda *a: None)
+    assert len(out) == 1 and out[0].name.endswith(".tactival.json")
+    b = json.loads(out[0].read_text("utf-8"))
+    assert b["mapId"] == "haven" and b["steps"][0]["elements"][0]["data"]["agentId"]
+    # Split は同梱の既定値があるので、何もしなくても作れる
+    split = {"map": "Split", "slug": "s", "title": "T"}
+    assert TV.load_calib(None).get("split", {}).get("m")
+    assert TV.export(cfg, split, prs, tmp_path, lambda g, s: frames, log=lambda *a: None)
+
+
+def _agent_at(agent, x, y, tpl=None):
+    ids = TV.agent_ids(tpl or TV.load_template(None))
+    el = dict(REAL_AGENT)
+    el["x"], el["y"] = x - 24, y - 24           # 駒の x/y は左上
+    el["data"] = {**REAL_AGENT["data"], "agentId": ids[agent]}
+    return el
+
+
+def test_calibrate_with_four_named_targets():
+    """Jett=攻撃スポーン / Sage=防衛スポーン / Omen=A サイト / Viper=B サイト で、縦横べつべつに合わせる。"""
+    meta = _meta()
+    sx, sy, ox, oy = 1200.0, 1100.0, 30.0, -40.0
+    tg = {k: v for k, v in TV._targets(meta).items()}
+    want = {"jett": tg["spawn:攻撃"], "sage": tg["spawn:防衛"], "omen": tg["site:A"], "viper": tg["site:B"]}
+    els = [_agent_at(a, n[0] * sx + ox, n[1] * sy + oy) for a, n in want.items()]
+    c = TV.calibrate(_export(els), meta)
+    assert c["points"] == 4 and c["rms"] < 1 and abs(c["rotation"]) < 0.5
+    a, b, cc, d, e, f = c["m"]
+    assert abs(a - sx) < 1 and abs(e - sy) < 1 and abs(b) < 1 and abs(d) < 1
+    assert abs(cc - ox) < 1 and abs(f - oy) < 1
+    assert TV.to_px(0.5, 0.5, c) == (round(0.5 * sx + ox, 2), round(0.5 * sy + oy, 2))
+
+
+def test_calibrate_uses_the_icon_centre():
+    """駒の x/y は左上なので、真ん中に直してから合わせる。"""
+    meta = _meta()
+    s, ox, oy = 1000.0, 0.0, 0.0
+    tg = TV._targets(meta)
+    els = [_agent_at("jett", tg["spawn:攻撃"][0] * s, tg["spawn:攻撃"][1] * s),
+           _agent_at("sage", tg["spawn:防衛"][0] * s, tg["spawn:防衛"][1] * s)]
+    assert els[0]["x"] == tg["spawn:攻撃"][0] * s - 24        # 書くときは左上
+    c = TV.calibrate(_export(els), meta)
+    assert abs(c["scale"] - s) < 1 and abs(c["ox"]) < 1 and abs(c["oy"]) < 1 and c["rms"] < 1
+
+
+def test_calibrate_recovers_rotation():
+    """TactiVal の Split はマップ画像に対して 90 度回っている。アフィンで向きごと合わせる。"""
+    meta = _meta("split")
+    tg = TV._targets(meta)
+    s, ox, oy = 1089.62, 540.87, -114.73
+    want = {"jett": tg["spawn:攻撃"], "sage": tg["spawn:防衛"], "omen": tg["site:A"], "viper": tg["site:B"]}
+    els = [_agent_at(a, (1 - n[1]) * s + ox, n[0] * s + oy) for a, n in want.items()]   # 90 度回す
+    c = TV.calibrate(_export(els), meta)
+    assert c["points"] == 4 and c["rotation"] == 90.0 and c["rms"] < 0.5
+    for a, n in want.items():
+        assert TV.to_px(n[0], n[1], c) == (round((1 - n[1]) * s + ox, 2), round(n[0] * s + oy, 2))
+    # 回転の無いマップ（倍率と原点だけ）も同じ仕組みで合う
+    m2 = _meta("sunset")
+    tg2 = TV._targets(m2)
+    want2 = {"jett": tg2["spawn:攻撃"], "sage": tg2["spawn:防衛"], "omen": tg2["site:A"], "viper": tg2["site:B"]}
+    c2 = TV.calibrate(_export([_agent_at(a, n[0] * s + ox, n[1] * s + oy) for a, n in want2.items()]), m2)
+    assert abs(c2["rotation"]) < 0.5 and c2["rms"] < 0.5
+
+
+def test_calib_board_for_any_map():
+    """どのマップでも座標合わせ用のボードを作れる。すでに分かっていればその位置に置く。"""
+    meta = _meta("split")
+    b = TV.calib_board(None, "Split", meta)
+    assert b["mapId"] == "split" and len(b["steps"]) == 1
+    els = b["steps"][0]["elements"]
+    assert len(els) == 4 and "Jett=攻撃" in b["steps"][0]["label"]
+    ids = TV.agent_ids(TV.load_template(None))
+    assert [e["data"]["agentId"] for e in els] == [ids["jett"], ids["sage"], ids["omen"], ids["viper"]]
+    # guess があれば、その変換どおりの位置に置く（ドラッグがほぼ要らない）
+    g = TV.load_calib(None)["split"]
+    b2 = TV.calib_board(None, "Split", meta, guess=g)
+    tg = TV._targets(meta)
+    x, y = TV.to_px(*tg["spawn:攻撃"], g)
+    assert abs(b2["steps"][0]["elements"][0]["x"] - (x - 24)) < 0.1
+
+
+def test_bundled_calibration_has_split_and_sunset():
+    c = TV.load_calib(None)
+    assert c["split"]["points"] == 4 and abs(c["split"]["rotation"] - 92.9) < 0.1
+    assert c["sunset"]["points"] == 4 and abs(c["sunset"]["rotation"] - 5.7) < 0.1
+
+
+def test_arrows_use_the_app_format():
+    """矢印は始点が x/y、終点が data.x2/y2、width/height は差の絶対値（アプリの書き出しと同じ）。"""
+    frames = {"marks": ["1:15", "設置後"],
+              "dots": [{"label": "Viper", "xy": [[0.3, 0.3], [0.5, 0.5]]}]}
+    calib = {"scale": 1000.0, "ox": 0.0, "oy": 0.0}
+    areas_xy = {"B Link": (0.2, 0.2), "B Site": (0.8, 0.5)}
+    b = TV.board(None, "Split", "型", frames, calib, arrows=[("B Link", "B Site")], areas_xy=areas_xy)
+    for st in b["steps"]:                                 # どの節目でも見える
+        ar = [e for e in st["elements"] if e["type"] == "arrow"]
+        assert len(ar) == 1
+        a = ar[0]
+        assert (a["x"], a["y"]) == (200.0, 200.0)
+        assert (a["data"]["x2"], a["data"]["y2"]) == (800.0, 500.0)
+        assert (a["width"], a["height"]) == (600.0, 300.0)
+        assert a["data"]["arrowhead"] == "arrow" and a["data"]["label"] == "B Link → B Site"
+        assert set(a) == {"id", "type", "x", "y", "width", "height", "angle", "style", "order",
+                          "groupId", "data"}
+    # 同じエリアへの矢印は引かない
+    b2 = TV.board(None, "Split", "型", frames, calib, arrows=[("B Site", "B Site")], areas_xy=areas_xy)
+    assert not [e for e in b2["steps"][0]["elements"] if e["type"] == "arrow"]
+
+
+def test_arrow_sample_from_template_keeps_the_style():
+    """雛形に矢印があれば、その色や太さを引き継ぎ、駒への結びつきは外す。"""
+    tpl = TV.load_template(None)
+    sample = {"id": "a1", "type": "arrow", "x": 1, "y": 2, "width": 3, "height": 4, "angle": 0,
+              "style": {"stroke": "#eab308", "strokeWidth": 5}, "order": 9, "groupId": None,
+              "data": {"x2": 9, "y2": 9, "arrowhead": "arrow",
+                       "endBinding": {"elementId": "zzz", "fixedPoint": [0.1, 0.2]}}}
+    tpl2 = {**tpl, "steps": [{"id": "s", "label": "", "transition": 1.5, "hold": 0,
+                              "elements": [sample], "zoneVisibility": {}, "overrides": {}}]}
+    assert TV.arrow_sample(tpl2)["id"] == "a1" and TV.arrow_sample(tpl) is None
+    el = TV.arrow_element(10, 20, 40, 60, 3, TV.arrow_sample(tpl2))
+    assert el["style"]["stroke"] == "#eab308" and el["style"]["strokeWidth"] == 5
+    assert (el["x"], el["y"]) == (10, 20) and (el["data"]["x2"], el["data"]["y2"]) == (40, 60)
+    assert (el["width"], el["height"]) == (30, 40) and el["id"] != "a1"
+    assert "endBinding" not in el["data"]                 # 無い駒に結びつけない
+
+
+def test_bundled_sunset_is_now_four_points():
+    c = TV.load_calib(None)["sunset"]
+    assert c["points"] == 4 and c.get("m") and not c.get("approx")
+    assert c["rms"] < 45

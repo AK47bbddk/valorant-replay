@@ -24,7 +24,8 @@ def test_records_and_strategy_points(tmp_path, monkeypatch):
     lines = deck.concept_lines(zt, deck.DEFENSE, [r for r in g2 if r["side"] == deck.DEFENSE])
     assert any("MID" in x for x in lines)
     ss = deck.sets([r for r in g2 if r["side"] == deck.ATTACK])
-    assert ss and any("Rush" in g["name"] for g in ss)
+    assert ss and any("ラッシュ" in g["name"] for g in ss)
+    assert all(g["kind"] in deck.KINDS for g in ss)
 
 
 def test_build_decks_from_warehouse(tmp_path, monkeypatch):
@@ -43,21 +44,89 @@ def test_build_decks_from_warehouse(tmp_path, monkeypatch):
     assert any(n.startswith("comp_Split_") for n in names)
     page = (out / next(n for n in names if n.startswith("team_G2"))).read_text("utf-8")
     assert "Strategy" in page and "strong point" in page and "Sets" in page and "How to Retake" in page
-    assert "初動の配置" in page and "MID 3 デフォルト" in page
+    assert "Default 一覧" in page and "テイクデフォ" in page and "ポストプラント" in page
+    assert "ファストリテイク" in page and "Pistol" in page
+    assert " #1" not in page and "散開" not in page         # 番号つきの型・スポーンに引っ張られた名前は出さない
+    # 初心者向け：手順・構成・読み合い・用語・やること・難しさ・1 枚のチートシート
+    assert "まず覚えること" in page and "この構成の形" in page and "相手の形を見てどうするか" in page
+    assert "この冊子で使っている言葉" in page and "エージェントが足りないとき" in page
+    assert "やさしい" in page and "むずかしい" in page and "見本の動画" in page
+    name = next(n for n in names if n.startswith("team_G2"))
+    cheat = out / name.replace(".html", "_cheat.html")
+    assert cheat.exists() and "まず覚えること" in cheat.read_text("utf-8")
+    assert cheat.name in page                              # 冊子から 1 枚へのリンク
     assert (out / "index.html").exists()
 
 
-def test_setup_clusters_group_similar_callouts():
-    def row(name, calls, win=True):
-        return {"setup": {"name": name, "shape": "x", "callouts": calls}, "win": win, "buy": "Buy",
-                "plant_site": None, "first_fight": "A", "yt": None, "opp_tag": "X", "n": 1}
-    rows = [row("MID 2", ["A Site", "A Site", "Mid Top", "Mid Vent", "B Site"]),
-            row("MID 2", ["A Site", "A Site", "Mid Top", "Mid Vent", "B Back"]),
-            row("MID 2", ["A Back", "A Lobby", "Mid Bottom", "Mid Mail", "B Garage"], False),
-            row("A スタック", ["A Site", "A Site", "A Main", "Mid Top", "B Site"])]
+def _row(name, calls, zones, win=True, buy="Buy", area=None):
+    return {"setup": {"name": name, "shape": " ".join(f"{k}{v}" for k, v in zones.items()), "code": "",
+                      "callouts": calls, "zones": zones, "area": area or (calls[0] if calls else None)},
+            "win": win, "buy": buy, "plant_site": None, "first_fight": "A", "yt": None, "opp_tag": "X",
+            "n": 1, "eco": "full", "opp_eco": "full", "pistol": False, "rtype": {"type": "フルバイ"},
+            "caster": {}, "board": None}
+
+
+def test_setup_clusters_merge_by_name_and_shape():
+    """同じ名前は 1 つにまとめ（#1/#2 は付けない）、1 ラウンドだけの型は近い型か「その他」に入れる。"""
+    rows = [_row("B Link テイクデフォ", ["B Link", "Mid Top"], {"A": 1, "Mid": 2, "B": 2}),
+            _row("B Link テイクデフォ", ["B Link", "Mid Bottom"], {"A": 1, "Mid": 2, "B": 2}, win=False),
+            _row("B Link テイクデフォ", ["B Link", "B Site"], {"A": 1, "Mid": 1, "B": 3}),
+            # 人数の差が 1 以内（1 人ぶん映っていない）・同じキーエリア → 上の型にまとめる
+            _row("B Link 寄りデフォ", ["B Link"], {"A": 1, "Mid": 2, "B": 1}, area="B Link"),
+            # どの型とも遠い（L1 距離 4）→ その他
+            _row("A Ramps テイクデフォ", ["A Ramps"], {"A": 4, "Mid": 1}, area="A Ramps")]
     cl = deck.setup_clusters(rows)
-    sizes = sorted((g["name"], g["n"]) for g in cl)
-    assert ("A スタック", 1) in sizes and ("MID 2 #1", 2) in sizes and ("MID 2 #2", 1) in sizes
+    by = {g["name"]: g["n"] for g in cl}
+    assert by["B Link テイクデフォ"] == 4 and by["その他"] == 1
+    assert not any("#" in g["name"] for g in cl)
+    merged = next(g for g in cl if g["name"] == "B Link テイクデフォ")
+    assert "B Link 寄りデフォ" in merged["merged"]
+
+
+def test_pistol_and_eco_are_separate_rows(tmp_path, monkeypatch):
+    """ピストル・エコはデフォルトから外し、Pistol／Anti eco の行にする。購入に Pistol を混ぜない。"""
+    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
+    rows = [r for rep in [report(str(i), "G2", "SEN", i) for i in range(3)] for r in deck.records(rep)]
+    g2 = [r for r in rows if r["team"] == "G2"]
+    for side in (deck.ATTACK, deck.DEFENSE):
+        prs = deck.playbook_rows([r for r in g2 if r["side"] == side], side)
+        kinds = {g["kind"] for g in prs}
+        assert {"Pistol", "AntiEco", "Eco"} <= kinds
+        for g in prs:
+            if g["kind"] != "Pistol":
+                assert "Pistol" not in g["buys"], g["name"]
+                assert not any(r["pistol"] for r in g["rows"]), g["name"]
+            if g["kind"] == "Default":
+                assert not any(deck.is_eco(r) for r in g["rows"]), g["name"]
+
+
+def test_attack_sets_and_defense_rows(tmp_path, monkeypatch):
+    """2 巡目のアクションと守りの型が、コーチの書き方の名前になる。"""
+    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
+    rows = [r for rep in [report(str(i), "G2", "SEN", i) for i in range(4)] for r in deck.records(rep)]
+    g2 = [r for r in rows if r["team"] == "G2"]
+    atk = deck.playbook_rows([r for r in g2 if r["side"] == deck.ATTACK], deck.ATTACK)
+    names = [g["name"] for g in atk]
+    assert any(n.endswith("テイクデフォ") for n in names)
+    assert any("ラッシュ" in n for n in names) and any("execution" in n for n in names)
+    assert any("捨て" in n and "スプリット" in n for n in names)
+    # 1:15 で取っていなかった手前のエリアを 1:05 以降に取り返すのは「後取り」
+    back = next(g for g in atk if g["name"].endswith("後取り"))
+    assert back["name"] == "A Main 後取り" and back["kind"] == "Execute"
+    assert not any("Site 後取り" in n for n in names)        # サイトに入るのは後取りではない
+    assert any(n.endswith("ポストプラント") for n in names)
+    assert all("（MID" not in n for n in names)              # 経路はタイトルに入れない
+    # ピストル・エコ・アンチエコは別の行にして、その中での攻め方を本文に出す
+    eco = next(g for g in atk if g["kind"] == "Eco")
+    assert all(deck.is_eco(r) for r in eco["rows"])
+    assert any("この中での攻め方" in x for x in eco["lines"])
+    df = deck.playbook_rows([r for r in g2 if r["side"] == deck.DEFENSE], deck.DEFENSE)
+    dn = [g["name"] for g in df]
+    assert any("リテイク" in n for n in dn) and any("カウンター" in n for n in dn)
+    assert any(n == "タイミングプッシュ" for n in dn)
+    assert any(n.endswith("前目") for n in dn) or any("守りデフォ" in n for n in dn)
+    push = next(g for g in df if g["name"] == "タイミングプッシュ")
+    assert push["kind"] == "Push" and all(r["side"] == deck.DEFENSE for r in push["rows"])
 
 
 def test_notion_playbook_export(tmp_path, monkeypatch):
@@ -117,9 +186,170 @@ def test_notion_playbook_export(tmp_path, monkeypatch):
     assert url.startswith("https://www.notion.so/")
     dbs = [c for c in nt.calls if c[1] == "/databases"]
     assert [d[2]["title"][0]["text"]["content"] for d in dbs] == ["ATK", "DEF"]
-    names = [c[2]["名前"]["title"][0]["text"]["content"] for c in nt.calls if c[0] == "ROW"]
-    assert any(n.startswith("1-3-1") for n in names) and any("retake" in n for n in names)
+    props = dbs[0][2]["initial_data_source"]["properties"]
+    assert "形" in props and "言及" in props and "タグ" not in props     # 形と解説の言及は別のタグにする
+    assert [o["name"] for o in props["種類"]["select"]["options"]] == deck.KINDS
+    rowcalls = [c[2] for c in nt.calls if c[0] == "ROW"]
+    names = [c["名前"]["title"][0]["text"]["content"] for c in rowcalls]
+    assert any(n.endswith("テイクデフォ") for n in names) and any("リテイク" in n for n in names)
+    assert not any("#" in n for n in names)
+    assert all(c["種類"]["select"]["name"] in deck.KINDS for c in rowcalls)
+    for c in rowcalls:
+        if c["種類"]["select"]["name"] != "Pistol":
+            assert "Pistol" not in [x["name"] for x in c["購入"]["multi_select"]]
+    shapes = [x["name"] for c in rowcalls for x in c["形"]["multi_select"]]
+    assert any(x.count("-") == 2 for x in shapes)                        # 「1-3-1」の形が入る
     videos = [b for c in nt.calls if c[0] == "APPEND" for b in c[2] if b.get("type") == "column_list"]
     assert videos
     assert NP.page_id("https://app.notion.com/p/delight-split-vyse-comp-14fd54a7c90b806b967ed86afa4f4e8e") == \
         "14fd54a7c90b806b967ed86afa4f4e8e"
+
+
+def test_howto_makes_copyable_instructions(tmp_path, monkeypatch):
+    """初心者がそのまま真似できる形：行ごとの「やること」・5 人の担当・覚える順番・用語。"""
+    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
+    from vreplay import howto as H
+    monkeypatch.setattr(H, "agent_roles", lambda cfg, names, log=None:
+                        {n: H.FALLBACK_ROLES.get(H._norm(n), "?") for n in names})
+    rows = [r for rep in [report(str(i), "G2", "SEN", i) for i in range(4)] for r in deck.records(rep)]
+    g2 = [r for r in rows if r["team"] == "G2"]
+    atk = deck.playbook_rows([r for r in g2 if r["side"] == deck.ATTACK], deck.ATTACK)
+    dfd = deck.playbook_rows([r for r in g2 if r["side"] == deck.DEFENSE], deck.DEFENSE)
+    # 行ごとの「やること」は指示形で、立ち位置と回数が入る
+    first = next(g for g in atk if g["kind"] == "Default")
+    assert "人" in first["todo"] and "始める" in first["todo"] and f"{first['n']} 回" in first["todo"]
+    assert all(g.get("todo") for g in atk + dfd)
+    rush = next((g for g in atk if g["kind"] == "Rush"), None)
+    assert rush and "まっすぐ入る" in rush["todo"]
+    ret = next(g for g in dfd if g["kind"] == "Retake")
+    assert "設置" in ret["todo"]
+    # 5 人の担当（アイコン照合できたラウンドから）
+    duty = H.duties([r for r in g2 if r["side"] == deck.ATTACK])
+    assert len(duty) == 5 and all(d["areas"] for d in duty)
+    # 構成の形：食い違う指摘は出さない
+    comp = H.comp_notes(H.agent_roles(None, list(g2[0]["comp"])))
+    assert "コントローラー 2" in comp["line"] and comp["strong"]
+    assert not any("スモークが 1 枚" in x for x in comp["weak"])
+    # 覚える順番と用語
+    st = H.steps(atk, dfd, comp, duty)
+    assert st[0]["title"].startswith("5 人") and len(st) >= 4
+    assert all(s["items"] for s in st)
+    gl = H.glossary_for([g["name"] for g in atk + dfd] + [g["todo"] for g in atk + dfd])
+    assert any(w == "テイクデフォ" for w, _ in gl) and any(w == "2 巡目" for w, _ in gl)
+
+
+def test_reads_tell_what_to_do_against_each_opponent_shape(tmp_path, monkeypatch):
+    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
+    rows = [r for rep in [report(str(i), "G2", "SEN", i) for i in range(4)] for r in deck.records(rep)]
+    g2 = [r for r in rows if r["team"] == "G2"]
+    rs = deck.reads([r for r in g2 if r["side"] == deck.ATTACK], deck.ATTACK)
+    assert rs and all(g["n"] >= 2 for g in rs)
+    line = deck.read_line(rs[0], deck.ATTACK)
+    assert "相手が「" in line and "いちばん勝てているのは" in line
+
+
+def _split_callouts():
+    from .deckfx import areas
+    return [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]}
+            for v in areas("split").values()]
+
+
+def test_setup_png_draws_five_positions(tmp_path, monkeypatch):
+    """初動の型の図：エリアごとに人数の丸と、担当エージェントの名前を描く。"""
+    import cv2
+    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
+    rows = [r for rep in [report(str(i), "G2", "SEN", i) for i in range(3)] for r in deck.records(rep)]
+    g2 = [r for r in rows if r["team"] == "G2"]
+    prs = deck.playbook_rows([r for r in g2 if r["side"] == deck.ATTACK], deck.ATTACK)
+    g = next(x for x in prs if x["kind"] == "Default")
+    assert sum(g["spread"].values()) >= 4.0 and max(g["spread"].values()) >= 2.0
+    p = deck.setup_png({"output": {"dir": str(tmp_path)}}, "Split", g, tmp_path / "s.jpg", _split_callouts())
+    assert p and p.exists() and cv2.imread(str(p)) is not None
+    # コールアウトが無ければ描けない（ヒートマップに戻す）
+    assert deck.setup_png({"output": {"dir": str(tmp_path)}}, "Split", g, tmp_path / "x.jpg", []) is None
+
+
+def test_difficulty_video_and_alternatives(tmp_path, monkeypatch):
+    """真似するときの難しさ・見本の動画の時刻・足りないときの代わり。"""
+    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
+    from vreplay import howto as H
+    rows = [r for rep in [report(str(i), "G2", "SEN", i) for i in range(3)] for r in deck.records(rep)]
+    g2 = [r for r in rows if r["team"] == "G2"]
+    prs = deck.playbook_rows([r for r in g2 if r["side"] == deck.ATTACK], deck.ATTACK)
+    lv = {g["name"]: g["difficulty"]["level"] for g in prs}
+    assert lv[next(n for n in lv if "ラッシュ" in n)] == "やさしい"
+    assert lv[next(n for n in lv if "後取り" in n)] == "むずかしい"
+    assert all(g["difficulty"]["note"] for g in prs)
+    assert deck.yt_at("https://youtu.be/x?t=3725") == "1:02:05" and deck.yt_at("https://youtu.be/x") == ""
+    vid = next(x for x in prs[0]["lines"] if x.startswith("見本の動画"))
+    assert "から" in vid and "R" in vid
+    alt = H.alternatives(H.agent_roles(None, ["Viper", "Jett"]), None)
+    viper = next(a for a in alt if a["agent"] == "Viper")
+    assert viper["subgroup"] == "壁型スモーク" and viper["picks"][0] == "Harbor"
+    assert "Viper" not in viper["picks"]
+
+
+def test_cheatsheet_is_one_page(tmp_path, monkeypatch):
+    """A4 1 枚のチートシート：手順・読み合い・そろってから使う型・用語が入る。"""
+    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
+    rows = [r for rep in [report(str(i), "G2", "SEN", i) for i in range(3)] for r in deck.records(rep)]
+    g2 = [r for r in rows if r["team"] == "G2"]
+    prs = {sd: deck.playbook_rows([r for r in g2 if r["side"] == sd], sd)
+           for sd in (deck.ATTACK, deck.DEFENSE)}
+    key = {"title": "Split G2 Comp PlayBook", "map": "Split", "slug": "x", "comp": list(g2[0]["comp"])}
+    p = deck.build_cheatsheet({"output": {"dir": str(tmp_path)}}, key, g2, prs, tmp_path)
+    s = p.read_text("utf-8")
+    assert p.name.endswith("_cheat.html")
+    assert "size:A4" in s and "まず覚えること" in s
+    assert "5 人の役割と担当を決める" in s and "相手の形を見てどうするか" in s
+    assert "そろってから使う型" in s and "言葉" in s
+
+
+def test_motion_frames_follow_five_agents(tmp_path, monkeypatch):
+    """動きで見る：節目ごとに 5 人の駒が並び、1:15 の担当が名札になる。設置後の位置は節目に混ぜない。"""
+    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
+    calls = _split_callouts()
+    rows = [r for rep in [report(str(i), "G2", "SEN", i) for i in range(4)] for r in deck.records(rep)]
+    g2 = [r for r in rows if r["team"] == "G2"]
+    prs = deck.playbook_rows([r for r in g2 if r["side"] == deck.ATTACK], deck.ATTACK)
+    g = next(x for x in prs if x["kind"] == "Default")
+    fr = deck.motion_frames(g, calls, deck.ATTACK)
+    assert fr["marks"][:2] == ["1:30", "1:15"] and fr["marks"][-1] == "設置後"
+    assert len(fr["dots"]) == 5
+    assert {d["label"] for d in fr["dots"]} == {"Breach", "Omen", "Tejo", "Viper", "Yoru"}
+    assert all(len(d["xy"]) == len(fr["marks"]) for d in fr["dots"])
+    assert all(0 <= x <= 1 and 0 <= y <= 1 for d in fr["dots"] for x, y in d["xy"])
+    # 動いている（どれかの駒は節目の間で位置が変わる）
+    assert any(d["xy"][0] != d["xy"][-1] for d in fr["dots"])
+    # コールアウトが無ければ作らない
+    assert deck.motion_frames(g, [], deck.ATTACK) is None
+
+
+def test_arrows_and_positions_export(tmp_path, monkeypatch):
+    """矢印（どこからどこへ）と、別のツールで描き直すための JSON。"""
+    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
+    import json as J
+    calls = _split_callouts()
+    rows = [r for rep in [report(str(i), "G2", "SEN", i) for i in range(4)] for r in deck.records(rep)]
+    g2 = [r for r in rows if r["team"] == "G2"]
+    prs = {sd: deck.playbook_rows([r for r in g2 if r["side"] == sd], sd)
+           for sd in (deck.ATTACK, deck.DEFENSE)}
+    d0 = next(g for g in prs[deck.ATTACK] if g["kind"] == "Default")
+    assert deck.row_arrows(d0, deck.ATTACK) == [(d0["area"], f"{d0['sites'].most_common(1)[0][0]} Site")]
+    sp = next(g for g in prs[deck.ATTACK] if g["kind"] == "Split")
+    assert deck.row_arrows(sp, deck.ATTACK)[0][0] == sp["shown"]
+    key = {"title": "T", "map": "Split", "slug": "x", "comp": list(g2[0]["comp"])}
+    f = deck.export_positions({"output": {"dir": str(tmp_path)}}, key, prs, calls, tmp_path)
+    data = J.loads(f.read_text("utf-8"))
+    assert data["map"] == "Split" and data["callouts"] and len(data["types"]) == len(prs[deck.ATTACK]) + len(prs[deck.DEFENSE])
+    t = next(x for x in data["types"] if x["name"] == d0["name"])
+    assert t["side"] == "attack" and t["arrows"] and t["marks"] and t["dots"]
+    assert t["todo"] and t["spread"]
+
+
+def test_map_background_falls_back_to_callouts(tmp_path, monkeypatch):
+    """公式のマップ画像が取れないときは、コールアウトの点だけの下地にする。"""
+    monkeypatch.setattr("vreplay.deck._icon", lambda *a, **k: None)
+    uri = deck.map_data_uri({"output": {"dir": str(tmp_path)}}, "Split", [], _split_callouts())
+    assert uri.startswith("data:image/jpeg;base64,") and len(uri) > 2000
+    assert deck.map_data_uri({"output": {"dir": str(tmp_path)}}, "Split", [], []) == ""

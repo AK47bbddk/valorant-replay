@@ -43,17 +43,75 @@ FREE_SKIP = ("lyria", "voice", "tts", "audio", "safety", "guard", "embed", "imag
 
 SYSTEM = (
     "あなたは VALORANT のプロチームのアナリスト兼コーチです。渡されるのは、試合映像を自動解析して集計した"
-    "1 チーム・1 マップ・1 構成のデータ（ラウンドの勝率、初動の配置の型と各エージェントの立ち位置、設置サイトと時刻、"
-    "先制キル、リテイク・ポストプラントの結果、ULT、解説者の発言から拾った意図のキーワードと一節）です。"
-    "これをもとに、チーム内のプレイブックに貼る日本語の要約を書いてください。\n"
-    "- 見出しは「ATK summary」「DEF summary」の 2 つ。それぞれ箇条書き 4〜7 行\n"
-    "- 1 行目に全体の方針（例：デフォルトで MID を取り、2 巡目のアクションで最終形に持っていく）\n"
-    "- 型の名前・回数・勝率など、データにある具体的な根拠を括弧で添える\n"
-    "- データから言えないこと（スキルの使い方、コールの中身）は「推測：」と頭につけて最大 2 行まで\n"
+    "1 チーム・1 マップ・1 構成のデータ（ラウンドの勝率、初動の型（「B Main テイクデフォ」「守りデフォ（2-1-2）」など）"
+    "と各エージェントの立ち位置、2 巡目のアクション（execution・ラッシュ・捨て〜スプリット・レイト）、設置サイトと時刻、"
+    "先制キル、リテイク・ポストプラント・カウンターの結果、ULT、解説者の発言から拾った意図のキーワードと一節）です。"
+    "これをもとに、チーム内のプレイブックに貼る日本語の要約を、コーチが手で書くときの短い箇条書きで書いてください。\n"
+    "- 見出しは「ATK summary」「DEF summary」の 2 つ。どちらも必ず書く。それぞれ箇条書き 4〜6 行・1 行 60 文字以内\n"
+    "- ATK は「デフォルト → 2 巡目のアクション → 最終形」の順に並べる"
+    "（例：デフォして2巡目のアクションして最終形に持っていく）\n"
+    "- DEF は「デフォルトの形 → 時間での寄せ方 → リテイク」の順。強いところも 1 行入れる\n"
+    "- 型の名前・回数・勝率は、データにある書き方のまま括弧で添える（名前を言い換えない）\n"
+    "- 最後に「対策メモ」として、相手の攻めへの対策を「ドライに対して→…」「セットに対して→…」の形で 2 行\n"
+    "- データから言えないこと（スキルの使い方、コールの中身）は「推測：」と頭につけて最大 2 行\n"
     "- 回数が少ないもの（5 回未満）は「参考」と書く\n"
-    "- 最後に「対策メモ」として、この相手と戦うときに狙えそうな弱点を 2 行\n"
-    "- 前置きや考えた過程は書かず、見出しから始める"
+    "- 前置きや考えた過程は書かず、見出しから始める。文は必ず言い切って終わる\n"
+    "- 言葉はコーチの書き方に合わせる：1 巡目／2 巡目、<場所>取り（テイクデフォ）、後取り、挟み、"
+    "<見せた場所> 捨て <サイト> スプリット、ラッシュ、レイト、エグゼキュート、<サイト> 3人守り（強気）、"
+    "前目、タイミングプッシュ、ファストリテイク、<場所> カウンター、ドライ、セット、エリアを取る・管理する\n"
+    "- 攻め先の話は「マップを中央で分けて、人数やスキルの少ない方に行く」という見方で書く"
 )
+SHORTER = (
+    "前の回答は長すぎて途中で切れました。同じ見出し（ATK summary・DEF summary・対策メモ）のまま、"
+    "各 3 行・1 行 40 文字以内に短くまとめ直してください。必ず最後まで書き切ってください。"
+)
+HEADS = {"atk summary": "ATK", "atk": "ATK", "def summary": "DEF", "def": "DEF",
+         "対策メモ": "memo", "対策": "memo"}
+
+
+def looks_truncated(text: str | None) -> bool:
+    """出力が途中で切れている（最後の行が言い切りで終わっていない）。"""
+    lines = [x.strip() for x in (text or "").splitlines() if x.strip()]
+    if not lines:
+        return True
+    return not lines[-1].rstrip().rstrip("*`").endswith(("。", "）", ")", "」", "！", "？", "．", "."))
+
+
+def sections(text: str | None) -> dict[str, list[str]]:
+    """見出しごとに分ける。{"ATK": [行], "DEF": [行], "memo": [行]}。切れている最後の行は落とす。"""
+    out: dict[str, list[str]] = {"ATK": [], "DEF": [], "memo": []}
+    cur, last = None, None
+    for line in (text or "").splitlines():
+        t = line.strip().strip("#").strip().strip("*").strip()
+        if not t:
+            continue
+        low = t.lower().rstrip("：:").strip()
+        key = next((v for k, v in HEADS.items() if low.startswith(k)), None)
+        if key and len(low) <= len(key) + 12:
+            cur = key
+            continue
+        if cur:
+            body = re.sub(r"^\d+[.)、]\s*", "", re.sub(r"^[-・*\s]+", "", t))
+            out[cur].append(body.strip())
+            last = cur
+    if last and out[last] and looks_truncated(text):
+        out[last].pop()
+    return out
+
+
+def complete(text: str | None) -> bool:
+    """ATK／DEF の両方があって、途中で切れていない。"""
+    sec = sections(text)
+    return len(sec["ATK"]) >= 2 and len(sec["DEF"]) >= 2 and not looks_truncated(text)
+
+
+def worth_retry(text: str | None) -> bool:
+    """言い直させる価値があるか。見出しは書けていて、長くなって途中で切れた（片側が無い）ときだけ。
+    そもそも見出しが無い短い返事は、言い直しても同じなので next のモデルへ進む。"""
+    if not text or complete(text):
+        return False
+    sec = sections(text)
+    return bool(sec["ATK"] or sec["DEF"])
 
 
 def openrouter_free(cfg: dict | None = None, limit: int = 3) -> list[str]:
@@ -147,12 +205,13 @@ def _wait_seconds(r, attempt: int) -> float:
 
 
 def _call(name: str, key: str, base: str, model: str, body: str, max_tokens: int, log,
-          retries: int = 1, reasoning: str | None = None) -> str | None:
+          retries: int = 1, reasoning: str | None = None, note: str | None = None) -> str | None:
+    user = "データ（JSON）:\n" + body + (f"\n\n{note}" if note else "")
     if name == "anthropic":
         r = requests.post(base + "/messages", timeout=180, headers={
             "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
             json={"model": model, "max_tokens": max_tokens, "system": SYSTEM,
-                  "messages": [{"role": "user", "content": "データ（JSON）:\n" + body}]})
+                  "messages": [{"role": "user", "content": user}]})
         if r.status_code >= 400:
             log(f"  LLM（{name}）エラー {r.status_code}: {r.text[:200]}")
             return None
@@ -162,7 +221,7 @@ def _call(name: str, key: str, base: str, model: str, body: str, max_tokens: int
         headers.update({"HTTP-Referer": "https://github.com/AK47bbddk/valorant-replay", "X-Title": "valorant-replay"})
     payload = {"model": model, "max_tokens": max_tokens, "temperature": 0.3,
                "messages": [{"role": "system", "content": SYSTEM},
-                            {"role": "user", "content": "データ（JSON）:\n" + body}]}
+                            {"role": "user", "content": user}]}
     if reasoning:
         payload["reasoning_effort"] = reasoning        # Gemini の考える量（low・medium・high）
     for attempt in range(retries + 1):
@@ -208,7 +267,7 @@ def summarize(cfg: dict, data: dict, log=print) -> str | None:
     if not chain:
         return None
     lcfg = cfg.get("llm") or {}
-    max_tokens = int(lcfg.get("max_tokens") or 1500)
+    max_tokens = int(lcfg.get("max_tokens") or 2400)
     body = json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
     h = hashlib.sha1((SYSTEM + body).encode("utf-8")).hexdigest()[:16]
     cache = Path(cfg["output"]["dir"]) / "_cache" / "llm" / f"{h}.txt"
@@ -216,6 +275,7 @@ def summarize(cfg: dict, data: dict, log=print) -> str | None:
         return cache.read_text(encoding="utf-8")
     retries = int(lcfg.get("retries") if lcfg.get("retries") is not None else 4)
     reasoning = lcfg.get("reasoning_effort") or "low"
+    retried = False                                 # 言い直しは 1 冊につき 1 回だけ
     if _BUSY.get("gemini", 0) >= 2:
         # 混雑が続いている：この実行の残りは、ほかのモデルを先に試し、だめなときだけ Gemini に戻る
         chain = [c for c in chain if c[0] != "gemini"] + [c for c in chain if c[0] == "gemini"]
@@ -224,10 +284,19 @@ def summarize(cfg: dict, data: dict, log=print) -> str | None:
             continue
         # Gemini は待ってでも使う（できるだけ 3.8 Flash で書く）。OpenRouter の無料モデルは次の候補があるので早めに切り替える
         rt = retries if (name == "gemini" and model != "gemini-flash-latest") else 1
-        mt = max(max_tokens, 4096) if name == "gemini" else max_tokens   # 考える分のトークンも上限に含まれる
+        mt = max(max_tokens, 8192) if name == "gemini" else max_tokens   # 考える分のトークンも上限に含まれる
         try:
             text = _clean(_call(name, key, base, model, body, mt, log, retries=rt,
                                 reasoning=reasoning if name == "gemini" else None) or "")
+            if not retried and worth_retry(text):
+                # 途中で切れている・片方の見出しが無い。短く書くよう言い直して 1 回だけやり直す
+                retried = True
+                log(f"  要約（{name} / {model}）が途中で切れているので、短く書き直させます")
+                again = _clean(_call(name, key, base, model, body, mt, log, retries=0,
+                                     reasoning=reasoning if name == "gemini" else None,
+                                     note=SHORTER) or "")
+                if again and (complete(again) or len(again) > len(text)):
+                    text = again
         except Exception as e:
             log(f"  LLM（{name}）に接続できませんでした（{e}）")
             continue

@@ -17,7 +17,8 @@ def _rep():
             rr["ults"] = [{"team": "Alpha", "agent": "Sova"}, {"team": "Alpha", "agent": "Omen"}]
             rr["weapons"]["2"] = [{"weapon": "Operator"}]
         if n in (1, 4, 5):
-            rr["tactics"] = {"setups": {"1": {"name": "A 寄りデフォルト", "shape": "A3 Mid2", "zones": {"A": 3, "Mid": 2}}},
+            rr["tactics"] = {"setups": {"1": {"name": "A Ramps テイクデフォ", "shape": "A3 Mid2",
+                                              "zones": {"A": 3, "Mid": 2}, "area": "A Ramps", "area_zone": "A"}},
                              "plant_site": "A" if n != 5 else "B", "timeline": {}}
         rounds.append(rr)
     return {"match_id": "9", "order": 1, "map": "Split", "team1": "Alpha", "team2": "Beta", "tag1": "ALP",
@@ -39,10 +40,16 @@ def test_round_types_follow_the_economy():
 
 
 def test_branches_show_fake_from_the_same_setup():
+    """見せた場所（キーエリア）と設置サイトが違うラウンドは「<見せた場所> 捨て <サイト> スプリット」。"""
     gs = F.branches(_rep())
-    g = next(g for g in gs if g["setup"] == "A 寄りデフォルト")
-    assert [r["tag"] for r in g["rounds"]] == ["A直行", "A直行", "フェイク A→B"]
+    g = next(g for g in gs if g["setup"] == "A Ramps テイクデフォ")
+    assert [r["tag"] for r in g["rounds"]] == ["A直行", "A直行", "A Ramps 捨て B スプリット"]
     assert "R5 は B" in g["note"]
+    rep = _rep()
+    rr = next(r for r in rep["rounds"] if r["n"] == 5)
+    assert F.branch(rep, rr, 1)["fake"] is True
+    rr4 = next(r for r in rep["rounds"] if r["n"] == 4)
+    assert F.branch(rep, rr4, 1)["fake"] is False
 
 
 def test_round_db_rows_and_upsert():

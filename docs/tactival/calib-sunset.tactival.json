@@ -1,0 +1,2195 @@
+{
+ "schemaVersion": 3,
+ "patchId": "13.09",
+ "gamePatch": "13.09",
+ "mapVersion": 1,
+ "mapFlipped": false,
+ "appVersion": "0.35.0",
+ "savedAt": "",
+ "mapId": "sunset",
+ "activeStepIndex": 0,
+ "overrides": {
+  "mapColors": null,
+  "teamColors": null,
+  "agentColors": {},
+  "barrierColors": null,
+  "barrierFillOpacity": null,
+  "barrierStrokeStyle": null,
+  "backgroundColor": null,
+  "barriersVisible": true,
+  "doorsVisible": {},
+  "doorColors": {},
+  "doorAngles": {}
+ },
+ "zones": [],
+ "patchSnapshot": {
+  "patchId": "13.09",
+  "abilityDefs": {
+   "astra-nebula": {
+    "id": "astra-nebula",
+    "agentId": "41fb69c1-4189-7b37-f117-bcaf1e96f1bf",
+    "name": "Nebula",
+    "slot": "Ability2",
+    "category": "smoke",
+    "radiusMeters": 4.75,
+    "hasActiveState": false
+   },
+   "astra-gravity-well": {
+    "id": "astra-gravity-well",
+    "agentId": "41fb69c1-4189-7b37-f117-bcaf1e96f1bf",
+    "name": "Gravity Well",
+    "slot": "Grenade",
+    "category": "pull",
+    "radiusMeters": 4.75,
+    "hasActiveState": false
+   },
+   "astra-nova-pulse": {
+    "id": "astra-nova-pulse",
+    "agentId": "41fb69c1-4189-7b37-f117-bcaf1e96f1bf",
+    "name": "Nova Pulse",
+    "slot": "Ability1",
+    "category": "stun",
+    "radiusMeters": 4.75,
+    "hasActiveState": false
+   },
+   "astra-cosmic-divide": {
+    "id": "astra-cosmic-divide",
+    "agentId": "41fb69c1-4189-7b37-f117-bcaf1e96f1bf",
+    "name": "Cosmic Divide",
+    "slot": "Ultimate",
+    "category": "wall",
+    "hasActiveState": false,
+    "wall": {
+     "shape": "line",
+     "widthMeters": 0,
+     "length": {
+      "fixed": 180
+     },
+     "sourceOffset": "center",
+     "handlePosition": 0.5
+    }
+   },
+   "breach-rolling-thunder": {
+    "id": "breach-rolling-thunder",
+    "agentId": "5f8d3a7f-467b-97f3-062c-13acf203c006",
+    "name": "Rolling Thunder",
+    "slot": "Ultimate",
+    "category": "stun",
+    "hasActiveState": false,
+    "hasWallArrow": true,
+    "wall": {
+     "shape": "rect",
+     "widthMeters": 18,
+     "length": {
+      "fixed": 32
+     },
+     "sourceOffset": 8,
+     "handlePosition": "center"
+    }
+   },
+   "breach-fault-line": {
+    "id": "breach-fault-line",
+    "agentId": "5f8d3a7f-467b-97f3-062c-13acf203c006",
+    "name": "Fault Line",
+    "slot": "Ability2",
+    "category": "stun",
+    "hasActiveState": false,
+    "hasWallArrow": true,
+    "wall": {
+     "shape": "rect",
+     "widthMeters": 8,
+     "length": {
+      "min": 8,
+      "max": 48,
+      "default": 32
+     },
+     "sourceOffset": 8,
+     "handlePosition": "end"
+    }
+   },
+   "breach-aftershock": {
+    "id": "breach-aftershock",
+    "agentId": "5f8d3a7f-467b-97f3-062c-13acf203c006",
+    "name": "Aftershock",
+    "slot": "Grenade",
+    "category": "damage",
+    "hasActiveState": false,
+    "hasWallArrow": true,
+    "wall": {
+     "shape": "rect",
+     "widthMeters": 6,
+     "length": {
+      "fixed": 10
+     },
+     "sourceOffset": null,
+     "handlePosition": "end"
+    }
+   },
+   "brimstone-sky-smoke": {
+    "id": "brimstone-sky-smoke",
+    "agentId": "9f0d8ba9-4140-b941-57d3-a7ad57c6b417",
+    "name": "Sky Smoke",
+    "slot": "Ability2",
+    "category": "smoke",
+    "radiusMeters": 4.15,
+    "hasActiveState": false
+   },
+   "brimstone-incendiary": {
+    "id": "brimstone-incendiary",
+    "agentId": "9f0d8ba9-4140-b941-57d3-a7ad57c6b417",
+    "name": "Incendiary",
+    "slot": "Ability1",
+    "category": "molly",
+    "radiusMeters": 4.5,
+    "hasActiveState": false
+   },
+   "brimstone-stim-beacon": {
+    "id": "brimstone-stim-beacon",
+    "agentId": "9f0d8ba9-4140-b941-57d3-a7ad57c6b417",
+    "name": "Stim Beacon",
+    "slot": "Grenade",
+    "category": "buff",
+    "radiusMeters": 6,
+    "hasActiveState": false,
+    "showAnchor": true
+   },
+   "brimstone-orbital-strike": {
+    "id": "brimstone-orbital-strike",
+    "agentId": "9f0d8ba9-4140-b941-57d3-a7ad57c6b417",
+    "name": "Orbital Strike",
+    "slot": "Ultimate",
+    "category": "damage",
+    "radiusMeters": 9,
+    "hasActiveState": false
+   },
+   "clove-ruse": {
+    "id": "clove-ruse",
+    "agentId": "1dbf2edd-4729-0984-3115-daa5eed44993",
+    "name": "Ruse",
+    "slot": "Ability2",
+    "category": "smoke",
+    "radiusMeters": 4,
+    "hasActiveState": false
+   },
+   "clove-meddle": {
+    "id": "clove-meddle",
+    "agentId": "1dbf2edd-4729-0984-3115-daa5eed44993",
+    "name": "Meddle",
+    "slot": "Ability1",
+    "category": "decay",
+    "radiusMeters": 6,
+    "hasActiveState": false
+   },
+   "cypher-cyber-cage": {
+    "id": "cypher-cyber-cage",
+    "agentId": "117ed9e3-49f3-6512-3ccf-0cada7e3823b",
+    "name": "Cyber Cage",
+    "slot": "Ability1",
+    "category": "smoke",
+    "radiusMeters": 3.72,
+    "hasActiveState": false
+   },
+   "cypher-trapwire": {
+    "id": "cypher-trapwire",
+    "agentId": "117ed9e3-49f3-6512-3ccf-0cada7e3823b",
+    "name": "Trapwire",
+    "slot": "Grenade",
+    "category": "reveal",
+    "hasActiveState": false,
+    "wall": {
+     "shape": "line",
+     "widthMeters": 0,
+     "length": {
+      "min": 7,
+      "max": 15,
+      "default": 11
+     },
+     "sourceOffset": 0,
+     "handlePosition": "end"
+    }
+   },
+   "cypher-spycam": {
+    "id": "cypher-spycam",
+    "agentId": "117ed9e3-49f3-6512-3ccf-0cada7e3823b",
+    "name": "Spycam",
+    "slot": "Ability2",
+    "category": "reveal",
+    "hasActiveState": false,
+    "hasDirection": true
+   },
+   "deadlock-gravnet": {
+    "id": "deadlock-gravnet",
+    "agentId": "cc8b64c8-4b25-4ff9-6e7f-37b4da43d235",
+    "name": "GravNet",
+    "slot": "Ability2",
+    "category": "slow",
+    "radiusMeters": 6.5,
+    "hasActiveState": false
+   },
+   "deadlock-sonic-sensor": {
+    "id": "deadlock-sonic-sensor",
+    "agentId": "cc8b64c8-4b25-4ff9-6e7f-37b4da43d235",
+    "name": "Sonic Sensor",
+    "slot": "Ability1",
+    "category": "stun",
+    "hasActiveState": false,
+    "wall": {
+     "shape": "rect",
+     "widthMeters": 8,
+     "length": {
+      "fixed": 9
+     },
+     "sourceOffset": 0,
+     "handlePosition": "center"
+    }
+   },
+   "deadlock-barrier-mesh": {
+    "id": "deadlock-barrier-mesh",
+    "agentId": "cc8b64c8-4b25-4ff9-6e7f-37b4da43d235",
+    "name": "Barrier Mesh",
+    "slot": "Grenade",
+    "category": "block",
+    "hasActiveState": false,
+    "cross": {
+     "armLengthMeters": 10,
+     "armLengthMin": 1,
+     "armLengthMax": 10
+    }
+   },
+   "fade-haunt": {
+    "id": "fade-haunt",
+    "agentId": "dade69b4-4f5a-8528-247b-219e5a1facd6",
+    "name": "Haunt",
+    "slot": "Ability2",
+    "category": "reveal",
+    "radiusMeters": 28,
+    "hasActiveState": false,
+    "showAnchor": true
+   },
+   "fade-seize": {
+    "id": "fade-seize",
+    "agentId": "dade69b4-4f5a-8528-247b-219e5a1facd6",
+    "name": "Seize",
+    "slot": "Ability1",
+    "category": "tether",
+    "radiusMeters": 6.58,
+    "hasActiveState": false,
+    "showAnchor": true
+   },
+   "fade-nightfall": {
+    "id": "fade-nightfall",
+    "agentId": "dade69b4-4f5a-8528-247b-219e5a1facd6",
+    "name": "Nightfall",
+    "slot": "Ultimate",
+    "category": "trail",
+    "hasActiveState": false,
+    "hasWallArrow": true,
+    "wall": {
+     "shape": "rect",
+     "widthMeters": 20,
+     "length": {
+      "fixed": 40
+     },
+     "sourceOffset": 0,
+     "handlePosition": "center"
+    }
+   },
+   "fade-prowler": {
+    "id": "fade-prowler",
+    "agentId": "dade69b4-4f5a-8528-247b-219e5a1facd6",
+    "name": "Prowler",
+    "slot": "Grenade",
+    "category": "blind",
+    "hasActiveState": false,
+    "hasDirection": true
+   },
+   "gekko-mosh-pit": {
+    "id": "gekko-mosh-pit",
+    "agentId": "e370fa57-4757-3604-3648-499e1f642d3f",
+    "name": "Mosh Pit",
+    "slot": "Grenade",
+    "category": "molly",
+    "radiusMeters": 6.2,
+    "hasActiveState": false
+   },
+   "gekko-wingman": {
+    "id": "gekko-wingman",
+    "agentId": "e370fa57-4757-3604-3648-499e1f642d3f",
+    "name": "Wingman",
+    "slot": "Ability1",
+    "category": "utility",
+    "hasActiveState": false,
+    "hasDirection": true
+   },
+   "gekko-thrash": {
+    "id": "gekko-thrash",
+    "agentId": "e370fa57-4757-3604-3648-499e1f642d3f",
+    "name": "Thrash",
+    "slot": "Ultimate",
+    "category": "stun",
+    "hasActiveState": false,
+    "hasDirection": true
+   },
+   "harbor-cove": {
+    "id": "harbor-cove",
+    "agentId": "95b78ed7-4637-86d9-7e41-71ba8c293152",
+    "name": "Cove",
+    "slot": "Ability2",
+    "category": "shield",
+    "radiusMeters": 4.6,
+    "hasActiveState": true
+   },
+   "harbor-storm-surge": {
+    "id": "harbor-storm-surge",
+    "agentId": "95b78ed7-4637-86d9-7e41-71ba8c293152",
+    "name": "Storm Surge",
+    "slot": "Grenade",
+    "category": "damage",
+    "radiusMeters": 6,
+    "hasActiveState": false
+   },
+   "harbor-high-tide": {
+    "id": "harbor-high-tide",
+    "agentId": "95b78ed7-4637-86d9-7e41-71ba8c293152",
+    "name": "High Tide",
+    "slot": "Ability1",
+    "category": "wall",
+    "hasActiveState": false,
+    "curve": {
+     "speedMps": 25,
+     "angularVelocityDps": 180,
+     "maxRangeMeters": 62.5
+    }
+   },
+   "harbor-reckoning": {
+    "id": "harbor-reckoning",
+    "agentId": "95b78ed7-4637-86d9-7e41-71ba8c293152",
+    "name": "Reckoning",
+    "slot": "Ultimate",
+    "category": "stun",
+    "hasActiveState": false,
+    "hasWallArrow": true,
+    "wall": {
+     "shape": "rect",
+     "widthMeters": 21,
+     "length": {
+      "min": 1,
+      "max": 34,
+      "default": 34
+     },
+     "sourceOffset": 8,
+     "handlePosition": "center"
+    }
+   },
+   "hush-telekinesis": {
+    "id": "hush-telekinesis",
+    "agentId": "ddd5a15c-4fbe-42fa-3789-11a55ca5ee04",
+    "name": "Telekinesis",
+    "slot": "Passive",
+    "category": "interaction",
+    "hasActiveState": false
+   },
+   "hush-flow": {
+    "id": "hush-flow",
+    "agentId": "ddd5a15c-4fbe-42fa-3789-11a55ca5ee04",
+    "name": "Flow",
+    "slot": "Grenade",
+    "category": "movement",
+    "hasActiveState": false,
+    "hasDirection": true
+   },
+   "hush-flashbulb": {
+    "id": "hush-flashbulb",
+    "agentId": "ddd5a15c-4fbe-42fa-3789-11a55ca5ee04",
+    "name": "Flashbulb",
+    "slot": "Ability1",
+    "category": "blind",
+    "hasActiveState": false,
+    "hasDirection": true
+   },
+   "hush-displacement": {
+    "id": "hush-displacement",
+    "agentId": "ddd5a15c-4fbe-42fa-3789-11a55ca5ee04",
+    "name": "Displacement",
+    "slot": "Ability2",
+    "category": "pull",
+    "radiusMeters": 6,
+    "hasActiveState": false
+   },
+   "hush-suspension": {
+    "id": "hush-suspension",
+    "agentId": "ddd5a15c-4fbe-42fa-3789-11a55ca5ee04",
+    "name": "Suspension",
+    "slot": "Ultimate",
+    "category": "levitate",
+    "radiusMeters": 7,
+    "hasActiveState": false
+   },
+   "iso-undercut": {
+    "id": "iso-undercut",
+    "agentId": "0e38b510-41a8-5780-5e8f-568b2a4f2d6c",
+    "name": "Undercut",
+    "slot": "Ability1",
+    "category": "debuff",
+    "hasActiveState": false,
+    "hasWallArrow": true,
+    "wall": {
+     "shape": "rect",
+     "widthMeters": 6,
+     "length": {
+      "fixed": 34.875
+     },
+     "sourceOffset": 0,
+     "handlePosition": "center"
+    }
+   },
+   "iso-kill-contract": {
+    "id": "iso-kill-contract",
+    "agentId": "0e38b510-41a8-5780-5e8f-568b2a4f2d6c",
+    "name": "Kill Contract",
+    "slot": "Ultimate",
+    "category": "duel",
+    "hasActiveState": false,
+    "hasWallArrow": true,
+    "wall": {
+     "shape": "rect",
+     "widthMeters": 15,
+     "length": {
+      "fixed": 36
+     },
+     "sourceOffset": 0,
+     "handlePosition": "center"
+    }
+   },
+   "iso-contingency": {
+    "id": "iso-contingency",
+    "agentId": "0e38b510-41a8-5780-5e8f-568b2a4f2d6c",
+    "name": "Contingency",
+    "slot": "Grenade",
+    "category": "shield",
+    "hasActiveState": false,
+    "hasWallArrow": true,
+    "wall": {
+     "shape": "rect",
+     "widthMeters": 4,
+     "length": {
+      "fixed": 27.5
+     },
+     "sourceOffset": 5,
+     "handlePosition": "center",
+     "lengthModes": [
+      {
+       "label": "Full",
+       "value": 27.5
+      },
+      {
+       "label": "Half",
+       "value": 13.75
+      }
+     ],
+     "panels": 3
+    }
+   },
+   "jett-cloudburst": {
+    "id": "jett-cloudburst",
+    "agentId": "add6443a-41bd-e414-f6ad-e58d267f4e95",
+    "name": "Cloudburst",
+    "slot": "Grenade",
+    "category": "smoke",
+    "radiusMeters": 3.35,
+    "hasActiveState": false
+   },
+   "kayo-frag-ment": {
+    "id": "kayo-frag-ment",
+    "agentId": "601dbbe7-43ce-be57-2a40-4abd24953621",
+    "name": "FRAG/ment",
+    "slot": "Grenade",
+    "category": "molly",
+    "radiusMeters": 4,
+    "hasActiveState": false
+   },
+   "kayo-zero-point": {
+    "id": "kayo-zero-point",
+    "agentId": "601dbbe7-43ce-be57-2a40-4abd24953621",
+    "name": "ZERO/point",
+    "slot": "Ability2",
+    "category": "suppress",
+    "radiusMeters": 15,
+    "hasActiveState": false,
+    "showAnchor": true
+   },
+   "kayo-null-cmd": {
+    "id": "kayo-null-cmd",
+    "agentId": "601dbbe7-43ce-be57-2a40-4abd24953621",
+    "name": "NULL/cmd",
+    "slot": "Ultimate",
+    "category": "suppress",
+    "radiusMeters": 42.5,
+    "hasActiveState": false,
+    "showAnchor": true
+   },
+   "killjoy-nanoswarm": {
+    "id": "killjoy-nanoswarm",
+    "agentId": "1e58de9c-4950-5125-93e9-a0aee9f98746",
+    "name": "Nanoswarm",
+    "slot": "Grenade",
+    "category": "molly",
+    "radiusMeters": 4.5,
+    "hasActiveState": false
+   },
+   "killjoy-lockdown": {
+    "id": "killjoy-lockdown",
+    "agentId": "1e58de9c-4950-5125-93e9-a0aee9f98746",
+    "name": "Lockdown",
+    "slot": "Ultimate",
+    "category": "detain",
+    "radiusMeters": 32.5,
+    "hasActiveState": false,
+    "showAnchor": true
+   },
+   "killjoy-alarmbot": {
+    "id": "killjoy-alarmbot",
+    "agentId": "1e58de9c-4950-5125-93e9-a0aee9f98746",
+    "name": "Alarmbot",
+    "slot": "Ability1",
+    "category": "reveal",
+    "radiusMeters": 5.5,
+    "activationRadiusMeters": 40,
+    "hasActiveState": false,
+    "showAnchor": true
+   },
+   "killjoy-turret": {
+    "id": "killjoy-turret",
+    "agentId": "1e58de9c-4950-5125-93e9-a0aee9f98746",
+    "name": "Turret",
+    "slot": "Ability2",
+    "category": "reveal",
+    "activationRadiusMeters": 40,
+    "hasActiveState": false,
+    "hasDirection": true,
+    "cone": {
+     "angleDeg": 100,
+     "radiusMeters": 4
+    }
+   },
+   "miks-m-pulse": {
+    "id": "miks-m-pulse",
+    "agentId": "7c8a4701-4de6-9355-b254-e09bc2a34b72",
+    "name": "M-pulse",
+    "slot": "Grenade",
+    "category": "damage",
+    "radiusMeters": 6,
+    "hasActiveState": false
+   },
+   "miks-waveform": {
+    "id": "miks-waveform",
+    "agentId": "7c8a4701-4de6-9355-b254-e09bc2a34b72",
+    "name": "Waveform",
+    "slot": "Ability2",
+    "category": "smoke",
+    "radiusMeters": 4.1,
+    "hasActiveState": false
+   },
+   "miks-bassquake": {
+    "id": "miks-bassquake",
+    "agentId": "7c8a4701-4de6-9355-b254-e09bc2a34b72",
+    "name": "Bassquake",
+    "slot": "Ultimate",
+    "category": "damage",
+    "hasActiveState": false,
+    "hasDirection": true,
+    "hasWallArrow": true,
+    "cone": {
+     "angleDeg": 60,
+     "radiusMeters": 40
+    }
+   },
+   "neon-relay-bolt": {
+    "id": "neon-relay-bolt",
+    "agentId": "bb2a4828-46eb-8cd1-e765-15848195d751",
+    "name": "Relay Bolt",
+    "slot": "Ability1",
+    "category": "stun",
+    "radiusMeters": 5,
+    "hasActiveState": false
+   },
+   "neon-fast-lane": {
+    "id": "neon-fast-lane",
+    "agentId": "bb2a4828-46eb-8cd1-e765-15848195d751",
+    "name": "Fast Lane",
+    "slot": "Grenade",
+    "category": "wall",
+    "hasActiveState": false,
+    "hasWallArrow": true,
+    "wall": {
+     "shape": "parallel-lines",
+     "widthMeters": 0,
+     "length": {
+      "min": 23.25,
+      "max": 46.5,
+      "default": 35
+     },
+     "sourceOffset": -1.5,
+     "handlePosition": "end",
+     "parallelGapMeters": 3.5
+    }
+   },
+   "omen-dark-cover": {
+    "id": "omen-dark-cover",
+    "agentId": "8e253930-4c05-31dd-1b6c-968525494517",
+    "name": "Dark Cover",
+    "slot": "Ability2",
+    "category": "smoke",
+    "radiusMeters": 4.1,
+    "hasActiveState": false
+   },
+   "omen-paranoia": {
+    "id": "omen-paranoia",
+    "agentId": "8e253930-4c05-31dd-1b6c-968525494517",
+    "name": "Paranoia",
+    "slot": "Ability1",
+    "category": "blind",
+    "hasActiveState": false,
+    "hasWallArrow": true,
+    "wall": {
+     "shape": "rect",
+     "widthMeters": 8.6,
+     "length": {
+      "fixed": 28
+     },
+     "sourceOffset": 0,
+     "handlePosition": "center"
+    }
+   },
+   "phoenix-hot-hands": {
+    "id": "phoenix-hot-hands",
+    "agentId": "eb93336a-449b-9c1b-0a54-a891f7921d69",
+    "name": "Hot Hands",
+    "slot": "Ability1",
+    "category": "molly",
+    "radiusMeters": 4.5,
+    "hasActiveState": false
+   },
+   "raze-paint-shells": {
+    "id": "raze-paint-shells",
+    "agentId": "f94c3b30-42be-e959-889c-5aa313dba261",
+    "name": "Paint Shells",
+    "slot": "Ability2",
+    "category": "damage",
+    "radiusMeters": 5.5,
+    "hasActiveState": false
+   },
+   "raze-boom-bot": {
+    "id": "raze-boom-bot",
+    "agentId": "f94c3b30-42be-e959-889c-5aa313dba261",
+    "name": "Boom Bot",
+    "slot": "Grenade",
+    "category": "damage",
+    "hasActiveState": false,
+    "hasDirection": true
+   },
+   "sage-slow-orb": {
+    "id": "sage-slow-orb",
+    "agentId": "569fdd95-4d10-43ab-ca70-79becc718b46",
+    "name": "Slow Orb",
+    "slot": "Ability1",
+    "category": "slow",
+    "radiusMeters": 7.35,
+    "hasActiveState": false
+   },
+   "sage-barrier-orb": {
+    "id": "sage-barrier-orb",
+    "agentId": "569fdd95-4d10-43ab-ca70-79becc718b46",
+    "name": "Barrier Orb",
+    "slot": "Grenade",
+    "category": "wall",
+    "hasActiveState": false,
+    "wall": {
+     "shape": "rect",
+     "widthMeters": 1.5,
+     "length": {
+      "fixed": 10.4
+     },
+     "sourceOffset": "center",
+     "handlePosition": "center",
+     "segments": 4,
+     "segmentLengthMeters": 2.6
+    }
+   },
+   "skye-regrowth": {
+    "id": "skye-regrowth",
+    "agentId": "6f2a04ca-43e0-be17-7f36-b3908627744d",
+    "name": "Regrowth",
+    "slot": "Grenade",
+    "category": "heal",
+    "radiusMeters": 18,
+    "hasActiveState": false,
+    "showAnchor": true
+   },
+   "skye-trailblazer": {
+    "id": "skye-trailblazer",
+    "agentId": "6f2a04ca-43e0-be17-7f36-b3908627744d",
+    "name": "Trailblazer",
+    "slot": "Ability1",
+    "category": "stun",
+    "hasActiveState": false,
+    "hasDirection": true
+   },
+   "skye-guiding-light": {
+    "id": "skye-guiding-light",
+    "agentId": "6f2a04ca-43e0-be17-7f36-b3908627744d",
+    "name": "Guiding Light",
+    "slot": "Ability2",
+    "category": "blind",
+    "hasActiveState": false,
+    "hasDirection": true
+   },
+   "skye-seekers": {
+    "id": "skye-seekers",
+    "agentId": "6f2a04ca-43e0-be17-7f36-b3908627744d",
+    "name": "Seekers",
+    "slot": "Ultimate",
+    "category": "reveal",
+    "hasActiveState": false,
+    "hasDirection": true
+   },
+   "sova-recon-bolt": {
+    "id": "sova-recon-bolt",
+    "agentId": "320b2a48-4d9b-a075-30f1-1f93a9b638fa",
+    "name": "Recon Bolt",
+    "slot": "Ability2",
+    "category": "reveal",
+    "radiusMeters": 28,
+    "hasActiveState": false,
+    "showAnchor": true
+   },
+   "sova-shock-bolt": {
+    "id": "sova-shock-bolt",
+    "agentId": "320b2a48-4d9b-a075-30f1-1f93a9b638fa",
+    "name": "Shock Bolt",
+    "slot": "Ability1",
+    "category": "damage",
+    "radiusMeters": 4,
+    "hasActiveState": false
+   },
+   "sova-hunters-fury": {
+    "id": "sova-hunters-fury",
+    "agentId": "320b2a48-4d9b-a075-30f1-1f93a9b638fa",
+    "name": "Hunter's Fury",
+    "slot": "Ultimate",
+    "category": "damage",
+    "hasActiveState": false,
+    "hasWallArrow": true,
+    "wall": {
+     "shape": "rect",
+     "widthMeters": 2.52,
+     "length": {
+      "fixed": 66
+     },
+     "sourceOffset": 0,
+     "handlePosition": "center"
+    }
+   },
+   "sova-owl-drone": {
+    "id": "sova-owl-drone",
+    "agentId": "320b2a48-4d9b-a075-30f1-1f93a9b638fa",
+    "name": "Owl Drone",
+    "slot": "Grenade",
+    "category": "reveal",
+    "hasActiveState": false,
+    "hasDirection": true
+   },
+   "tejo-stealth-drone": {
+    "id": "tejo-stealth-drone",
+    "agentId": "b444168c-4e35-8076-db47-ef9bf368f384",
+    "name": "Stealth Drone",
+    "slot": "Grenade",
+    "category": "reveal",
+    "radiusMeters": 16,
+    "hasActiveState": false,
+    "hasDirection": true,
+    "showAnchor": true
+   },
+   "tejo-special-delivery": {
+    "id": "tejo-special-delivery",
+    "agentId": "b444168c-4e35-8076-db47-ef9bf368f384",
+    "name": "Special Delivery",
+    "slot": "Ability1",
+    "category": "stun",
+    "radiusMeters": 5.25,
+    "hasActiveState": false
+   },
+   "tejo-guided-salvo": {
+    "id": "tejo-guided-salvo",
+    "agentId": "b444168c-4e35-8076-db47-ef9bf368f384",
+    "name": "Guided Salvo",
+    "slot": "Ability2",
+    "category": "damage",
+    "radiusMeters": 4.5,
+    "hasActiveState": false
+   },
+   "tejo-armageddon": {
+    "id": "tejo-armageddon",
+    "agentId": "b444168c-4e35-8076-db47-ef9bf368f384",
+    "name": "Armageddon",
+    "slot": "Ultimate",
+    "category": "damage",
+    "hasActiveState": false,
+    "hasWallArrow": true,
+    "wall": {
+     "shape": "rect",
+     "widthMeters": 12,
+     "length": {
+      "fixed": 32
+     },
+     "sourceOffset": 0,
+     "handlePosition": "center"
+    }
+   },
+   "viper-poison-cloud": {
+    "id": "viper-poison-cloud",
+    "agentId": "707eab51-4836-f488-046a-cda6bf494859",
+    "name": "Poison Cloud",
+    "slot": "Ability1",
+    "category": "smoke",
+    "radiusMeters": 4.5,
+    "hasActiveState": true,
+    "showAnchor": true
+   },
+   "viper-snake-bite": {
+    "id": "viper-snake-bite",
+    "agentId": "707eab51-4836-f488-046a-cda6bf494859",
+    "name": "Snake Bite",
+    "slot": "Grenade",
+    "category": "molly",
+    "radiusMeters": 4.5,
+    "hasActiveState": false
+   },
+   "viper-toxic-screen": {
+    "id": "viper-toxic-screen",
+    "agentId": "707eab51-4836-f488-046a-cda6bf494859",
+    "name": "Toxic Screen",
+    "slot": "Ability2",
+    "category": "wall",
+    "hasActiveState": true,
+    "wall": {
+     "shape": "line",
+     "widthMeters": 0,
+     "length": {
+      "min": 30,
+      "max": 62.5,
+      "default": 45
+     },
+     "sourceOffset": 0,
+     "handlePosition": "end"
+    }
+   },
+   "vyse-razorvine": {
+    "id": "vyse-razorvine",
+    "agentId": "efba5359-4016-a1e5-7626-b1ae76895940",
+    "name": "Razorvine",
+    "slot": "Grenade",
+    "category": "slow",
+    "radiusMeters": 6.25,
+    "hasActiveState": false
+   },
+   "vyse-steel-garden": {
+    "id": "vyse-steel-garden",
+    "agentId": "efba5359-4016-a1e5-7626-b1ae76895940",
+    "name": "Steel Garden",
+    "slot": "Ultimate",
+    "category": "suppress",
+    "radiusMeters": 28,
+    "hasActiveState": false,
+    "showAnchor": true
+   },
+   "vyse-shear": {
+    "id": "vyse-shear",
+    "agentId": "efba5359-4016-a1e5-7626-b1ae76895940",
+    "name": "Shear",
+    "slot": "Ability1",
+    "category": "damage",
+    "hasActiveState": false,
+    "wall": {
+     "shape": "line",
+     "widthMeters": 0,
+     "length": {
+      "min": 2,
+      "max": 12,
+      "default": 7
+     },
+     "sourceOffset": 0,
+     "handlePosition": "end"
+    }
+   },
+   "chamber-trademark": {
+    "id": "chamber-trademark",
+    "agentId": "22697a3d-45bf-8dd7-4fec-84a9e28c69d7",
+    "name": "Trademark",
+    "slot": "Grenade",
+    "category": "slow",
+    "radiusMeters": 10,
+    "hasActiveState": false,
+    "showAnchor": true
+   },
+   "chamber-rendezvous": {
+    "id": "chamber-rendezvous",
+    "agentId": "22697a3d-45bf-8dd7-4fec-84a9e28c69d7",
+    "name": "Rendezvous",
+    "slot": "Ability2",
+    "category": "teleport",
+    "radiusMeters": 18,
+    "hasActiveState": false,
+    "showAnchor": true
+   },
+   "waylay-saturate": {
+    "id": "waylay-saturate",
+    "agentId": "df1cb487-4902-002e-5c17-d28e83e78588",
+    "name": "Saturate",
+    "slot": "Grenade",
+    "category": "damage",
+    "radiusMeters": 6,
+    "hasActiveState": false
+   },
+   "waylay-convergent-paths": {
+    "id": "waylay-convergent-paths",
+    "agentId": "df1cb487-4902-002e-5c17-d28e83e78588",
+    "name": "Convergent Paths",
+    "slot": "Ultimate",
+    "category": "stun",
+    "hasActiveState": false,
+    "hasWallArrow": true,
+    "wall": {
+     "shape": "rect",
+     "widthMeters": 13.5,
+     "length": {
+      "fixed": 35.5
+     },
+     "sourceOffset": 3.5,
+     "handlePosition": "center"
+    }
+   },
+   "veto-crosscut": {
+    "id": "veto-crosscut",
+    "agentId": "92eeef5d-43b5-1d4a-8d03-b3927a09034b",
+    "name": "Crosscut",
+    "slot": "Grenade",
+    "category": "teleport",
+    "radiusMeters": 30,
+    "hasActiveState": false,
+    "showAnchor": true
+   },
+   "veto-chokehold": {
+    "id": "veto-chokehold",
+    "agentId": "92eeef5d-43b5-1d4a-8d03-b3927a09034b",
+    "name": "Chokehold",
+    "slot": "Ability1",
+    "category": "tether",
+    "radiusMeters": 6.58,
+    "hasActiveState": false,
+    "showAnchor": true
+   },
+   "veto-interceptor": {
+    "id": "veto-interceptor",
+    "agentId": "92eeef5d-43b5-1d4a-8d03-b3927a09034b",
+    "name": "Interceptor",
+    "slot": "Ability2",
+    "category": "utility",
+    "radiusMeters": 18,
+    "hasActiveState": false,
+    "showAnchor": true
+   },
+   "yoru-fakeout": {
+    "id": "yoru-fakeout",
+    "agentId": "7f94d92c-4234-0a36-9646-3a87eb8b5c89",
+    "name": "FAKEOUT",
+    "slot": "Grenade",
+    "category": "decoy",
+    "hasActiveState": false,
+    "hasDirection": true
+   },
+   "yoru-gatecrash": {
+    "id": "yoru-gatecrash",
+    "agentId": "7f94d92c-4234-0a36-9646-3a87eb8b5c89",
+    "name": "GATECRASH",
+    "slot": "Ability2",
+    "category": "teleport",
+    "hasActiveState": false,
+    "hasDirection": true
+   }
+  },
+  "selfBuffs": {
+   "chamber-headhunter": {
+    "agentId": "22697a3d-45bf-8dd7-4fec-84a9e28c69d7",
+    "slot": "Ability1",
+    "name": "Headhunter"
+   },
+   "chamber-tour-de-force": {
+    "agentId": "22697a3d-45bf-8dd7-4fec-84a9e28c69d7",
+    "slot": "Ultimate",
+    "name": "Tour De Force"
+   },
+   "neon-high-gear": {
+    "agentId": "bb2a4828-46eb-8cd1-e765-15848195d751",
+    "slot": "Ability2",
+    "name": "High Gear"
+   },
+   "neon-overdrive": {
+    "agentId": "bb2a4828-46eb-8cd1-e765-15848195d751",
+    "slot": "Ultimate",
+    "name": "Overdrive"
+   },
+   "clove-pick-me-up": {
+    "agentId": "1dbf2edd-4729-0984-3115-daa5eed44993",
+    "slot": "Grenade",
+    "name": "Pick-me-up"
+   },
+   "iso-double-tap": {
+    "agentId": "0e38b510-41a8-5780-5e8f-568b2a4f2d6c",
+    "slot": "Ability2",
+    "name": "Double Tap"
+   },
+   "jett-updraft": {
+    "agentId": "add6443a-41bd-e414-f6ad-e58d267f4e95",
+    "slot": "Ability1",
+    "name": "Updraft"
+   },
+   "jett-tailwind": {
+    "agentId": "add6443a-41bd-e414-f6ad-e58d267f4e95",
+    "slot": "Ability2",
+    "name": "Tailwind"
+   },
+   "jett-blade-storm": {
+    "agentId": "add6443a-41bd-e414-f6ad-e58d267f4e95",
+    "slot": "Ultimate",
+    "name": "Blade Storm"
+   },
+   "phoenix-run-it-back": {
+    "agentId": "eb93336a-449b-9c1b-0a54-a891f7921d69",
+    "slot": "Ultimate",
+    "name": "Run it Back"
+   },
+   "raze-showstopper": {
+    "agentId": "f94c3b30-42be-e959-889c-5aa313dba261",
+    "slot": "Ultimate",
+    "name": "Showstopper"
+   },
+   "reyna-devour": {
+    "agentId": "a3bfb853-43b2-7238-a4f1-ad90e9e46bcc",
+    "slot": "Ability1",
+    "name": "Devour"
+   },
+   "reyna-dismiss": {
+    "agentId": "a3bfb853-43b2-7238-a4f1-ad90e9e46bcc",
+    "slot": "Ability2",
+    "name": "Dismiss"
+   },
+   "reyna-empress": {
+    "agentId": "a3bfb853-43b2-7238-a4f1-ad90e9e46bcc",
+    "slot": "Ultimate",
+    "name": "Empress"
+   },
+   "yoru-dimensional-drift": {
+    "agentId": "7f94d92c-4234-0a36-9646-3a87eb8b5c89",
+    "slot": "Ultimate",
+    "name": "Dimensional Drift"
+   },
+   "waylay-refract": {
+    "agentId": "df1cb487-4902-002e-5c17-d28e83e78588",
+    "slot": "Ability2",
+    "name": "Refract"
+   },
+   "waylay-lightspeed": {
+    "agentId": "df1cb487-4902-002e-5c17-d28e83e78588",
+    "slot": "Ability1",
+    "name": "Lightspeed"
+   },
+   "veto-evolution": {
+    "agentId": "92eeef5d-43b5-1d4a-8d03-b3927a09034b",
+    "slot": "Ultimate",
+    "name": "Evolution"
+   },
+   "hush-flashbulb": {
+    "agentId": "ddd5a15c-4fbe-42fa-3789-11a55ca5ee04",
+    "slot": "Ability1",
+    "name": "Flashbulb"
+   },
+   "hush-displacement": {
+    "agentId": "ddd5a15c-4fbe-42fa-3789-11a55ca5ee04",
+    "slot": "Ability2",
+    "name": "Displacement"
+   }
+  },
+  "agents": {
+   "41fb69c1-4189-7b37-f117-bcaf1e96f1bf": {
+    "uuid": "41fb69c1-4189-7b37-f117-bcaf1e96f1bf",
+    "displayName": "Astra",
+    "role": "Controller",
+    "abilities": [
+     {
+      "slot": "Passive",
+      "displayName": "Astral Form"
+     },
+     {
+      "slot": "Ability1",
+      "displayName": "Nova Pulse"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "Nebula  / Dissipate"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Gravity Well"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Astral Form / Cosmic Divide"
+     }
+    ]
+   },
+   "5f8d3a7f-467b-97f3-062c-13acf203c006": {
+    "uuid": "5f8d3a7f-467b-97f3-062c-13acf203c006",
+    "displayName": "Breach",
+    "role": "Initiator",
+    "abilities": [
+     {
+      "slot": "Ability1",
+      "displayName": "Flashpoint"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "Fault Line"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Aftershock"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Rolling Thunder"
+     }
+    ]
+   },
+   "9f0d8ba9-4140-b941-57d3-a7ad57c6b417": {
+    "uuid": "9f0d8ba9-4140-b941-57d3-a7ad57c6b417",
+    "displayName": "Brimstone",
+    "role": "Controller",
+    "abilities": [
+     {
+      "slot": "Grenade",
+      "displayName": "Stim Beacon"
+     },
+     {
+      "slot": "Ability1",
+      "displayName": "Incendiary"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "Sky Smoke"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Orbital Strike"
+     }
+    ]
+   },
+   "22697a3d-45bf-8dd7-4fec-84a9e28c69d7": {
+    "uuid": "22697a3d-45bf-8dd7-4fec-84a9e28c69d7",
+    "displayName": "Chamber",
+    "role": "Sentinel",
+    "abilities": [
+     {
+      "slot": "Ability2",
+      "displayName": "Rendezvous"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Trademark"
+     },
+     {
+      "slot": "Ability1",
+      "displayName": "Headhunter"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Tour De Force"
+     }
+    ]
+   },
+   "1dbf2edd-4729-0984-3115-daa5eed44993": {
+    "uuid": "1dbf2edd-4729-0984-3115-daa5eed44993",
+    "displayName": "Clove",
+    "role": "Controller",
+    "abilities": [
+     {
+      "slot": "Grenade",
+      "displayName": "Pick-me-up"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "Ruse"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Not Dead Yet"
+     },
+     {
+      "slot": "Ability1",
+      "displayName": "Meddle"
+     }
+    ]
+   },
+   "117ed9e3-49f3-6512-3ccf-0cada7e3823b": {
+    "uuid": "117ed9e3-49f3-6512-3ccf-0cada7e3823b",
+    "displayName": "Cypher",
+    "role": "Sentinel",
+    "abilities": [
+     {
+      "slot": "Ability1",
+      "displayName": "Cyber Cage"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "Spycam"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Trapwire"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Neural Theft"
+     }
+    ]
+   },
+   "cc8b64c8-4b25-4ff9-6e7f-37b4da43d235": {
+    "uuid": "cc8b64c8-4b25-4ff9-6e7f-37b4da43d235",
+    "displayName": "Deadlock",
+    "role": "Sentinel",
+    "abilities": [
+     {
+      "slot": "Ability1",
+      "displayName": "Sonic Sensor"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Barrier Mesh"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "GravNet"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Annihilation"
+     }
+    ]
+   },
+   "dade69b4-4f5a-8528-247b-219e5a1facd6": {
+    "uuid": "dade69b4-4f5a-8528-247b-219e5a1facd6",
+    "displayName": "Fade",
+    "role": "Initiator",
+    "abilities": [
+     {
+      "slot": "Ability1",
+      "displayName": "Seize"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "Haunt"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Prowler"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Nightfall"
+     }
+    ]
+   },
+   "e370fa57-4757-3604-3648-499e1f642d3f": {
+    "uuid": "e370fa57-4757-3604-3648-499e1f642d3f",
+    "displayName": "Gekko",
+    "role": "Initiator",
+    "abilities": [
+     {
+      "slot": "Ability1",
+      "displayName": "Wingman"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "Dizzy"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Mosh Pit"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Thrash"
+     }
+    ]
+   },
+   "95b78ed7-4637-86d9-7e41-71ba8c293152": {
+    "uuid": "95b78ed7-4637-86d9-7e41-71ba8c293152",
+    "displayName": "Harbor",
+    "role": "Controller",
+    "abilities": [
+     {
+      "slot": "Ability1",
+      "displayName": "High Tide"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Storm Surge"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "Cove"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Reckoning"
+     }
+    ]
+   },
+   "ddd5a15c-4fbe-42fa-3789-11a55ca5ee04": {
+    "uuid": "ddd5a15c-4fbe-42fa-3789-11a55ca5ee04",
+    "displayName": "Hush",
+    "role": "Duelist",
+    "abilities": [
+     {
+      "slot": "Passive",
+      "displayName": "Telekinesis"
+     },
+     {
+      "slot": "Ability1",
+      "displayName": "Flashbulb"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "Displacement"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Flow"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Suspension"
+     }
+    ]
+   },
+   "0e38b510-41a8-5780-5e8f-568b2a4f2d6c": {
+    "uuid": "0e38b510-41a8-5780-5e8f-568b2a4f2d6c",
+    "displayName": "Iso",
+    "role": "Duelist",
+    "abilities": [
+     {
+      "slot": "Ability1",
+      "displayName": "Undercut"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Kill Contract"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "Double Tap"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Contingency"
+     }
+    ]
+   },
+   "add6443a-41bd-e414-f6ad-e58d267f4e95": {
+    "uuid": "add6443a-41bd-e414-f6ad-e58d267f4e95",
+    "displayName": "Jett",
+    "role": "Duelist",
+    "abilities": [
+     {
+      "slot": "Ability1",
+      "displayName": "Updraft"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "Tailwind"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Cloudburst"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Blade Storm"
+     }
+    ]
+   },
+   "601dbbe7-43ce-be57-2a40-4abd24953621": {
+    "uuid": "601dbbe7-43ce-be57-2a40-4abd24953621",
+    "displayName": "KAY/O",
+    "role": "Initiator",
+    "abilities": [
+     {
+      "slot": "Grenade",
+      "displayName": "FRAG/ment"
+     },
+     {
+      "slot": "Ability1",
+      "displayName": "FLASH/drive"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "ZERO/point"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "NULL/cmd"
+     }
+    ]
+   },
+   "1e58de9c-4950-5125-93e9-a0aee9f98746": {
+    "uuid": "1e58de9c-4950-5125-93e9-a0aee9f98746",
+    "displayName": "Killjoy",
+    "role": "Sentinel",
+    "abilities": [
+     {
+      "slot": "Grenade",
+      "displayName": "Nanoswarm"
+     },
+     {
+      "slot": "Ability1",
+      "displayName": "ALARMBOT"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "TURRET"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Lockdown"
+     }
+    ]
+   },
+   "7c8a4701-4de6-9355-b254-e09bc2a34b72": {
+    "uuid": "7c8a4701-4de6-9355-b254-e09bc2a34b72",
+    "displayName": "Miks",
+    "role": "Controller",
+    "abilities": [
+     {
+      "slot": "Ability1",
+      "displayName": "Harmonize"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "Waveform"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "M-pulse"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Bassquake"
+     }
+    ]
+   },
+   "bb2a4828-46eb-8cd1-e765-15848195d751": {
+    "uuid": "bb2a4828-46eb-8cd1-e765-15848195d751",
+    "displayName": "Neon",
+    "role": "Duelist",
+    "abilities": [
+     {
+      "slot": "Ability2",
+      "displayName": "High Gear"
+     },
+     {
+      "slot": "Ability1",
+      "displayName": "Relay Bolt"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Fast Lane"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Overdrive"
+     }
+    ]
+   },
+   "8e253930-4c05-31dd-1b6c-968525494517": {
+    "uuid": "8e253930-4c05-31dd-1b6c-968525494517",
+    "displayName": "Omen",
+    "role": "Controller",
+    "abilities": [
+     {
+      "slot": "Ability1",
+      "displayName": "Paranoia"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "Dark Cover"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Shrouded Step"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "From the Shadows"
+     }
+    ]
+   },
+   "eb93336a-449b-9c1b-0a54-a891f7921d69": {
+    "uuid": "eb93336a-449b-9c1b-0a54-a891f7921d69",
+    "displayName": "Phoenix",
+    "role": "Duelist",
+    "abilities": [
+     {
+      "slot": "Grenade",
+      "displayName": "Blaze"
+     },
+     {
+      "slot": "Ability1",
+      "displayName": "Hot Hands"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "Curveball"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Run it Back"
+     }
+    ]
+   },
+   "f94c3b30-42be-e959-889c-5aa313dba261": {
+    "uuid": "f94c3b30-42be-e959-889c-5aa313dba261",
+    "displayName": "Raze",
+    "role": "Duelist",
+    "abilities": [
+     {
+      "slot": "Ability1",
+      "displayName": "Blast Pack"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "Paint Shells"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Boom Bot"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Showstopper"
+     }
+    ]
+   },
+   "a3bfb853-43b2-7238-a4f1-ad90e9e46bcc": {
+    "uuid": "a3bfb853-43b2-7238-a4f1-ad90e9e46bcc",
+    "displayName": "Reyna",
+    "role": "Duelist",
+    "abilities": [
+     {
+      "slot": "Ability1",
+      "displayName": "Devour"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "Dismiss"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Leer"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Empress"
+     }
+    ]
+   },
+   "569fdd95-4d10-43ab-ca70-79becc718b46": {
+    "uuid": "569fdd95-4d10-43ab-ca70-79becc718b46",
+    "displayName": "Sage",
+    "role": "Sentinel",
+    "abilities": [
+     {
+      "slot": "Ability1",
+      "displayName": "Slow Orb"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "Healing Orb"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Barrier Orb"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Resurrection"
+     }
+    ]
+   },
+   "6f2a04ca-43e0-be17-7f36-b3908627744d": {
+    "uuid": "6f2a04ca-43e0-be17-7f36-b3908627744d",
+    "displayName": "Skye",
+    "role": "Initiator",
+    "abilities": [
+     {
+      "slot": "Ability1",
+      "displayName": "Trailblazer"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "Guiding Light"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Regrowth"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Seekers"
+     }
+    ]
+   },
+   "320b2a48-4d9b-a075-30f1-1f93a9b638fa": {
+    "uuid": "320b2a48-4d9b-a075-30f1-1f93a9b638fa",
+    "displayName": "Sova",
+    "role": "Initiator",
+    "abilities": [
+     {
+      "slot": "Ability1",
+      "displayName": "Shock Bolt"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "Recon Bolt"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Owl Drone"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Hunter's Fury"
+     }
+    ]
+   },
+   "b444168c-4e35-8076-db47-ef9bf368f384": {
+    "uuid": "b444168c-4e35-8076-db47-ef9bf368f384",
+    "displayName": "Tejo",
+    "role": "Initiator",
+    "abilities": [
+     {
+      "slot": "Ability2",
+      "displayName": "Guided Salvo"
+     },
+     {
+      "slot": "Ability1",
+      "displayName": "Special Delivery"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Armageddon"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Stealth Drone"
+     }
+    ]
+   },
+   "92eeef5d-43b5-1d4a-8d03-b3927a09034b": {
+    "uuid": "92eeef5d-43b5-1d4a-8d03-b3927a09034b",
+    "displayName": "Veto",
+    "role": "Sentinel",
+    "abilities": [
+     {
+      "slot": "Ability1",
+      "displayName": "Chokehold"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "Interceptor"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Crosscut"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Evolution"
+     }
+    ]
+   },
+   "707eab51-4836-f488-046a-cda6bf494859": {
+    "uuid": "707eab51-4836-f488-046a-cda6bf494859",
+    "displayName": "Viper",
+    "role": "Controller",
+    "abilities": [
+     {
+      "slot": "Ability1",
+      "displayName": "Poison Cloud"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "Toxic Screen"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Snake Bite"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Viper's Pit"
+     }
+    ]
+   },
+   "efba5359-4016-a1e5-7626-b1ae76895940": {
+    "uuid": "efba5359-4016-a1e5-7626-b1ae76895940",
+    "displayName": "Vyse",
+    "role": "Sentinel",
+    "abilities": [
+     {
+      "slot": "Ability1",
+      "displayName": "Shear"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "Arc Rose"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Razorvine"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Steel Garden"
+     }
+    ]
+   },
+   "df1cb487-4902-002e-5c17-d28e83e78588": {
+    "uuid": "df1cb487-4902-002e-5c17-d28e83e78588",
+    "displayName": "Waylay",
+    "role": "Duelist",
+    "abilities": [
+     {
+      "slot": "Ability2",
+      "displayName": "Refract"
+     },
+     {
+      "slot": "Grenade",
+      "displayName": "Saturate"
+     },
+     {
+      "slot": "Ability1",
+      "displayName": "Lightspeed"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "Convergent Paths"
+     }
+    ]
+   },
+   "7f94d92c-4234-0a36-9646-3a87eb8b5c89": {
+    "uuid": "7f94d92c-4234-0a36-9646-3a87eb8b5c89",
+    "displayName": "Yoru",
+    "role": "Duelist",
+    "abilities": [
+     {
+      "slot": "Grenade",
+      "displayName": "FAKEOUT"
+     },
+     {
+      "slot": "Ability1",
+      "displayName": "BLINDSIDE"
+     },
+     {
+      "slot": "Ability2",
+      "displayName": "GATECRASH"
+     },
+     {
+      "slot": "Ultimate",
+      "displayName": "DIMENSIONAL DRIFT"
+     }
+    ]
+   },
+   "00000000-0000-0000-0000-000000000000": {
+    "uuid": "00000000-0000-0000-0000-000000000000",
+    "displayName": "Bot",
+    "role": "Utility",
+    "abilities": []
+   }
+  },
+  "maps": {
+   "abyss": {
+    "name": "Abyss",
+    "multiplier": 8.1e-05,
+    "active": true,
+    "version": 1,
+    "vector": true
+   },
+   "ascent": {
+    "name": "Ascent",
+    "multiplier": 7e-05,
+    "active": true,
+    "version": 1,
+    "vector": true
+   },
+   "bind": {
+    "name": "Bind",
+    "multiplier": 5.9e-05,
+    "active": false,
+    "version": 1,
+    "vector": true
+   },
+   "breeze": {
+    "name": "Breeze",
+    "multiplier": 7e-05,
+    "active": false,
+    "version": 1,
+    "vector": true
+   },
+   "corrode": {
+    "name": "Corrode",
+    "multiplier": 7e-05,
+    "active": false,
+    "version": 1,
+    "vector": true
+   },
+   "fracture": {
+    "name": "Fracture",
+    "multiplier": 7.8e-05,
+    "active": false,
+    "version": 1,
+    "vector": true
+   },
+   "haven": {
+    "name": "Haven",
+    "multiplier": 7.5e-05,
+    "active": true,
+    "version": 1,
+    "vector": true
+   },
+   "icebox": {
+    "name": "Icebox",
+    "multiplier": 7.2e-05,
+    "active": false,
+    "version": 1,
+    "vector": true
+   },
+   "lotus": {
+    "name": "Lotus",
+    "multiplier": 7.2e-05,
+    "active": true,
+    "version": 1,
+    "vector": true
+   },
+   "pearl": {
+    "name": "Pearl",
+    "multiplier": 7.8e-05,
+    "active": false,
+    "version": 1,
+    "vector": true
+   },
+   "split": {
+    "name": "Split",
+    "multiplier": 7.8e-05,
+    "active": true,
+    "version": 1,
+    "vector": true
+   },
+   "summit": {
+    "name": "Summit",
+    "multiplier": 7.5e-05,
+    "active": true,
+    "version": 1,
+    "vector": true
+   },
+   "sunset": {
+    "name": "Sunset",
+    "multiplier": 7.8e-05,
+    "active": true,
+    "version": 1,
+    "vector": true
+   }
+  },
+  "weapons": {
+   "melee": {
+    "name": "Melee",
+    "speed": 6.75,
+    "category": "Melee"
+   },
+   "classic": {
+    "name": "Classic",
+    "speed": 5.74,
+    "category": "Sidearms"
+   },
+   "shorty": {
+    "name": "Shorty",
+    "speed": 5.4,
+    "category": "Sidearms"
+   },
+   "frenzy": {
+    "name": "Frenzy",
+    "speed": 5.74,
+    "category": "Sidearms"
+   },
+   "ghost": {
+    "name": "Ghost",
+    "speed": 5.74,
+    "category": "Sidearms"
+   },
+   "bandit": {
+    "name": "Bandit",
+    "speed": 5.74,
+    "category": "Sidearms"
+   },
+   "sheriff": {
+    "name": "Sheriff",
+    "speed": 5.4,
+    "category": "Sidearms"
+   },
+   "stinger": {
+    "name": "Stinger",
+    "speed": 5.74,
+    "category": "SMGs"
+   },
+   "spectre": {
+    "name": "Spectre",
+    "speed": 5.74,
+    "category": "SMGs"
+   },
+   "bucky": {
+    "name": "Bucky",
+    "speed": 5.06,
+    "category": "Shotguns"
+   },
+   "judge": {
+    "name": "Judge",
+    "speed": 5.06,
+    "category": "Shotguns"
+   },
+   "bulldog": {
+    "name": "Bulldog",
+    "speed": 5.4,
+    "category": "Rifles"
+   },
+   "guardian": {
+    "name": "Guardian",
+    "speed": 5.4,
+    "category": "Rifles"
+   },
+   "phantom": {
+    "name": "Phantom",
+    "speed": 5.4,
+    "category": "Rifles"
+   },
+   "vandal": {
+    "name": "Vandal",
+    "speed": 5.4,
+    "category": "Rifles"
+   },
+   "warden": {
+    "name": "Warden",
+    "speed": 5.4,
+    "category": "Rifles"
+   },
+   "marshal": {
+    "name": "Marshal",
+    "speed": 5.4,
+    "category": "Sniper Rifles"
+   },
+   "outlaw": {
+    "name": "Outlaw",
+    "speed": 5.4,
+    "category": "Sniper Rifles"
+   },
+   "operator": {
+    "name": "Operator",
+    "speed": 5.13,
+    "category": "Sniper Rifles"
+   },
+   "ares": {
+    "name": "Ares",
+    "speed": 5.13,
+    "category": "Machine Guns"
+   },
+   "odin": {
+    "name": "Odin",
+    "speed": 5.13,
+    "category": "Machine Guns"
+   }
+  },
+  "dataFingerprint": "da0456f4fc8dde2854a69df81d26beb21e97be9e58dc93c3421407e7d3daa510"
+ },
+ "steps": [
+  {
+   "id": "1793865184064-rt17tf7o6",
+   "label": "座標合わせ：Jett=攻撃 / Sage=防衛 / Omen=A / Viper=B",
+   "transition": 1.5,
+   "hold": 0,
+   "elements": [
+    {
+     "id": "1793865184064-5sk36bc6e",
+     "type": "agent",
+     "x": 1027.68,
+     "y": 935.17,
+     "width": 48,
+     "height": 48,
+     "angle": 0,
+     "style": {
+      "stroke": "transparent",
+      "fill": "transparent",
+      "strokeWidth": 0,
+      "strokeStyle": "solid"
+     },
+     "order": 0,
+     "groupId": null,
+     "data": {
+      "agentId": "add6443a-41bd-e414-f6ad-e58d267f4e95",
+      "name": null,
+      "team": "neutral",
+      "alive": true,
+      "health": 100,
+      "showHealth": true,
+      "directionAngle": 0,
+      "showDirection": true,
+      "showAudioRange": false,
+      "castRanges": [],
+      "activeBuffs": [],
+      "buffAngle": 3.141592653589793,
+      "buffSize": 0.6,
+      "buffModifier": "none",
+      "deathGreyscale": false,
+      "deathMarker": "none",
+      "ownerId": null,
+      "altIcon": null,
+      "useAltIcon": false
+     }
+    },
+    {
+     "id": "1793865184064-ej4nx3d5q",
+     "type": "agent",
+     "x": 892.63,
+     "y": 99.68,
+     "width": 48,
+     "height": 48,
+     "angle": 0,
+     "style": {
+      "stroke": "transparent",
+      "fill": "transparent",
+      "strokeWidth": 0,
+      "strokeStyle": "solid"
+     },
+     "order": 1,
+     "groupId": null,
+     "data": {
+      "agentId": "569fdd95-4d10-43ab-ca70-79becc718b46",
+      "name": null,
+      "team": "neutral",
+      "alive": true,
+      "health": 100,
+      "showHealth": true,
+      "directionAngle": 0,
+      "showDirection": true,
+      "showAudioRange": false,
+      "castRanges": [],
+      "activeBuffs": [],
+      "buffAngle": 3.141592653589793,
+      "buffSize": 0.6,
+      "buffModifier": "none",
+      "deathGreyscale": false,
+      "deathMarker": "none",
+      "ownerId": null,
+      "altIcon": null,
+      "useAltIcon": false
+     }
+    },
+    {
+     "id": "1793865184064-f41cpqo8p",
+     "type": "agent",
+     "x": 1333.65,
+     "y": 338.11,
+     "width": 48,
+     "height": 48,
+     "angle": 0,
+     "style": {
+      "stroke": "transparent",
+      "fill": "transparent",
+      "strokeWidth": 0,
+      "strokeStyle": "solid"
+     },
+     "order": 2,
+     "groupId": null,
+     "data": {
+      "agentId": "8e253930-4c05-31dd-1b6c-968525494517",
+      "name": null,
+      "team": "neutral",
+      "alive": true,
+      "health": 100,
+      "showHealth": true,
+      "directionAngle": 0,
+      "showDirection": true,
+      "showAudioRange": false,
+      "castRanges": [],
+      "activeBuffs": [],
+      "buffAngle": 3.141592653589793,
+      "buffSize": 0.6,
+      "buffModifier": "none",
+      "deathGreyscale": false,
+      "deathMarker": "none",
+      "ownerId": null,
+      "altIcon": null,
+      "useAltIcon": false
+     }
+    },
+    {
+     "id": "1793865184064-4gor1yg6u",
+     "type": "agent",
+     "x": 564.49,
+     "y": 474.1,
+     "width": 48,
+     "height": 48,
+     "angle": 0,
+     "style": {
+      "stroke": "transparent",
+      "fill": "transparent",
+      "strokeWidth": 0,
+      "strokeStyle": "solid"
+     },
+     "order": 3,
+     "groupId": null,
+     "data": {
+      "agentId": "707eab51-4836-f488-046a-cda6bf494859",
+      "name": null,
+      "team": "neutral",
+      "alive": true,
+      "health": 100,
+      "showHealth": true,
+      "directionAngle": 0,
+      "showDirection": true,
+      "showAudioRange": false,
+      "castRanges": [],
+      "activeBuffs": [],
+      "buffAngle": 3.141592653589793,
+      "buffSize": 0.6,
+      "buffModifier": "none",
+      "deathGreyscale": false,
+      "deathMarker": "none",
+      "ownerId": null,
+      "altIcon": null,
+      "useAltIcon": false
+     }
+    }
+   ],
+   "zoneVisibility": {},
+   "overrides": {}
+  }
+ ]
+}
