@@ -109,6 +109,7 @@ def test_attack_sets_and_defense_rows(tmp_path, monkeypatch):
     names = [g["name"] for g in atk]
     assert any(n.endswith("テイクデフォ") for n in names)
     assert any("ラッシュ" in n for n in names) and any("execution" in n for n in names)
+    assert any("捨て" in n and "スプリット" in n for n in names)
     # 1:15 で取っていなかった手前のエリアを 1:05 以降に取り返すのは「後取り」
     back = next(g for g in atk if g["name"].endswith("後取り"))
     assert back["name"] == "A Main 後取り" and back["kind"] == "Execute"
@@ -302,3 +303,53 @@ def test_cheatsheet_is_one_page(tmp_path, monkeypatch):
     assert "size:A4" in s and "まず覚えること" in s
     assert "5 人の役割と担当を決める" in s and "相手の形を見てどうするか" in s
     assert "そろってから使う型" in s and "言葉" in s
+
+
+def test_motion_frames_follow_five_agents(tmp_path, monkeypatch):
+    """動きで見る：節目ごとに 5 人の駒が並び、1:15 の担当が名札になる。設置後の位置は節目に混ぜない。"""
+    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
+    calls = _split_callouts()
+    rows = [r for rep in [report(str(i), "G2", "SEN", i) for i in range(4)] for r in deck.records(rep)]
+    g2 = [r for r in rows if r["team"] == "G2"]
+    prs = deck.playbook_rows([r for r in g2 if r["side"] == deck.ATTACK], deck.ATTACK)
+    g = next(x for x in prs if x["kind"] == "Default")
+    fr = deck.motion_frames(g, calls, deck.ATTACK)
+    assert fr["marks"][:2] == ["1:30", "1:15"] and fr["marks"][-1] == "設置後"
+    assert len(fr["dots"]) == 5
+    assert {d["label"] for d in fr["dots"]} == {"Breach", "Omen", "Tejo", "Viper", "Yoru"}
+    assert all(len(d["xy"]) == len(fr["marks"]) for d in fr["dots"])
+    assert all(0 <= x <= 1 and 0 <= y <= 1 for d in fr["dots"] for x, y in d["xy"])
+    # 動いている（どれかの駒は節目の間で位置が変わる）
+    assert any(d["xy"][0] != d["xy"][-1] for d in fr["dots"])
+    # コールアウトが無ければ作らない
+    assert deck.motion_frames(g, [], deck.ATTACK) is None
+
+
+def test_arrows_and_positions_export(tmp_path, monkeypatch):
+    """矢印（どこからどこへ）と、別のツールで描き直すための JSON。"""
+    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
+    import json as J
+    calls = _split_callouts()
+    rows = [r for rep in [report(str(i), "G2", "SEN", i) for i in range(4)] for r in deck.records(rep)]
+    g2 = [r for r in rows if r["team"] == "G2"]
+    prs = {sd: deck.playbook_rows([r for r in g2 if r["side"] == sd], sd)
+           for sd in (deck.ATTACK, deck.DEFENSE)}
+    d0 = next(g for g in prs[deck.ATTACK] if g["kind"] == "Default")
+    assert deck.row_arrows(d0, deck.ATTACK) == [(d0["area"], f"{d0['sites'].most_common(1)[0][0]} Site")]
+    sp = next(g for g in prs[deck.ATTACK] if g["kind"] == "Split")
+    assert deck.row_arrows(sp, deck.ATTACK)[0][0] == sp["shown"]
+    key = {"title": "T", "map": "Split", "slug": "x", "comp": list(g2[0]["comp"])}
+    f = deck.export_positions({"output": {"dir": str(tmp_path)}}, key, prs, calls, tmp_path)
+    data = J.loads(f.read_text("utf-8"))
+    assert data["map"] == "Split" and data["callouts"] and len(data["types"]) == len(prs[deck.ATTACK]) + len(prs[deck.DEFENSE])
+    t = next(x for x in data["types"] if x["name"] == d0["name"])
+    assert t["side"] == "attack" and t["arrows"] and t["marks"] and t["dots"]
+    assert t["todo"] and t["spread"]
+
+
+def test_map_background_falls_back_to_callouts(tmp_path, monkeypatch):
+    """公式のマップ画像が取れないときは、コールアウトの点だけの下地にする。"""
+    monkeypatch.setattr("vreplay.deck._icon", lambda *a, **k: None)
+    uri = deck.map_data_uri({"output": {"dir": str(tmp_path)}}, "Split", [], _split_callouts())
+    assert uri.startswith("data:image/jpeg;base64,") and len(uri) > 2000
+    assert deck.map_data_uri({"output": {"dir": str(tmp_path)}}, "Split", [], []) == ""

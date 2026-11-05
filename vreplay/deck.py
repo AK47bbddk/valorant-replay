@@ -1318,11 +1318,43 @@ def _area_xy(callouts: list[dict]) -> dict[str, tuple[float, float]]:
     return out
 
 
-def setup_png(cfg: dict, map_name: str, g: dict, path: Path, callouts: list[dict] | None = None,
-              rows: list[dict] | None = None) -> Path | None:
-    """型の立ち位置図：エリアごとに人数の丸を置き、担当のエージェント名を書く。
+def _agent_icons(cfg: dict, names: list[str]) -> dict:
+    """エージェントのアイコン（valorant-api、キャッシュ済みなら通信しない）。取れなければ空。"""
+    try:
+        from . import agents
+        return agents.load_icons(cfg, [n for n in dict.fromkeys(names) if n], log=None)
+    except Exception:
+        return {}
 
-    ヒートマップより「5 人がどこに立つか」が分かりやすいので、初心者向けのカードはこちらを使う。
+
+def row_arrows(g: dict, side: str) -> list[tuple[str, str]]:
+    """その型で引く矢印（どこからどこへ動くか）。[(出発のエリア, 行き先のエリア)]"""
+    kind, name = g.get("kind") or "", g.get("name") or ""
+    site = g.get("site") or (g["sites"].most_common(1)[0][0] if g.get("sites") else None)
+    if not site:
+        return []
+    goal = f"{site} Site"
+    if side == DEFENSE:
+        if kind == "Retake":                       # リテイクは外から中へ
+            return [(a, goal) for a in sorted((g.get("spread") or {}), key=lambda a: -g["spread"][a])[:3]
+                    if a != goal]
+        return []
+    if kind in ("Default", "Push"):                # デフォルトはキーエリア →（よく行く）サイト
+        return [(g.get("area") or "", goal)] if g.get("area") else []
+    if kind == "Split" and g.get("shown"):         # 見せた場所 → 本命のサイト
+        return [(g["shown"], goal)]
+    if "後取り" in name:
+        back = name.replace(" 後取り", "")
+        return [(back, goal)]
+    return [(a, goal) for a in sorted((g.get("spread") or {}), key=lambda a: -g["spread"][a])[:2] if a != goal]
+
+
+def setup_png(cfg: dict, map_name: str, g: dict, path: Path, callouts: list[dict] | None = None,
+              rows: list[dict] | None = None, side: str | None = None) -> Path | None:
+    """型の配置図（Valotactics のような見た目）：公式のマップ画像の上に、担当エージェントの
+    アイコン（取れなければ名前つきの丸）を立ち位置に置き、動く先へ矢印を引く。
+
+    ヒートマップより「誰がどこに立って、どこへ動くか」が分かるので、初心者向けのカードはこれを使う。
     文字は地図の上に置くのでローマ字（コールアウトとエージェント名）だけにする。
     """
     import cv2
@@ -1348,29 +1380,49 @@ def setup_png(cfg: dict, map_name: str, g: dict, path: Path, callouts: list[dict
         bg = np.full((512, 512, 3), 245, np.uint8)
         for c in callouts or []:
             cv2.circle(bg, (int(c["x"] * 512), int(c["y"] * 512)), 3, (180, 180, 180), -1)
-    img = (bg.astype(np.float32) * 0.45 + 255 * 0.55).astype(np.uint8)       # うすくして上の丸を目立たせる
+    img = (bg.astype(np.float32) * 0.5 + 255 * 0.5).astype(np.uint8)         # うすくして上の駒を目立たせる
     S = img.shape[0]
     key = (193, 23, 0)                                   # デジタル庁のキーカラー #0017C1（BGR）
-    over = img.copy()
-    for a, v, (ux, uy) in sorted(pts, key=lambda t: -t[1]):
-        x, y = int(ux * S), int(uy * S)
-        r_ = int(14 + 10 * min(3.0, v))
-        cv2.circle(over, (x, y), r_, key, -1, cv2.LINE_AA)
-    img = cv2.addWeighted(over, 0.55, img, 0.45, 0)
+    # 矢印（どこからどこへ動くか）を先に引いて、駒の下に敷く
+    for a0, a1 in row_arrows(g, side or DEFENSE if side else ATTACK):
+        if a0 in xy and a1 in xy and a0 != a1:
+            p0 = (int(xy[a0][0] * S), int(xy[a0][1] * S))
+            p1 = (int(xy[a1][0] * S), int(xy[a1][1] * S))
+            cv2.arrowedLine(img, p0, p1, (255, 255, 255), 9, cv2.LINE_AA, tipLength=0.08)
+            cv2.arrowedLine(img, p0, p1, key, 4, cv2.LINE_AA, tipLength=0.08)
+    icons = _agent_icons(cfg, [n for c in who.values() for n, _ in c.most_common(2)])
     used: list[tuple[int, int, int]] = []
     for a, v, (ux, uy) in sorted(pts, key=lambda t: -t[1]):
         x, y = int(ux * S), int(uy * S)
-        r_ = int(14 + 10 * min(3.0, v))
-        cv2.circle(img, (x, y), r_, key, 2, cv2.LINE_AA)
-        txt = f"{v:g}"
-        cv2.putText(img, txt, (x - 7 * len(txt) // 2, y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                    (255, 255, 255), 4, cv2.LINE_AA)
-        cv2.putText(img, txt, (x - 7 * len(txt) // 2, y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                    key, 1, cv2.LINE_AA)
-        label = a + ("  " + "/".join(n for n, _ in who[a].most_common(2)) if who.get(a) else "")
+        ags = [n for n, _ in who[a].most_common(max(1, int(round(v))))] if who.get(a) else []
+        n_ = max(1, len(ags) or int(round(v)))
+        for i in range(n_):
+            dx = int((i - (n_ - 1) / 2) * 34)             # 同じエリアに複数いるときは横に並べる
+            cx, cy, r_ = x + dx, y, 15
+            ag = ags[i] if i < len(ags) else None
+            ic = icons.get(ag) if ag else None
+            if ic is not None:
+                t_ = cv2.resize(ic, (2 * r_, 2 * r_))
+                m = np.zeros((2 * r_, 2 * r_), np.uint8)
+                cv2.circle(m, (r_, r_), r_ - 1, 255, -1)
+                x0, y0 = cx - r_, cy - r_
+                ax0, ay0 = max(0, x0), max(0, y0)
+                ax1, ay1 = min(S, x0 + 2 * r_), min(S, y0 + 2 * r_)
+                if ax1 > ax0 and ay1 > ay0:
+                    sub = m[ay0 - y0:ay1 - y0, ax0 - x0:ax1 - x0] > 0
+                    img[ay0:ay1, ax0:ax1][sub] = t_[ay0 - y0:ay1 - y0, ax0 - x0:ax1 - x0][sub]
+            else:
+                cv2.circle(img, (cx, cy), r_, (255, 255, 255), -1, cv2.LINE_AA)
+                cv2.circle(img, (cx, cy), r_, key, 2, cv2.LINE_AA)
+                tag = (ag[:2] if ag else str(int(round(v))))
+                (tw0, _), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 2)
+                cv2.putText(img, tag, (cx - tw0 // 2, cy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                            key, 2, cv2.LINE_AA)
+            cv2.circle(img, (cx, cy), r_, key, 2, cv2.LINE_AA)
+        label = a + (f"  {'/'.join(ags[:2])}" if ags else f"  {v:g}")
         (tw, th_), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
-        lx, ly = min(max(2, x - tw // 2), S - tw - 2), y + r_ + 14
-        while any(abs(ly - uy) < 13 and lx < ux + uw and ux < lx + tw for ux, uy, uw in used):
+        lx, ly = min(max(2, x - tw // 2), S - tw - 2), y + 15 + 16
+        while any(abs(ly - uy2) < 13 and lx < ux2 + uw and ux2 < lx + tw for ux2, uy2, uw in used):
             ly += 14                                      # 文字が重なったら下にずらす
         used.append((lx, ly, tw))
         for col, th in (((255, 255, 255), 4), ((26, 26, 26), 1)):
@@ -1383,6 +1435,154 @@ def setup_png(cfg: dict, map_name: str, g: dict, path: Path, callouts: list[dict
     path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(path), img, [cv2.IMWRITE_JPEG_QUALITY, 88])
     return path
+
+
+# ---------------------------------------------------------------- 動きで見る（時間に沿った駒の動き）
+MOTION_MARKS = [("1:30", 10), ("1:15", 25), ("1:00", 40), ("0:40", 60)]
+
+
+def _slots(counts: Counter, xy: dict, limit: int = 5) -> list[tuple[str, float, float]]:
+    """エリアごとの平均人数 → 駒の位置（最大 5 個）。同じエリアに 2 人なら横にずらす。"""
+    out = []
+    for area, v in sorted(counts.items(), key=lambda kv: -kv[1]):
+        if area not in xy:
+            continue
+        for i in range(max(1, int(round(v)))):
+            if len(out) >= limit:
+                return out
+            x, y = xy[area]
+            out.append((area, x + (i - 0.5 if int(round(v)) > 1 else 0) * 0.035, y))
+    return out
+
+
+def motion_frames(g: dict, callouts: list[dict] | None, side: str) -> dict | None:
+    """型の「平均の動き」。節目ごとに駒を置き、近いものどうしをつないで道にする。
+
+    返り値 {"marks": ["1:30", …, "設置"], "dots": [{"label", "xy": [[x, y], …]}]}。
+    座標は valorant-api のマップ画像の 0..1。
+    """
+    xy = _area_xy(callouts)
+    if not xy:
+        return None
+    rows = g.get("rows") or []
+    marks, frames = [], []
+    for name, e in MOTION_MARKS:
+        c: Counter = Counter()
+        n = 0
+        for r in rows:
+            hi = e + 4
+            if r.get("plant_e") is not None:
+                hi = min(hi, float(r["plant_e"]) - 1)     # 設置後の位置はこの節目に混ぜない
+            if hi <= e - 4:
+                continue
+            k = key_areas(r, e - 4, hi)
+            if k:
+                c.update(k)
+                n += 1
+        if not n:
+            continue
+        avg = Counter({a: v / n for a, v in c.items() if v / n >= 0.4})
+        sl = _slots(avg, xy)
+        if sl:
+            marks.append(name)
+            frames.append(sl)
+    plant = Counter()
+    np_ = 0
+    for r in rows:
+        if r.get("plant_e") is None:
+            continue
+        k = key_areas(r, float(r["plant_e"]), float(r["plant_e"]) + 10)
+        if k:
+            plant.update(k)
+            np_ += 1
+    if np_:
+        sl = _slots(Counter({a: v / np_ for a, v in plant.items() if v / np_ >= 0.4}), xy)
+        if sl:
+            marks.append("設置後")
+            frames.append(sl)
+    if len(frames) < 2:
+        return None
+    # 駒の道：いちばん人数が見えている節目（ふつうは 1:15）を起点に、前後へ近い駒をつないでいく
+    anchor = marks.index("1:15") if "1:15" in marks else 0
+    if len(frames[anchor]) < 4 and len(frames[anchor]) < max(len(f) for f in frames):
+        anchor = max(range(len(frames)), key=lambda i: len(frames[i]))
+    paths: list[dict[int, tuple]] = [{anchor: pt} for pt in frames[anchor]]
+    for step in (1, -1):
+        i = anchor
+        while 0 <= i + step < len(frames):
+            j, taken = i + step, set()
+            for pth in paths:
+                px, py = pth[i][1], pth[i][2]
+                best, bd = None, 9.0
+                for n_, cand in enumerate(frames[j]):
+                    if n_ in taken:
+                        continue
+                    d = (px - cand[1]) ** 2 + (py - cand[2]) ** 2
+                    if d < bd:
+                        best, bd = n_, d
+                if best is None:
+                    pth[j] = pth[i]                   # 見えていない節目はその場に残す
+                else:
+                    taken.add(best)
+                    pth[j] = frames[j][best]
+            i = j
+    # 名札：1:15（無ければ起点の節目）でその駒がいるエリアの担当エージェント
+    who: dict[str, list[str]] = defaultdict(list)
+    for r in rows:
+        for area, ags in ((r.get("setup") or {}).get("who_area") or {}).items():
+            for a in ags:
+                if a not in who[area]:
+                    who[area].append(a)
+    used: Counter = Counter()
+    dots = []
+    for pth in paths:
+        area = pth[anchor][0]
+        ags = who.get(area) or []
+        label = ags[used[area]] if used[area] < len(ags) else area
+        used[area] += 1
+        dots.append({"label": label,
+                     "xy": [[round(pth[i][1], 4), round(pth[i][2], 4)] for i in range(len(frames))]})
+    return {"marks": marks, "dots": dots}
+
+
+MOTION_JS = """
+<script>
+(function(){
+ function run(el){
+  const d=JSON.parse(el.dataset.motion), marks=d.marks, dots=d.dots;
+  const box=el.querySelector('.mo-dots'), lab=el.querySelector('.mo-time');
+  const els=dots.map(function(p){const s=document.createElement('span');s.className='mo-dot';
+   s.textContent=p.label;box.appendChild(s);return s;});
+  let t=0, playing=true;
+  function draw(){
+   const i=Math.floor(t), f=t-i, j=Math.min(i+1,marks.length-1);
+   dots.forEach(function(p,k){const a=p.xy[Math.min(i,p.xy.length-1)],b=p.xy[Math.min(j,p.xy.length-1)];
+    els[k].style.left=((a[0]+(b[0]-a[0])*f)*100)+'%';els[k].style.top=((a[1]+(b[1]-a[1])*f)*100)+'%';});
+   lab.textContent=marks[Math.round(t)]||marks[marks.length-1];
+   if(playing){t+=0.012; if(t>marks.length-1+0.8){t=0;}}
+   requestAnimationFrame(draw);
+  }
+  el.querySelector('.mo-play').addEventListener('click',function(e){playing=!playing;
+   e.target.textContent=playing?'一時停止':'再生';});
+  draw();
+ }
+ document.querySelectorAll('.motion').forEach(run);
+})();
+</script>
+"""
+
+
+def motion_html(g: dict, fr: dict, bg: str) -> str:
+    """動きで見る図（1 つぶん）。背景はマップ画像、駒は名札つきで節目の間を動く。"""
+    return (f'<figure class="motion" data-motion=\'{json.dumps(fr, ensure_ascii=False)}\'>'
+            f'<div class="mo-map" style="background-image:url({bg})"><div class="mo-dots"></div></div>'
+            f'<figcaption><b>{_e(g["name"])}</b>　<span class="mo-time"></span>'
+            f'　<button class="mo-play" type="button">一時停止</button>'
+            f'　<span class="sub">{marks_text(fr)}</span></figcaption></figure>')
+
+
+def marks_text(fr: dict) -> str:
+    return " → ".join(fr["marks"])
 
 
 # ============================================================== 5. HTML
@@ -1432,6 +1632,17 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 figure{margin:0}figure img{width:100%;max-height:330px;object-fit:contain;border-radius:4px;background:var(--bg-sub)}
 .cols3 .card figure img{max-height:168px}.cols3 .card figure figcaption{font-size:11px}
 .card .todo{font-size:13px;line-height:1.55}
+.motion{margin:0}
+.mo-map{position:relative;width:100%;aspect-ratio:1/1;max-height:300px;background-size:contain;
+background-repeat:no-repeat;background-position:center;border-radius:4px;background-color:var(--bg-sub)}
+.mo-dots{position:absolute;inset:0}
+.mo-dot{position:absolute;transform:translate(-50%,-50%);background:var(--key);color:#fff;font-size:10px;
+font-weight:700;border-radius:999px;padding:2px 6px;white-space:nowrap;box-shadow:0 0 0 2px #fff;
+transition:none}
+.mo-play{font:inherit;font-size:12px;border:1px solid var(--line);background:var(--bg);border-radius:4px;
+padding:1px 8px;cursor:pointer}.mo-play:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.mo-time{font-weight:700;color:var(--key)}
+@media (prefers-reduced-motion:reduce){.mo-dot{transition:none}}
 figcaption{font-size:13px;color:var(--text-sub)}
 ul.plain{margin:0;padding-left:1.2em}ul.plain li{margin:0 0 6px}
 .empty{color:var(--text-sub);font-size:14px}
@@ -1488,6 +1699,61 @@ def _zone_html(zt: dict) -> str:
     ns = "・".join(f"{m} {zt[m]['n']}R" for m in zt)
     return (f"<table><thead><tr><th>ゾーン（平均人数）</th>{head}</tr></thead><tbody>{body}</tbody></table>"
             f'<p class="sub">サンプル：{_e(ns)}</p>')
+
+
+def map_data_uri(cfg: dict, map_name: str, rows: list[dict] | None = None,
+                 callouts: list[dict] | None = None) -> str:
+    """動きで見る図の下地（マップ画像）を data URI で 1 回だけ作る。
+
+    公式のマップ画像が取れないときは、コールアウトの点とサイトの文字だけの下地にする。
+    """
+    import base64
+    import cv2
+    img = None
+    for r in rows or []:
+        p_ = r.get("uv_base")
+        if p_ and Path(p_).exists():
+            img = cv2.resize(cv2.imread(p_), (512, 512))
+            break
+    if img is None:
+        img = _icon(cfg, map_name)
+    if img is None:
+        if not callouts:
+            return ""
+        img = np.full((512, 512, 3), 246, np.uint8)
+        for c in callouts:
+            cv2.circle(img, (int(c["x"] * 512), int(c["y"] * 512)), 3, (196, 196, 196), -1, cv2.LINE_AA)
+            if c.get("super") in CORE and str(c.get("name", "")).lower() == "site":
+                cv2.putText(img, c["super"], (int(c["x"] * 512) - 30, int(c["y"] * 512) + 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (150, 150, 150), 2, cv2.LINE_AA)
+    img = (img.astype(np.float32) * 0.55 + 255 * 0.45).astype(np.uint8)
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    return "data:image/jpeg;base64," + base64.b64encode(buf).decode() if ok else ""
+
+
+def motion_slides(cfg: dict, map_name: str, prs: dict, rows: list[dict], calls: list[dict],
+                  foot: str, k: int = 3) -> list[str]:
+    """「動きで見る」スライド（攻守それぞれ、よく使う型を 3 つまで）。"""
+    bg = map_data_uri(cfg, map_name, rows, calls)
+    if not bg:
+        return []
+    out = []
+    for side in (ATTACK, DEFENSE):
+        figs = []
+        for g in prs[side]:
+            if g["kind"] in ("Pistol", "AntiEco", "Eco", "PostPlant"):
+                continue
+            fr = motion_frames(g, calls, side)
+            if fr:
+                figs.append(motion_html(g, fr, bg))
+            if len(figs) >= k:
+                break
+        if figs:
+            out.append(_slide(SIDE_EN[side], f"動きで見る（{'攻め' if side == ATTACK else '守り'}）",
+                              f'<div class="cols3">{"".join(figs)}</div>'
+                              '<p class="sub">節目（1:30・1:15・1:00・0:40・設置後）の平均の位置を結んだ動きです。'
+                              '名札は 1:15 の担当。実際のラウンドの動きは、型ごとの見本の動画で見てください。</p>', foot))
+    return out
 
 
 def _fig(src, cap: str) -> str:
@@ -1633,6 +1899,30 @@ def build_cheatsheet(cfg: dict, key: dict, rows: list[dict], prs: dict, out_dir:
     return f
 
 
+def export_positions(cfg: dict, key: dict, prs: dict, calls: list[dict], out_dir: Path) -> Path:
+    """型ごとの立ち位置と動きを JSON に出す（Valotactics など別のツールで描き直す用）。
+
+    座標は valorant-api のマップ画像の 0..1（左上が 0,0）。この形式はこのリポジトリ独自のもので、
+    Valotactics の読み込み形式とは別。コールアウトの座標も一緒に入れてある。
+    """
+    data = {"map": key["map"], "title": key["title"], "comp": key.get("comp") or [],
+            "note": "座標は valorant-api のマップ画像の 0..1。marks は節目、dots は駒の道。",
+            "callouts": [{"name": n, "x": round(x, 4), "y": round(y, 4)}
+                         for n, (x, y) in sorted(_area_xy(calls).items())],
+            "types": []}
+    for side, label in ((ATTACK, "attack"), (DEFENSE, "defense")):
+        for g in prs[side]:
+            fr = motion_frames(g, calls, side)
+            data["types"].append({
+                "side": label, "name": g["name"], "kind": g["kind"], "n": g["n"], "win": g["w"],
+                "todo": g.get("todo"), "spread": g.get("spread") or {},
+                "arrows": [{"from": a, "to": b} for a, b in row_arrows(g, side)],
+                "marks": (fr or {}).get("marks") or [], "dots": (fr or {}).get("dots") or []})
+    f = out_dir / f"{key['slug']}_positions.json"
+    f.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    return f
+
+
 def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir: Path, log=print) -> Path:
     """1 つのプレイブック（team × map × comp、または comp × map）。"""
     from . import tactics
@@ -1656,7 +1946,9 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
 
     prs = {sd: playbook_rows([r for r in rows if r["side"] == sd], sd) for sd in (DEFENSE, ATTACK)}
     slides += howto_slides(cfg, key, rows, prs, foot)
+    slides += motion_slides(cfg, map_name, prs, rows, calls, foot)
     cheat = build_cheatsheet(cfg, key, rows, prs, out_dir)
+    export_positions(cfg, key, prs, calls, out_dir)
 
     for side in (DEFENSE, ATTACK):
         srows = [r for r in rows if r["side"] == side]
@@ -1873,7 +2165,8 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
             f'<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&display=swap" rel="stylesheet">'
             f'<style>{CSS}</style></head><body><main class="deck"><div class="toolbar">'
             f'<p><a href="index.html">← 一覧</a>　<a href="{_e(cheat.name)}">📄 まず覚えること（A4 1 枚・印刷用）</a></p>'
-            f'<p>印刷（PDF 保存）すると 1 スライド 1 ページになります</p></div>{"".join(slides)}</main></body></html>')
+            f'<p>印刷（PDF 保存）すると 1 スライド 1 ページになります</p></div>{"".join(slides)}</main>'
+            f'{MOTION_JS}</body></html>')
     f = out_dir / f"{slug}.html"
     f.write_text(page, encoding="utf-8")
     data = {"key": {k: v for k, v in key.items() if k != "rows"}, "rounds": len(rows),

@@ -75,6 +75,8 @@ def _plan(n: int, rnd: random.Random) -> dict:
     else:
         site = "A" if n % 2 else "B"
     plant_e = {0: 22, 1: 45, 2: 70}[n % 3]
+    if site != zone and zone in ("A", "B"):
+        plant_e = 45                      # 見せてから別のサイトに行くラウンドはラッシュにしない
     return {"atk": atk, "def": dfd, "site": site, "plant_e": plant_e,
             "push": n in (8, 20), "planted": n not in (4, 9, 16, 21)}
 
