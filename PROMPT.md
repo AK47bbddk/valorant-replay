@@ -118,8 +118,10 @@ Notion に次の 2 つのデータソースがすでにある。新しい DB は
      型ごとの立ち位置・矢印・駒の道は `<slug>_positions.json`（valorant-api のマップ画像の 0..1 座標）にも書き出す。
      さらに作戦ボードアプリ **TactiVal**（schemaVersion 3）のボードを型ごとに 1 ファイル書き出す（`vreplay/tactival.py`）。
      節目がそのまま step（label・transition・hold）になり、駒は `{"type": "agent", "x", "y", "data": {"agentId"}}`。
-     雛形はアプリの書き出しを同梱し、マップごとの座標合わせ（スポーンに 2 体置いたボード →
-     `vreplay tactival --calibrate`）が済んだマップだけ書き出す。
+     雛形はアプリの書き出しを同梱。座標はアプリの絵＝valorant-api の displayIcon を 90 度単位で回したもの
+     （ボードの (448, 28) に 1024 四方）なので、`tactival.MAP_ROT` と `exact_calib()` で 13 マップとも計算で決まる
+     （手で合わせ直すときだけ `vreplay tactival --board` → `--calibrate`）。valorant-api の Sunset の
+     コールアウトは係数がずれているので `tactics.CALLOUT_FIX` で displayIcon の床に戻す。
      型ごとに「真似する難しさ（やさしい／ふつう／むずかしい）とそろえておくこと」と、
      「見本の動画（vs SEN R7・1:23:45 から）」を出す（スキルの出し方は映像でしか分からないため）。
      あわせて A4 1 枚のチートシート `<slug>_cheat.html`（手順・読み合い・そろってから使う型・用語）を作り、冊子からリンクする。

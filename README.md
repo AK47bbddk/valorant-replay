@@ -201,7 +201,7 @@ os.environ['VREPLAY_CONFIG'] = '/content/drive/MyDrive/valorant-replay/config.ya
 | `backfill --from 2024-01-01 --to 2026-12-31` | VLR の結果一覧をさかのぼり、試合メタデータを SQLite に入れる（動画なし・Tier1 中心） |
 | `batch --limit 20` | DB の未処理マップを動画解析する（再開可能） |
 | `playbook [--sync] [--team G2] [--map Split]` | チーム × マップ × 構成ごとのプレイブック（スライド HTML）を作る。`--sync` で過去の report.json も取り込む |
-| `tactival --calibrate <file.json> --map Sunset` | TactiVal の座標合わせ（スポーンに駒を 2 体置いて書き出したボードを渡す。マップごとに 1 回） |
+| `tactival --calibrate <file.json> --map Haven` | TactiVal の座標合わせを手でやり直す（13 マップとも計算した値を同梱しているので、ふだんは不要） |
 | `sync` | 既存の `report.json` をまとめて DB に入れる |
 | `stats` | DB の件数を表示 |
 
@@ -279,32 +279,25 @@ Notion にも書きます（親ページをインテグレーションに共有�
   節目（1:30 → 1:15 → 1:00 → 0:40 → 設置後）がそのまま TactiVal の **step** になるので、
   アプリの中で再生・編集できます。駒はエージェントのアイコン付き（`patchSnapshot.agents` の uuid を使用）。
 
-  **マップごとに 1 回だけ座標合わせが要ります**（アプリのマップはベクター画像で、valorant-api の
-  座標とは原点も倍率も違い、**回っていることもあります**。Split は 92.9 度回っていました）。
-  Split（4 点・ずれ 36px・回転 92.9 度）と Sunset（4 点・ずれ 37px・回転 5.7 度）は
-  合わせ済みのものを同梱しています。
-  ほかのマップは `vreplay tactival --board --map Haven` で座標合わせ用のボードを作り、
-  次の約束で駒を置いて書き出してから、
+  **座標合わせは 13 マップとも済んでいて、手で駒を置く必要はありません**。アプリの中を調べると、
+  マップの絵（`/maps/minimap/<Map>.png` と、それをなぞったベクター `/maps/vector/<id>.json`）は
+  **valorant-api の displayIcon を 90 度単位で回しただけ**のもので、ボード（1920×1080）の
+  **(448, 28) に 1024×1024** で置かれていました（距離の換算も `100 × multiplier × 1024`）。
+  13 マップとも、displayIcon の不透明部分とベクターの外接矩形が 1〜2px 以内で一致します。
+  なので 0..1 → ボードは「回転（`tactival.MAP_ROT`：Abyss・Ascent・Corrode・Haven・Split は
+  反時計回りに 270 度、Icebox は 90 度、ほかは 0 度）× 1024 ＋ (448, 28)」で決まり、
+  `tactival.exact_calib()` で計算した値を `vreplay/data/tactival_calib.json` に同梱しています。
+  Haven・Icebox・Ascent・Lotus・Sunset・Corrode は、スポーンとサイトに置いた駒をアプリで開いて確かめました。
 
-  | エージェント | 置く場所 |
-  |---|---|
-  | Jett | 攻撃側スポーン |
-  | Sage | 防衛側スポーン |
-  | Omen | A サイト（設置点のあたり） |
-  | Viper | B サイト |
-  | Cypher | C サイト（3 サイトのマップだけ） |
+  **Sunset のコールアウト**：valorant-api の Sunset の変換係数（xScalarToAdd 0.5 / yScalarToAdd 0.515625）は
+  ずれていて、スポーンが床の外・サイトが通路に落ちていました。`tactics.CALLOUT_FIX` で
+  displayIcon の床に戻しています（エリア名・地形合わせ・矢印のすべてに効きます）。
 
-  3 体以上あれば**アフィン変換（回転・鏡映・縦横の倍率）**で合わせます。TactiVal のマップは
-  valorant-api の画像に対して回っていることがあり（**Split は 90 度**）、倍率と原点だけでは合いません。
-  2 体だけだと回転が見られないので、必ず 3 体以上置いてください。そのうえで、
-
-  ```bash
-  vreplay tactival --calibrate tactival-sunset.json --map Sunset
-  ```
-
-  を 1 回実行すると、倍率と原点を計算して `output.dir/_cache/tactival_calib.json` に覚えます
-  （駒の `x`/`y` はアイコンの左上なので、真ん中に直してから合わせます）。
-  合わせていないマップは、位置がずれて誤解のもとになるのでボードを作りません。
+  アプリのマップが変わったとき（新マップ・改修）は、今までどおり手で合わせることもできます。
+  `vreplay tactival --board --map Haven` で座標合わせ用のボードを作り、アプリで開いて
+  Jett＝攻撃側スポーン／Sage＝防衛側スポーン／Omen＝A／Viper＝B（3 サイトなら Cypher＝C）に動かして書き出し、
+  `vreplay tactival --calibrate <書き出した.json> --map Haven` を実行すると
+  `output.dir/_cache/tactival_calib.json` に覚え、同梱の値より優先されます（3 体以上でアフィン変換）。
   雛形（`vreplay/data/tactival_template.json`）はアプリの書き出しをそのまま使っていて、
   `tactival.template` で新しいものに差し替えられます（パッチが進んだとき用）。
   型ごとの矢印（キーエリア → サイト、見せた場所 → 本命、取り返す場所 → サイト）も一緒に書き出します。

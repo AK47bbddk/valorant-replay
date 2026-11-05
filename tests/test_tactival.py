@@ -1,3 +1,4 @@
+import math
 """作戦ボードアプリ TactiVal 用の書き出し（schemaVersion 3）。"""
 import json
 
@@ -94,25 +95,30 @@ def test_board_turns_marks_into_steps(tmp_path):
     assert json.loads(json.dumps(b))                                     # JSON にできる
 
 
-def test_export_needs_calibration(tmp_path):
-    """座標合わせの済んでいないマップではボードを作らない。Split は既定値を同梱している。"""
+def test_export_needs_calibration(tmp_path, monkeypatch):
+    """座標の変換が無いマップではボードを作らない。今は 13 マップとも計算で出した変換を同梱している。"""
     from vreplay import deck as D
     frames = {"marks": ["1:15"], "dots": [{"label": "Viper", "xy": [[0.5, 0.5]]}]}
     prs = {D.ATTACK: [{"name": "B Link テイクデフォ", "kind": "Default"}], D.DEFENSE: []}
     cfg = {"output": {"dir": str(tmp_path)}}
-    msgs = []
     haven = {"map": "Haven", "slug": "h", "title": "T"}
-    assert TV.export(cfg, haven, prs, tmp_path, lambda g, s: frames, log=msgs.append) == []
-    assert any("座標合わせ" in m for m in msgs)
-    TV.save_calib(cfg, "haven", {"scale": 1000.0, "ox": 0.0, "oy": 0.0})
+    # 何もしなくても Haven も作れる（真ん中の駒は、マップの真ん中＝(960, 540) の駒の左上に置かれる）
     out = TV.export(cfg, haven, prs, tmp_path, lambda g, s: frames, log=lambda *a: None)
     assert len(out) == 1 and out[0].name.endswith(".tactival.json")
     b = json.loads(out[0].read_text("utf-8"))
-    assert b["mapId"] == "haven" and b["steps"][0]["elements"][0]["data"]["agentId"]
-    # Split は同梱の既定値があるので、何もしなくても作れる
-    split = {"map": "Split", "slug": "s", "title": "T"}
-    assert TV.load_calib(None).get("split", {}).get("m")
-    assert TV.export(cfg, split, prs, tmp_path, lambda g, s: frames, log=lambda *a: None)
+    el = b["steps"][0]["elements"][0]
+    assert b["mapId"] == "haven" and el["data"]["agentId"]
+    assert abs(el["x"] + 24 - 960) < 1 and abs(el["y"] + 24 - 540) < 1
+    # 自分で合わせた値があればそちらが優先
+    TV.save_calib(cfg, "haven", {"scale": 1000.0, "ox": 0.0, "oy": 0.0})
+    b = json.loads(TV.export(cfg, haven, prs, tmp_path, lambda g, s: frames, log=lambda *a: None)[0]
+                   .read_text("utf-8"))
+    assert abs(b["steps"][0]["elements"][0]["x"] + 24 - 500) < 1
+    # 変換が無ければ作らずに知らせる
+    monkeypatch.setattr(TV, "load_calib", lambda cfg: {})
+    msgs = []
+    assert TV.export(cfg, haven, prs, tmp_path, lambda g, s: frames, log=msgs.append) == []
+    assert any("座標合わせ" in m for m in msgs)
 
 
 def _agent_at(agent, x, y, tpl=None):
@@ -186,10 +192,38 @@ def test_calib_board_for_any_map():
     assert abs(b2["steps"][0]["elements"][0]["x"] - (x - 24)) < 0.1
 
 
-def test_bundled_calibration_has_split_and_sunset():
+def test_bundled_calibration_is_exact_for_every_map():
+    """アプリの絵＝displayIcon を 90 度単位で回したもの、が (448, 28) に 1024 四方。13 マップぶん同梱。"""
     c = TV.load_calib(None)
-    assert c["split"]["points"] == 4 and abs(c["split"]["rotation"] - 92.9) < 0.1
-    assert c["sunset"]["points"] == 4 and abs(c["sunset"]["rotation"] - 5.7) < 0.1
+    assert set(TV.MAP_ROT) <= set(c) and len(TV.MAP_ROT) == 13
+    for mid in TV.MAP_ROT:
+        assert c[mid] == TV.exact_calib(mid)
+    # 回さないマップ：左上 → (448, 28)、右下 → (1472, 1052)
+    assert TV.to_px(0, 0, c["sunset"]) == (448.0, 28.0) and TV.to_px(1, 1, c["sunset"]) == (1472.0, 1052.0)
+    # Split は反時計回りに 270 度（＝時計回りに 90 度）：画像の右上が、ボードの右下へ
+    assert TV.to_px(1, 0, c["split"]) == (1472.0, 1052.0) and c["split"]["rotation"] == 90.0
+    # Icebox は反時計回りに 90 度：画像の右上が、ボードの左上へ
+    assert TV.to_px(1, 0, c["icebox"]) == (448.0, 28.0)
+    # 4 隅は回してもマップの枠（448..1472, 28..1052）から出ない
+    for mid in TV.MAP_ROT:
+        for u, v in ((0, 0), (1, 0), (0, 1), (1, 1)):
+            x, y = TV.to_px(u, v, c[mid])
+            assert x in (448.0, 1472.0) and y in (28.0, 1052.0)
+
+
+def test_exact_split_agrees_with_the_hand_placed_board():
+    """以前に手で 4 点置いた Split の変換（ずれ 36px）と、計算で出した変換がおおむね一致する。"""
+    hand = {"m": [-50.9132, -1120.4466, 1583.6501, 991.0598, -71.9043, 85.7234]}
+    ex = TV.exact_calib("split")
+    for u, v in ((0.229, 0.125), (0.847, 0.549), (0.354, 0.867), (0.5, 0.5)):
+        a, b = TV.to_px(u, v, hand), TV.to_px(u, v, ex)
+        assert math.hypot(a[0] - b[0], a[1] - b[1]) < 120   # 手で置いたぶんのずれ（平均 36px）
+
+
+def test_user_calibration_still_wins():
+    cfg = {"output": {"dir": "/nonexistent"}, "tactival": {"calibration": {"haven": {"scale": 1.0, "ox": 0, "oy": 0}}}}
+    assert TV.load_calib(cfg)["haven"] == {"scale": 1.0, "ox": 0, "oy": 0}
+    assert TV.load_calib(cfg)["lotus"] == TV.exact_calib("lotus")
 
 
 def test_arrows_use_the_app_format():
@@ -231,7 +265,22 @@ def test_arrow_sample_from_template_keeps_the_style():
     assert "endBinding" not in el["data"]                 # 無い駒に結びつけない
 
 
-def test_bundled_sunset_is_now_four_points():
-    c = TV.load_calib(None)["sunset"]
-    assert c["points"] == 4 and c.get("m") and not c.get("approx")
-    assert c["rms"] < 45
+
+
+def test_sunset_callouts_are_corrected(monkeypatch):
+    """valorant-api の Sunset の係数はずれているので、コールアウトを displayIcon の床に戻す。他のマップはそのまま。"""
+    from vreplay import tactics as T
+    loc = {"x": 1000.0, "y": -2000.0}
+    data = [{"displayName": n, "displayIcon": "", "xMultiplier": 7.8e-05, "yMultiplier": -7.8e-05,
+             "xScalarToAdd": 0.5, "yScalarToAdd": 0.515625,
+             "callouts": [{"regionName": "Spawn", "superRegionName": "Defender Side", "location": loc}]}
+            for n in ("Sunset", "Split")]
+    monkeypatch.setattr(T, "_fetch_maps", lambda cfg, log=None: data)
+    raw = (-2000.0 * 7.8e-05 + 0.5, 1000.0 * -7.8e-05 + 0.515625)
+    sp = T.load_map("Split", {})["callouts"][0]
+    assert (round(sp["x"], 6), round(sp["y"], 6)) == (round(raw[0], 6), round(raw[1], 6))
+    su = T.load_map("Sunset", {})["callouts"][0]
+    a, b, c, d, e, f = T.CALLOUT_FIX["sunset"]
+    assert abs(su["x"] - (a * raw[0] + b * raw[1] + c)) < 1e-9
+    assert abs(su["y"] - (d * raw[0] + e * raw[1] + f)) < 1e-9
+    assert T.load_map("Sunset", {})["spawns"]          # スポーンも補正後の位置で取れる

@@ -13,13 +13,21 @@ TactiVal の 1 ボード＝1 作戦にする。節目（1:30 → 1:15 → 1:00 �
   - `patchSnapshot.agents` が uuid → 表示名、`patchSnapshot.maps` が mapId → {name, multiplier}
 
 **座標の基準（マップごとの calibration）**
-x・y はアプリのマップ（ベクター画像）のピクセルで、valorant-api の 0..1 とは原点も倍率も違う。
-対応表は公開されていないので、マップごとに 1 回だけ合わせる：
-アプリで**攻撃側スポーンと防衛側スポーンのちょうど上に駒を 1 体ずつ置いたボード**を書き出し、
+x・y はボードのピクセル（1920×1080 の論理座標）。アプリはマップの絵を (448, 28) に
+1024×1024 で置き、その絵（`/maps/minimap/<Map>.png` と、それをなぞったベクター
+`/maps/vector/<id>.json`）は **valorant-api の displayIcon を 90 度単位で回しただけ**のもの
+（13 マップとも、輪郭の外接矩形が 1〜2px 以内で一致することを確かめた）。
+距離も `100 × multiplier × 1024`（multiplier は valorant-api の xMultiplier と同じ）なので、
+valorant-api の 0..1 → ボードは「90 度単位の回転 ×1024 + (448, 28)」で**ぴったり**決まる。
+その回転を `MAP_ROT` に持ち、`exact_calib()` で全マップぶんの変換を作って同梱している。
 
-    vreplay tactival --calibrate <書き出した.json> --map Sunset
+アプリのマップが差し替わったとき（新マップ・改修）は、今までどおり手で合わせることもできる：
+座標合わせ用のボード（`vreplay tactival --board --map Haven`）をアプリで開き、駒を
+スポーン・サイトに動かして書き出してから
 
-を実行すると、倍率と原点を計算して `output.dir/_cache/tactival_calib.json` に覚える。
+    vreplay tactival --calibrate <書き出した.json> --map Haven
+
+を実行すると `output.dir/_cache/tactival_calib.json` に覚え、同梱の値より優先される。
 合わせていないマップのボードは（位置がずれて誤解のもとになるので）書き出さない。
 """
 from __future__ import annotations
@@ -82,10 +90,34 @@ def calib_path(cfg: dict) -> Path:
 
 BUNDLED_CALIB = Path(__file__).parent / "data" / "tactival_calib.json"
 
+# アプリのマップの絵が、valorant-api の displayIcon を何回 90 度回したものか
+# （k 回：(u, v) → (v, 1 - u)＝反時計回りに 90 度を k 回。ベクターの外接矩形と displayIcon の不透明部分で確かめた）
+MAP_ROT = {"abyss": 3, "ascent": 3, "bind": 0, "breeze": 0, "corrode": 3, "fracture": 0,
+           "haven": 3, "icebox": 1, "lotus": 0, "pearl": 0, "split": 3, "summit": 0, "sunset": 0}
+MAP_ORIGIN = (448.0, 28.0)          # アプリがマップの絵を置く位置（論理座標 1920×1080 の中）
+MAP_SIZE = 1024.0
+
+
+def exact_calib(mid: str) -> dict | None:
+    """valorant-api の 0..1 → ボードのピクセル（回転は 90 度単位、倍率 1024、原点 MAP_ORIGIN）。"""
+    k = MAP_ROT.get(str(mid).lower())
+    if k is None:
+        return None
+    # (u, v) を k 回 (v, 1-u) に回した先を、u・v の 1 次式 [a, b, c] で持つ
+    fu, fv = [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]
+    for _ in range(k % 4):
+        fu, fv = fv, [-fu[0], -fu[1], 1.0 - fu[2]]
+    ox, oy = MAP_ORIGIN
+    m = [MAP_SIZE * fu[0], MAP_SIZE * fu[1], MAP_SIZE * fu[2] + ox,
+         MAP_SIZE * fv[0], MAP_SIZE * fv[1], MAP_SIZE * fv[2] + oy]
+    return {"m": [round(v, 4) + 0.0 for v in m], "rms": 0.0, "points": 0, "exact": True,
+            "rotation": round(math.degrees(math.atan2(m[3], m[0])), 1),
+            "note": f"displayIcon を反時計回りに {90 * (k % 4)} 度回した絵が ({ox:g}, {oy:g}) に 1024 四方で置かれる"}
+
 
 def load_calib(cfg: dict | None) -> dict:
-    """{mapId: 変換}。同梱の既定値 < 自分で合わせたもの < config の tactival.calibration。"""
-    out = {}
+    """{mapId: 変換}。計算で出した既定値 < 同梱 < 自分で合わせたもの < config の tactival.calibration。"""
+    out = {mid: exact_calib(mid) for mid in MAP_ROT}
     try:
         if BUNDLED_CALIB.exists():
             out.update(json.loads(BUNDLED_CALIB.read_text("utf-8")))
@@ -165,7 +197,7 @@ def calibrate(data: dict, meta: dict, tpl: dict | None = None) -> dict:
             raise ValueError("置いた駒が一直線で、向きを決められません")
         err = sum(math.hypot(m[0] * q[0][0] + m[1] * q[0][1] + m[2] - q[1][0],
                              m[3] * q[0][0] + m[4] * q[0][1] + m[5] - q[1][1]) for q in pairs) / len(pairs)
-        return {"m": [round(v, 4) for v in m], "rms": round(err, 2), "points": len(pairs),
+        return {"m": [round(v, 4) + 0.0 for v in m], "rms": round(err, 2), "points": len(pairs),
                 "rotation": round(math.degrees(math.atan2(m[3], m[0])), 1)}
     # 2 点：1 つの倍率で合わせる（スポーンが縦に並ぶマップでは横の精度が落ちる）
     if len(pairs) == 2:

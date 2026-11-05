@@ -36,6 +36,11 @@ GRID = 16
 WARM_RANGES = [((0, 70, 90), (14, 255, 255)), ((160, 70, 90), (179, 255, 255))]
 COOL_RANGES = [((78, 50, 70), (108, 255, 255))]   # 青緑（H≈85〜95）。背景の青（H≈115）は含めない
 SITE_SUPERS = {"A", "B", "C"}
+# valorant-api の変換係数（xScalarToAdd など）がずれていて、コールアウトが displayIcon の床から
+# 外れるマップの補正（0..1 → 0..1 のアフィン [a, b, c, d, e, f]：x' = a x + b y + c, y' = d x + e y + f）。
+# Sunset は係数が仮の値（0.5 / 0.515625）らしく、スポーンが床の外・サイトが通路に落ちていた。
+# TactiVal で 4 点（両スポーン・A・B）に駒を置いたボードと、TactiVal の絵＝displayIcon という対応から出した。
+CALLOUT_FIX = {"sunset": (1.0029, -0.0801, 0.1319, 0.1005, 1.0385, -0.1653)}
 
 
 # ---------------------------------------------------------------- API メタデータ
@@ -89,6 +94,9 @@ def load_map(name: str, cfg: dict, log=None) -> dict | None:
         x, y = float(loc.get("x") or 0), float(loc.get("y") or 0)
         # valorant-api の変換は x と y が入れ替わる：画像の横 = ゲームの y、画像の縦 = ゲームの x
         nx, ny = (y * xm + xa, x * ym + ya) if xm or ym else (x, y)
+        fix = CALLOUT_FIX.get(_norm(m.get("displayName", "")))
+        if fix and (xm or ym):
+            nx, ny = (fix[0] * nx + fix[1] * ny + fix[2], fix[3] * nx + fix[4] * ny + fix[5])
         raw.append((nx, ny, c.get("regionName") or "", c.get("superRegionName") or ""))
     xs = [p[0] for p in raw]
     ys = [p[1] for p in raw]
