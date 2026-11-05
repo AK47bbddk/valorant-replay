@@ -141,7 +141,7 @@ def test_calibrate_with_four_named_targets():
 def test_calibrate_uses_the_icon_centre():
     """駒の x/y は左上なので、真ん中に直してから合わせる。"""
     meta = _meta()
-    s, ox, oy = 1000.0, 0.0, 0.0
+    s = 1000.0
     tg = TV._targets(meta)
     els = [_agent_at("jett", tg["spawn:攻撃"][0] * s, tg["spawn:攻撃"][1] * s),
            _agent_at("sage", tg["spawn:防衛"][0] * s, tg["spawn:防衛"][1] * s)]
