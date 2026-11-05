@@ -25,8 +25,10 @@ FIX = Path(__file__).resolve().parent / "fixtures"
 ATK_SETS = [
     ["B Link", "B Link", "Mid Bottom", "Mid Top", "A Main"],            # B 取りに行く
     ["Mid Top", "Mid Vent", "Mid Mail", "A Main", "B Lobby"],           # MID に 3 人
-    ["A Ramps", "A Ramps", "A Main", "Mid Top", "B Lobby"],             # A 取りに行く
+    ["A Ramps", "A Ramps", "Mid Mail", "Mid Top", "B Lobby"],           # A 取りに行く
 ]
+# サイトに入る前に取り直す手前のエリア（後取り）
+APPROACH = {"A": "A Main", "B": "B Link", "C": "C Main"}
 DEF_SETS = [
     ["A Site", "A Screens", "Mid Vent", "B Site", "B Garage"],          # 守りデフォ
     ["B Site", "B Site", "B Garage", "Mid Vent", "A Site"],             # B に 3 人
@@ -99,7 +101,9 @@ def _dots(n: int, t0: float, plan: dict, ar: dict, atk_no: int, out: list) -> No
     put(25, atk_no, atk)                                     # 1:15：5 人そろう
     put(25, 3 - atk_no, dfd)
     push = ["B Lobby", "B Lobby"] if plan["push"] else []
-    put(40, atk_no, atk[:3] + [f"{site} Site", f"{site} Site"])          # 1:00
+    # 1:00（遅い設置のラウンドは、1:15 で取っていなかった手前のエリアを取り返す＝後取り）
+    back = [APPROACH[site]] * 2 if plan["plant_e"] >= 60 and APPROACH[site] not in atk else []
+    put(40, atk_no, atk[:3] + (back or [f"{site} Site", f"{site} Site"]))
     put(40, 3 - atk_no, (push + dfd[2:]) if push else dfd)
     # 0:40：攻めはサイト、守りは MID から人を減らしてサイトで受ける
     put(60, atk_no, [f"{site} Site"] * 4 + ["Mid Top"])

@@ -235,6 +235,8 @@ def test_setup_name_follows_the_coach():
     assert tactics.setup_name({"A": 1, "Mid": 1, "B": 3}, "防衛", area="B Site", ranks=ranks) == "B 3人守り"
     assert tactics.setup_name({"A": 1, "Mid": 2, "B": 2}, "防衛", area="Mid Vent", ranks=ranks) == "mid focus"
     assert tactics.setup_name({"A": 2, "Mid": 1, "B": 2}, "防衛", area="A Site", ranks=ranks) == "守りデフォ（2-1-2）"
+    # どのゾーンにも 2 人いない散った形
+    assert tactics.setup_name({"A": 1, "Mid": 1, "B": 1, "C": 1}, "防衛") == "広がる配置（1-1-1・MID1）"
     assert tactics.setup_name({"A": 1, "Mid": 1, "B": 3}, "防衛", area="B Lobby", ranks=ranks) == "B Lobby 前目"
     # 攻めはキーエリアが決まらなければ「<形> <ゾーン> default」
     assert tactics.setup_name({"A": 1, "Mid": 3, "B": 1}, "攻撃") == "1-3-1 MID default"

@@ -103,7 +103,8 @@ Notion に次の 2 つのデータソースがすでにある。新しい DB は
 5. **プレイブック（`vreplay/deck.py`、スライド HTML）**：お手本は「Split G2 Comp PlayBook」。**チーム × マップ × 構成** ごと（と 2 マップ以上の **構成 × マップ**）に作る。
    - 初動の配置タグを**同じ名前（キーエリア）**でまとめた型のスライド（回数・勝率・初動のファイトの場所・設置サイト・例）。
      「#1/#2」の番号は付けず、1 ラウンドだけの型は人数の差（A/MID/B の L1 距離）1 以内の近い型（同じキーエリアを優先）か「その他」に入れ、
-     攻守それぞれ多い順に 6 つほどまで。ピストル・エコはデフォルトの集計から外し、「Pistol」「Anti eco」の行にする。
+     攻守それぞれ多い順に 6 つほどまで。ピストル・エコはデフォルトの集計から外し、「Pistol」「Anti eco」「Eco」の行にする
+     （その行の本文には、その中での 2 巡目の攻め方を出す）。
    - 表紙 → Defender Strategy（**strong point ①②③ / weak point ①②**）→ Defenders Concept（節目ごとのゾーン人数・方針文・位置の重ね合わせ画像）→
      Default 一覧（キーエリアごとの型・「<場所> 前目」）→ リテイク・カウンター（「<サイト> ファストリテイク」「<サイト> 遅いリテイク」「<場所> カウンター」「タイミングプッシュ」）→
      ピストル・アンチエコ → How to Retake A/B → Attacker Strategy → Attackers Concept → Default 一覧 →
@@ -141,8 +142,9 @@ vreplay playbook --sync --team G2 --map Split
   それでもだめなら、書けなかった側だけ従来の箇条書き（strong / weak point）に戻す（全部か無しかにしない）。
 - **Notion 版**（`vreplay/notion_playbook.py`）：親ページの下に「{map} {tag} Comp PlayBook」。`# 概要` → ATK summary → ATK のデータベース →
   DEF summary → DEF のデータベース → メモ。行 = 型（「B Main テイクデフォ」「A execution」「B ラッシュ」「A ファストリテイク」
-  「タイミングプッシュ」「Pistol」「Anti eco」）。プロパティは 種類（Default／Execute／Split／Rush／PostPlant／Retake／Counter／Push／
-  Pistol／AntiEco）・回数・勝率・購入（ピストルでない型に Pistol は付けない）・形（「1-3-1」「A1 Mid3 B1」）・言及（解説の言葉。形とは分ける）、
+  「タイミングプッシュ」「Pistol」「Anti eco」「Eco」）。プロパティは 種類（Default／Execute／Split／Rush／PostPlant／Retake／
+  Counter／Push／Pistol／AntiEco／Eco）・回数・勝率・購入（ピストルでない型に Pistol は付けない）・形（「1-3-1」「A1 Mid3 B1」）・
+  言及（解説の言葉。形とは分ける）、
   行のページは左に説明、右に位置の画像、その下に例のラウンドの動画（最大 3 本）。各動画のすぐ下にトグル「このラウンドの分析」を置き、
   畳んだ中に組み立て・初動の形・攻め先・相手の形と、試合ページのラウンドと同じ中身（勝因・開始時のミニマップ・ミニマップ GIF・
   開始時の配置図・購入と武器・キル・ULT・装備表・キルフィード）を入れる（`notion.round_blocks(..., flat=True)`。トグルの中に

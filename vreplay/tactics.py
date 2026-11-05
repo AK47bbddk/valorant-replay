@@ -733,7 +733,8 @@ def setup_name(zones: dict, side: str | None, area: str | None = None, ranks: di
     """初動のゾーン別人数とキーエリアから、コーチの書き方に合わせた型の名前。
 
     攻め：「<キーエリア> テイクデフォ」（決まらなければ「<形> <ゾーン> default」）
-    守り：「<場所> 前目」「<サイト> 3人守り」「mid focus」「守りデフォ（<形>）」
+    守り：「<場所> 前目」「<サイト> 3人守り」（＝<サイト>強気）「mid focus」「守りデフォ（<形>）」
+    　　　どのゾーンにも 2 人いない散った形は「広がる配置（<形>）」
     """
     r = {k: int(v) for k, v in (zones or {}).items() if k in CORE_ZONES and v}
     if code is None:
@@ -752,6 +753,8 @@ def setup_name(zones: dict, side: str | None, area: str | None = None, ranks: di
         return f"{top_z} 3人守り"
     if r.get("Mid", 0) >= 2:
         return "mid focus"
+    if r and max(r.values()) <= 1:
+        return f"広がる配置（{code}）" if code else "広がる配置"
     return f"守りデフォ（{code}）" if code else "守りデフォ"
 
 

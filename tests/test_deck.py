@@ -83,7 +83,7 @@ def test_pistol_and_eco_are_separate_rows(tmp_path, monkeypatch):
     for side in (deck.ATTACK, deck.DEFENSE):
         prs = deck.playbook_rows([r for r in g2 if r["side"] == side], side)
         kinds = {g["kind"] for g in prs}
-        assert "Pistol" in kinds and "AntiEco" in kinds
+        assert {"Pistol", "AntiEco", "Eco"} <= kinds
         for g in prs:
             if g["kind"] != "Pistol":
                 assert "Pistol" not in g["buys"], g["name"]
@@ -101,9 +101,16 @@ def test_attack_sets_and_defense_rows(tmp_path, monkeypatch):
     names = [g["name"] for g in atk]
     assert any(n.endswith("テイクデフォ") for n in names)
     assert any("ラッシュ" in n for n in names) and any("execution" in n for n in names)
-    assert any("レイト" in n for n in names)
+    # 1:15 で取っていなかった手前のエリアを 1:05 以降に取り返すのは「後取り」
+    back = next(g for g in atk if g["name"].endswith("後取り"))
+    assert back["name"] == "A Main 後取り" and back["kind"] == "Execute"
+    assert not any("Site 後取り" in n for n in names)        # サイトに入るのは後取りではない
     assert any(n.endswith("ポストプラント") for n in names)
     assert all("（MID" not in n for n in names)              # 経路はタイトルに入れない
+    # ピストル・エコ・アンチエコは別の行にして、その中での攻め方を本文に出す
+    eco = next(g for g in atk if g["kind"] == "Eco")
+    assert all(deck.is_eco(r) for r in eco["rows"])
+    assert any("この中での攻め方" in x for x in eco["lines"])
     df = deck.playbook_rows([r for r in g2 if r["side"] == deck.DEFENSE], deck.DEFENSE)
     dn = [g["name"] for g in df]
     assert any("リテイク" in n for n in dn) and any("カウンター" in n for n in dn)

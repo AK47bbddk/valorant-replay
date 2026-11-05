@@ -37,7 +37,8 @@ CORE = ("A", "B", "C")
 ZONES = ("A", "Mid", "B", "C")
 GUN = {"full", "half", "semi-buy"}
 # データベースの「種類」の選択肢（Notion・HTML 共通）
-KINDS = ["Default", "Execute", "Split", "Rush", "PostPlant", "Retake", "Counter", "Push", "Pistol", "AntiEco"]
+KINDS = ["Default", "Execute", "Split", "Rush", "PostPlant", "Retake", "Counter", "Push", "Pistol", "AntiEco",
+         "Eco"]
 ECO = {"eco", "semi-eco"}
 K_SHRINK = 3.0
 MIN_N = 4
@@ -794,18 +795,41 @@ def _jaccard_groups(rows: list[dict], th: float = 0.5) -> list[list[dict]]:
 
 
 # ---------------------------------------------------------------- 攻めの 2 巡目のアクション
+def _area_zone(area: str | None) -> str | None:
+    """「A Ramps」→「A」。エリア名の頭のゾーン。"""
+    return next((z for z in CORE + ("Mid",) if str(area or "").startswith(z + " ")), None)
+
+
 def _shown(r: dict) -> tuple[str | None, str | None]:
     """1:15 に見せた場所（キーエリア）と、そのゾーン。"""
     su = r.get("setup") or {}
     area = su.get("area")
-    zone = su.get("area_zone")
-    if zone is None and area:
-        zone = next((z for z in CORE + ("Mid",) if str(area).startswith(z + " ")), None)
-    return area, zone
+    return area, su.get("area_zone") or _area_zone(area)
+
+
+def late_take(r: dict) -> str | None:
+    """後取り：1:15 では取っていなかった場所を、1:05〜設置前（相手のシグネチャーが戻る前後）に取る。
+
+    「Cメインテイク → Aメイン後取り → 最終セット」の 2 番目にあたる。設置サイト側の場所だけを見る。
+    """
+    site = r.get("plant_site")
+    if site not in CORE:
+        return None
+    early = set(((r.get("setup") or {}).get("areas") or {}))
+    lo = MARK_E["1:00"] - 5                           # 1:05（開幕のシグネチャーが戻るころ）
+    hi = float(r["plant_e"]) - 3 if r.get("plant_e") is not None else MARK_E["0:20"]
+    if hi <= lo:
+        return None
+    # サイトそのものに入るのは「後取り」ではなく最終セットなので数えない（取り直すのはメインなどの手前のエリア）
+    c = {a: v for a, v in key_areas(r, lo, hi).items()
+         if a not in early and _area_zone(a) == site and a.lower() != f"{site} site".lower()}
+    if not c:
+        return None
+    return max(c.items(), key=lambda kv: (kv[1], kv[0]))[0]
 
 
 def _set_kind(r: dict) -> tuple[str, str, str | None]:
-    """そのラウンドの 2 巡目のアクション（種類, 設置サイト, 見せた場所）。"""
+    """そのラウンドの 2 巡目のアクション（種類, 設置サイト, 名前に使う場所）。"""
     s, e = r["plant_site"], r["plant_e"]
     area, zone = _shown(r)
     fake = bool((r.get("branch") or {}).get("fake")) or (zone in CORE and s in CORE and zone != s)
@@ -813,6 +837,9 @@ def _set_kind(r: dict) -> tuple[str, str, str | None]:
         return "Rush", s, area
     if fake:
         return "Split", s, area or zone
+    back = late_take(r)
+    if back:
+        return "LateTake", s, back
     if e is not None and e >= 60:
         return "Late", s, area
     return "Execute", s, area
@@ -839,6 +866,8 @@ def sets(rows: list[dict], k: int = 8) -> list[dict]:
             name = f"{site} ラッシュ"
         elif kind == "Split":
             name = f"{shown[0][0] if shown else 'MID'} 捨て {site} スプリット"
+        elif kind == "LateTake":
+            name = f"{shown[0][0] if shown else site} 後取り"
         elif kind == "Late":
             name = f"{site} レイト"
         else:
@@ -846,7 +875,7 @@ def sets(rows: list[dict], k: int = 8) -> list[dict]:
         pe = [r["plant_e"] for r in rs if r["plant_e"] is not None]
         out.append({"name": name, "kind": "Rush" if kind == "Rush" else "Split" if kind == "Split" else "Execute",
                     "n": len(rs), "w": sum(r["win"] for r in rs), "rows": rs, "site": site,
-                    "shown": shown[0][0] if shown else None,
+                    "shown": shown[0][0] if shown else None, "set_kind": kind,
                     "plant": float(np.median(pe)) if pe else None,
                     "buys": Counter(r["buy"] for r in rs)})
     out.sort(key=lambda g: (-g["n"], g["name"]))
@@ -940,7 +969,8 @@ def def_sets(rows: list[dict], min_n: int = 2) -> list[dict]:
 # ---------------------------------------------------------------- ピストル・アンチエコ
 def buy_rows(rows: list[dict], min_n: int = 1) -> list[dict]:
     out = []
-    for name, kind, pick in (("Pistol", "Pistol", is_pistol), ("Anti eco", "AntiEco", is_anti_eco)):
+    for name, kind, pick in (("Pistol", "Pistol", is_pistol), ("Anti eco", "AntiEco", is_anti_eco),
+                             ("Eco", "Eco", is_eco)):
         rs = [r for r in rows if pick(r)]
         if len(rs) < min_n:
             continue
@@ -977,7 +1007,9 @@ def _lines_default(g: dict, side: str) -> list[str]:
 def _lines_set(g: dict) -> list[str]:
     out = [f"{g['n']} 回・勝ち {g['w']}（{_pct(_rate(g['w'], g['n']))}）"
            + (f"・設置 残り {_clock(100 - g['plant'])}" if g.get("plant") is not None else "")]
-    if g.get("shown") and g.get("site"):
+    if g.get("set_kind") == "LateTake" and g.get("shown"):
+        out.append(f"1:15 では取っていなかった {g['shown']} を 1:05 以降に取り返して {g['site']} へ（後取り）")
+    elif g.get("shown") and g.get("site"):
         out.append(f"見せた場所：{g['shown']}（1:15）→ 設置：{g['site']}")
     zs = [r["tl"].get("1:15") for r in g["rows"] if r["tl"].get("1:15")]
     if zs:
@@ -1025,6 +1057,10 @@ def _lines_plain(g: dict, side: str) -> list[str]:
         out.append("デフォルトのあと 1:15〜1:00 ごろに攻め側のエリアへ出たラウンド")
     if g.get("setups"):
         out.append("初動の形：" + "、".join(f"{t} {c}" for t, c in g["setups"].most_common(3)))
+    if g["kind"] in ("Pistol", "AntiEco", "Eco") and side == ATTACK:
+        acts = sets(g["rows"], k=3)
+        if acts:
+            out.append("この中での攻め方：" + "、".join(f"{a['name']} {a['n']}" for a in acts))
     if g.get("sites"):
         key = "設置サイト" if side == ATTACK else "設置されたサイト"
         out.append(f"{key}：" + "、".join(f"{s} {c}" for s, c in g["sites"].most_common()))
