@@ -87,6 +87,12 @@ def main():
     pb.add_argument("--no-llm", action="store_true", help="LLM の API キーがあっても要約を書かせない")
     pb.add_argument("--config")
 
+    tv = sub.add_parser("tactival", help="作戦ボードアプリ TactiVal 用の座標合わせ")
+    tv.add_argument("--calibrate", required=True,
+                    help="スポーンに駒を 1 体ずつ置いて書き出した TactiVal の JSON")
+    tv.add_argument("--map", required=True, help="そのボードのマップ名（例 Sunset）")
+    tv.add_argument("--config")
+
     rd = sub.add_parser("rounds", help="解析済みの report.json から Notion のラウンドDB を作る・更新する")
     rd.add_argument("--notion", help="ラウンドDB を置く親ページの URL（初回だけ。既定は config の notion.rounds_parent）")
     rd.add_argument("--from", dest="start", help="この日以降（YYYY-MM-DD）")
@@ -148,6 +154,23 @@ def main():
                    notion=nt, notion_parent=parent)
         if not a.team and not a.map:
             build(cfg, out / "stats", min_maps=a.min_maps)      # 以前の集計ページ（ヒートマップ・型の表）
+    elif a.cmd == "tactival":
+        import json as J
+
+        from . import tactics as T
+        from . import tactival as TV
+        data = J.loads(Path(a.calibrate).read_text("utf-8"))
+        meta = T.load_map(a.map, cfg, log=print)
+        if not meta:
+            raise SystemExit(f"{a.map} のコールアウトを valorant-api から取れませんでした")
+        tpl = TV.load_template(cfg)
+        mid = TV.map_id(tpl, a.map) or TV.map_id(tpl, data.get("mapId") or "")
+        if not mid:
+            raise SystemExit(f"TactiVal に {a.map} がありません")
+        c = TV.calibrate(data, meta)
+        path = TV.save_calib(cfg, mid, c)
+        print(f"{a.map}（{mid}）の座標合わせ：倍率 {c['scale']}・原点 ({c['ox']}, {c['oy']})"
+              f"・ずれ {c['rms']}px → {path}")
     elif a.cmd == "rounds":
         import os
         from . import notion_rounds as NR

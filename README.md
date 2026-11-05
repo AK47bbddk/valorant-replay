@@ -201,6 +201,7 @@ os.environ['VREPLAY_CONFIG'] = '/content/drive/MyDrive/valorant-replay/config.ya
 | `backfill --from 2024-01-01 --to 2026-12-31` | VLR の結果一覧をさかのぼり、試合メタデータを SQLite に入れる（動画なし・Tier1 中心） |
 | `batch --limit 20` | DB の未処理マップを動画解析する（再開可能） |
 | `playbook [--sync] [--team G2] [--map Split]` | チーム × マップ × 構成ごとのプレイブック（スライド HTML）を作る。`--sync` で過去の report.json も取り込む |
+| `tactival --calibrate <file.json> --map Sunset` | TactiVal の座標合わせ（スポーンに駒を 2 体置いて書き出したボードを渡す。マップごとに 1 回） |
 | `sync` | 既存の `report.json` をまとめて DB に入れる |
 | `stats` | DB の件数を表示 |
 
@@ -272,8 +273,25 @@ Notion にも書きます（親ページをインテグレーションに共有�
   5 人の駒が動くところを冊子の中で再生できます（`deck.motion_frames`、HTML に埋め込み・再生／一時停止つき）。
   名札は 1:15 の担当です。設置後の位置はそれ以前の節目に混ぜません。
 - **位置データの書き出し**：`<冊子名>_positions.json` に、型ごとの立ち位置・矢印・節目ごとの駒の道を
-  valorant-api のマップ画像の 0..1 座標で出します。Valotactics のような作図アプリで描き直したいときの材料です
-  （Valotactics の読み込み形式そのものではありません。形式は JSON の `note` に書いてあります）。
+  valorant-api のマップ画像の 0..1 座標で出します（このリポジトリ独自の形式。中身は JSON の `note` に）。
+- **TactiVal のボード**（`vreplay/tactival.py`）：作戦ボードアプリ [TactiVal](https://tactival.app/) に
+  読み込ませる JSON（`schemaVersion: 3`）を、型ごとに 1 ファイル出します（`playbook/tactival/`）。
+  節目（1:30 → 1:15 → 1:00 → 0:40 → 設置後）がそのまま TactiVal の **step** になるので、
+  アプリの中で再生・編集できます。駒はエージェントのアイコン付き（`patchSnapshot.agents` の uuid を使用）。
+
+  **マップごとに 1 回だけ座標合わせが要ります**（アプリのマップはベクター画像で、valorant-api の
+  座標とは原点も倍率も違うため）。TactiVal で**攻撃側スポーンと防衛側スポーンのちょうど上に
+  駒を 1 体ずつ置いたボード**を書き出して、
+
+  ```bash
+  vreplay tactival --calibrate tactival-sunset.json --map Sunset
+  ```
+
+  を 1 回実行すると、倍率と原点を計算して `output.dir/_cache/tactival_calib.json` に覚えます。
+  合わせていないマップは、位置がずれて誤解のもとになるのでボードを作りません。
+  雛形（`vreplay/data/tactival_template.json`）はアプリの書き出しをそのまま使っていて、
+  `tactival.template` で新しいものに差し替えられます（パッチが進んだとき用）。
+  矢印やスキルの置き方はまだ書き出しません（駒だけ）。
 - **見本の動画**：型ごとに「vs SEN R7（勝ち・1:23:45 から）」と時刻つきで並べます。
   スキル（スモークやフラッシュの位置）は映像からしか分からないので、そこは動画を見てもらう前提です。
 - **真似する難しさ**：型ごとに「やさしい／ふつう／むずかしい」と、そろえておくこと
@@ -563,6 +581,7 @@ pytest -q        # ネットワーク・GPU なしで通る（実放送の HUD �
 | `vreplay/notion_playbook.py` | プレイブックを Notion に（ATK / DEF のデータベース・型ごとのページ） |
 | `vreplay/deck.py` | チーム × マップ × 構成ごとのプレイブック（スライド HTML、型の行、strong / weak point の自動生成） |
 | `vreplay/howto.py` | 集計を初心者向けの手順に直す（型ごとの「やること」・5 人の役割と担当・構成の強み弱み・用語） |
+| `vreplay/tactival.py` | 作戦ボードアプリ TactiVal に読み込ませる JSON（型ごと・節目が step）と、マップごとの座標合わせ |
 | `vreplay/playbook.py` | 以前の集計ページ（チーム別・構成別のヒートマップと型の表） |
 | `vreplay/perf.py` | 処理時間と CPU・GPU・RAM の計測（ログ／HTML／JSON） |
 | `vreplay/report.py` | HTML レポート |

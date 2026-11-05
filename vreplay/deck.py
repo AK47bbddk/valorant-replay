@@ -1949,6 +1949,11 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
     slides += motion_slides(cfg, map_name, prs, rows, calls, foot)
     cheat = build_cheatsheet(cfg, key, rows, prs, out_dir)
     export_positions(cfg, key, prs, calls, out_dir)
+    try:                                  # 作戦ボードアプリ（TactiVal）に読み込ませる JSON
+        from . import tactival as TV
+        TV.export(cfg, key, prs, out_dir, lambda g, side: motion_frames(g, calls, side), log=log)
+    except Exception as e:
+        log(f"  TactiVal のボードを作れませんでした（{e}）")
 
     for side in (DEFENSE, ATTACK):
         srows = [r for r in rows if r["side"] == side]

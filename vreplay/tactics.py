@@ -105,6 +105,8 @@ def load_map(name: str, cfg: dict, log=None) -> dict | None:
         "icon": m.get("displayIcon"),
         "callouts": callouts,
         "spawns": _spawns(callouts),
+        # ゲーム内座標 ↔ 画像の 0..1 の係数（作戦ボードアプリ向けに戻すときに使う）
+        "scale": {"xm": xm, "ym": ym, "xa": xa, "ya": ya, "inside": bool(inside)},
     }
 
 

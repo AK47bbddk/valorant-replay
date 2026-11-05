@@ -24,4 +24,4 @@ vreplay = "vreplay.__main__:main"
 packages = ["vreplay"]
 
 [tool.setuptools.package-data]
-vreplay = ["data/*.npz"]
+vreplay = ["data/*.npz", "data/*.json"]
