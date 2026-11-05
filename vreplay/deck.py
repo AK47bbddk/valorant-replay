@@ -593,7 +593,7 @@ def intent_summary(rows: list[dict]) -> dict:
 
 
 def summary_data(rows: list[dict], base: list[dict]) -> dict:
-    """Claude に渡す集計（数字・型の名前・解説の一節）。"""
+    """LLM に渡す集計（数字・型の名前・解説の一節）。型の名前はプレイブックの行とそろえる。"""
     out = {"team": rows[0]["team"] if rows else None, "map": rows[0]["map"] if rows else None,
            "comp": list(rows[0]["comp"]) if rows else [], "maps": len({(r["match_id"], r["order"]) for r in rows})}
     for side in (DEFENSE, ATTACK):
@@ -603,10 +603,14 @@ def summary_data(rows: list[dict], base: list[dict]) -> dict:
             "rounds": len(srows),
             "metrics": [{"name": m["label"], "team": f"{m['w']}/{m['n']}", "league": _pct(m["base"])}
                         for m in ms if m["n"]],
-            "setups": [{"name": g["name"], "n": g["n"], "win": g["w"], "shape": g["shape"], "callouts": g["callouts"],
+            "setups": [{"name": g["name"], "kind": g["kind"], "n": g["n"], "win": g["w"],
+                        "shape": g.get("shape") or "", "code": g.get("code") or "",
+                        "area": g.get("area"), "callouts": g.get("callouts") or [],
                         "roles": g.get("roles") or ""}
-                       for g in setup_clusters(srows)],
-            "sets": [{"name": g["name"], "n": g["n"], "win": g["w"]} for g in sets(srows)] if side == ATTACK else [],
+                       for g in playbook_rows(srows, side) if g["kind"] in ("Default", "Push")],
+            "sets": [{"name": g["name"], "kind": g["kind"], "n": g["n"], "win": g["w"]}
+                     for g in playbook_rows(srows, side)
+                     if g["kind"] not in ("Default", "Push")],
             "caster": intent_summary(rows).get(side, {}),
         }
     return out
