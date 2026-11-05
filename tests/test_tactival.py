@@ -189,28 +189,49 @@ def test_calib_board_for_any_map():
 def test_bundled_calibration_has_split_and_sunset():
     c = TV.load_calib(None)
     assert c["split"]["points"] == 4 and abs(c["split"]["rotation"] - 92.9) < 0.1
-    assert c["sunset"]["approx"] is True and c["sunset"]["points"] == 2
+    assert c["sunset"]["points"] == 4 and abs(c["sunset"]["rotation"] - 5.7) < 0.1
 
 
-def test_arrows_are_written_only_when_the_template_shows_how():
-    """矢印の形は雛形から学ぶ。例が無ければ矢印は入れない。"""
+def test_arrows_use_the_app_format():
+    """矢印は始点が x/y、終点が data.x2/y2、width/height は差の絶対値（アプリの書き出しと同じ）。"""
     frames = {"marks": ["1:15", "設置後"],
               "dots": [{"label": "Viper", "xy": [[0.3, 0.3], [0.5, 0.5]]}]}
     calib = {"scale": 1000.0, "ox": 0.0, "oy": 0.0}
-    areas_xy = {"B Link": (0.2, 0.2), "B Site": (0.8, 0.8)}
+    areas_xy = {"B Link": (0.2, 0.2), "B Site": (0.8, 0.5)}
+    b = TV.board(None, "Split", "型", frames, calib, arrows=[("B Link", "B Site")], areas_xy=areas_xy)
+    for st in b["steps"]:                                 # どの節目でも見える
+        ar = [e for e in st["elements"] if e["type"] == "arrow"]
+        assert len(ar) == 1
+        a = ar[0]
+        assert (a["x"], a["y"]) == (200.0, 200.0)
+        assert (a["data"]["x2"], a["data"]["y2"]) == (800.0, 500.0)
+        assert (a["width"], a["height"]) == (600.0, 300.0)
+        assert a["data"]["arrowhead"] == "arrow" and a["data"]["label"] == "B Link → B Site"
+        assert set(a) == {"id", "type", "x", "y", "width", "height", "angle", "style", "order",
+                          "groupId", "data"}
+    # 同じエリアへの矢印は引かない
+    b2 = TV.board(None, "Split", "型", frames, calib, arrows=[("B Site", "B Site")], areas_xy=areas_xy)
+    assert not [e for e in b2["steps"][0]["elements"] if e["type"] == "arrow"]
+
+
+def test_arrow_sample_from_template_keeps_the_style():
+    """雛形に矢印があれば、その色や太さを引き継ぎ、駒への結びつきは外す。"""
     tpl = TV.load_template(None)
-    assert TV.arrow_sample(tpl) is None                       # 同梱の雛形には矢印が無い
-    b = TV.board(None, "Split", "型", frames, calib, tpl, arrows=[("B Link", "B Site")], areas_xy=areas_xy)
-    assert all(e["type"] == "agent" for st in b["steps"] for e in st["elements"])
-    # 矢印の入った雛形を渡すと、その形をまねて両端だけ差し替える
-    arrow = {"id": "a1", "type": "arrow", "x": 1.0, "y": 2.0, "x2": 3.0, "y2": 4.0,
-             "style": {"stroke": "#f00"}, "order": 9, "data": {"kind": "arrow"}}
+    sample = {"id": "a1", "type": "arrow", "x": 1, "y": 2, "width": 3, "height": 4, "angle": 0,
+              "style": {"stroke": "#eab308", "strokeWidth": 5}, "order": 9, "groupId": None,
+              "data": {"x2": 9, "y2": 9, "arrowhead": "arrow",
+                       "endBinding": {"elementId": "zzz", "fixedPoint": [0.1, 0.2]}}}
     tpl2 = {**tpl, "steps": [{"id": "s", "label": "", "transition": 1.5, "hold": 0,
-                              "elements": [arrow], "zoneVisibility": {}, "overrides": {}}]}
-    assert TV.arrow_sample(tpl2) is arrow or TV.arrow_sample(tpl2)["id"] == "a1"
-    b2 = TV.board(None, "Split", "型", frames, calib, tpl2,
-                  arrows=[("B Link", "B Site")], areas_xy=areas_xy)
-    ar = [e for e in b2["steps"][0]["elements"] if e["type"] == "arrow"]
-    assert len(ar) == 1
-    assert (ar[0]["x"], ar[0]["y"]) == (200.0, 200.0) and (ar[0]["x2"], ar[0]["y2"]) == (800.0, 800.0)
-    assert ar[0]["style"] == {"stroke": "#f00"} and ar[0]["id"] != "a1"
+                              "elements": [sample], "zoneVisibility": {}, "overrides": {}}]}
+    assert TV.arrow_sample(tpl2)["id"] == "a1" and TV.arrow_sample(tpl) is None
+    el = TV.arrow_element(10, 20, 40, 60, 3, TV.arrow_sample(tpl2))
+    assert el["style"]["stroke"] == "#eab308" and el["style"]["strokeWidth"] == 5
+    assert (el["x"], el["y"]) == (10, 20) and (el["data"]["x2"], el["data"]["y2"]) == (40, 60)
+    assert (el["width"], el["height"]) == (30, 40) and el["id"] != "a1"
+    assert "endBinding" not in el["data"]                 # 無い駒に結びつけない
+
+
+def test_bundled_sunset_is_now_four_points():
+    c = TV.load_calib(None)["sunset"]
+    assert c["points"] == 4 and c.get("m") and not c.get("approx")
+    assert c["rms"] < 45

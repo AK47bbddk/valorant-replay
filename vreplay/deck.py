@@ -1346,6 +1346,8 @@ def row_arrows(g: dict, side: str) -> list[tuple[str, str]]:
     if "後取り" in name:
         back = name.replace(" 後取り", "")
         return [(back, goal)]
+    if kind in ("Rush", "Execute") and g.get("shown"):
+        return [(g["shown"], goal)]                # 2 巡目は「見せた場所 → サイト」
     return [(a, goal) for a in sorted((g.get("spread") or {}), key=lambda a: -g["spread"][a])[:2] if a != goal]
 
 

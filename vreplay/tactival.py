@@ -273,50 +273,40 @@ def calib_board(cfg: dict | None, map_name: str, meta: dict, tpl: dict | None = 
     return out
 
 
-# 矢印の要素の形はアプリの書き出しに例が無く、公開された仕様も無い。
-# 矢印を 1 本引いたボードを `tactival.template` に指定すると、その形をまねて書き出す。
-ARROW_ENDS = (("x2", "y2"), ("toX", "toY"), ("endX", "endY"), ("x1", "y1"))
+# 矢印の形（アプリの書き出しから）。始点は x/y、終点は data.x2/y2、width/height は差の絶対値。
+DEFAULT_ARROW = {
+    "type": "arrow", "x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0, "angle": 0,
+    "style": {"stroke": "#ffffff", "fill": "transparent", "strokeWidth": 3,
+              "strokeStyle": "solid", "opacity": 1},
+    "order": 0, "groupId": None,
+    "data": {"x2": 0.0, "y2": 0.0, "arrowhead": "arrow", "startArrowhead": "none",
+             "arrowType": "round", "label": None, "useAgentColor": False,
+             "ownerAgentId": None, "ownerId": None},
+}
 
 
 def arrow_sample(tpl: dict) -> dict | None:
-    """雛形の中にある矢印らしい要素（駒・スキル以外で、2 つ目の点を持つもの）。"""
+    """雛形の中に矢印があればそれを見本にする（色や太さを合わせたいとき用）。無ければ既定の形。"""
     for el in elements(tpl):
-        if el.get("type") in ("agent", "ability"):
-            continue
-        if any(all(k in el for k in ks) for ks in ARROW_ENDS):
+        if el.get("type") == "arrow" and isinstance(el.get("data"), dict):
             return el
-        for k in ("points", "path", "end", "to"):
-            if isinstance(el.get(k), (list, dict)):
-                return el
     return None
 
 
-def arrow_element(sample: dict, x0: float, y0: float, x1: float, y1: float, order: int = 0) -> dict:
-    """矢印 1 本。雛形の矢印をまねて、両端だけ差し替える。"""
-    el = json.loads(json.dumps(sample))
+def arrow_element(x0: float, y0: float, x1: float, y1: float, order: int = 0,
+                  sample: dict | None = None, label: str | None = None) -> dict:
+    """矢印 1 本。見本があれば色などを引き継ぎ、両端だけ差し替える。"""
+    el = json.loads(json.dumps(sample or DEFAULT_ARROW))
     el["id"] = _eid()
     el["order"] = order
-    if "x" in el and "y" in el:
-        el["x"], el["y"] = round(x0, 2), round(y0, 2)
-    for kx, ky in ARROW_ENDS:
-        if kx in el and ky in el:
-            el[kx], el[ky] = round(x1, 2), round(y1, 2)
-            break
-    for k in ("points", "path"):
-        v = el.get(k)
-        if isinstance(v, list) and len(v) >= 2:
-            if isinstance(v[0], (list, tuple)):
-                el[k] = [[round(x0, 2), round(y0, 2)], [round(x1, 2), round(y1, 2)]]
-            elif isinstance(v[0], dict):
-                el[k] = [{**v[0], "x": round(x0, 2), "y": round(y0, 2)},
-                         {**v[-1], "x": round(x1, 2), "y": round(y1, 2)}]
-            else:
-                el[k] = [round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)]
-            break
-    for k in ("end", "to"):
-        if isinstance(el.get(k), dict):
-            el[k] = {**el[k], "x": round(x1, 2), "y": round(y1, 2)}
-            break
+    el["x"], el["y"] = round(x0, 2), round(y0, 2)
+    el["width"], el["height"] = round(abs(x1 - x0), 2), round(abs(y1 - y0), 2)
+    d = el.setdefault("data", {})
+    d["x2"], d["y2"] = round(x1, 2), round(y1, 2)
+    for k in ("endBinding", "startBinding"):      # 見本が駒にくっついていても引き継がない
+        d.pop(k, None)
+    if label is not None:
+        d["label"] = label
     return el
 
 
@@ -344,12 +334,14 @@ def board(cfg: dict | None, map_name: str, name: str, frames: dict, calib: dict,
         steps.append({"id": _eid(), "label": f"{name}　{mark}", "transition": transition,
                       "hold": hold, "elements": els, "zoneVisibility": {}, "overrides": {}})
     sample = arrow_sample(tpl)
-    if sample and arrows and areas_xy and steps:
+    if arrows and areas_xy and steps:
         for j, (a0, a1) in enumerate(arrows):
-            if a0 in areas_xy and a1 in areas_xy:
+            if a0 in areas_xy and a1 in areas_xy and a0 != a1:
                 p0 = to_px(areas_xy[a0][0], areas_xy[a0][1], calib)
                 p1 = to_px(areas_xy[a1][0], areas_xy[a1][1], calib)
-                steps[0]["elements"].append(arrow_element(sample, p0[0], p0[1], p1[0], p1[1], 100 + j))
+                for st in steps:              # どの節目でも見えるように全部の step に入れる
+                    st["elements"].append(arrow_element(p0[0], p0[1], p1[0], p1[1], 100 + j,
+                                                        sample, f"{a0} → {a1}"))
     out["steps"] = steps or [{"id": _eid(), "label": name, "transition": transition, "hold": hold,
                               "elements": [], "zoneVisibility": {}, "overrides": {}}]
     return out
@@ -393,6 +385,5 @@ def export(cfg: dict | None, key: dict, prs: dict, out_dir: Path, frames_of,
             out.append(f)
     if out:
         log(f"  TactiVal のボード {len(out)} 個：{d}"
-            + ("" if arrow_sample(tpl) else "（矢印は雛形に例が無いので入れていません）")
             + ("（座標は概算）" if calib.get("approx") else ""))
     return out
