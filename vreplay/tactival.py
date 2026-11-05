@@ -124,10 +124,13 @@ def calibrate(data: dict, meta: dict, tpl: dict | None = None) -> dict:
     """置いた駒から、0..1 → ピクセルの倍率と原点を出す。
 
     Jett＝攻撃側スポーン／Sage＝防衛側スポーン／Omen＝A サイト／Viper＝B サイト／Cypher＝C サイト
-    の約束で置いてもらう。3 点以上あれば縦横べつべつの倍率で合わせる（横に離れた点があるほど正確）。
-    どのエージェントか分からない 2 体だけのときは、スポーン 2 つとみなして 1 つの倍率で合わせる。
+    の約束で置いてもらう。3 点以上あればアフィン変換（回転・鏡映・縦横の倍率）で合わせる。
+    TactiVal のマップは valorant-api の画像に対して回っていることがある（Split は 90 度）ので、
+    倍率と原点だけでは合わない。どのエージェントか分からない 2 体だけのときは、スポーン 2 つと
+    みなして 1 つの倍率で合わせる（回転は見られない）。
 
-    返り値 {"scale" | "sx","sy", "ox", "oy", "rms", "points"}。合わせられなければ ValueError。
+    返り値 {"m": [a,b,c,d,e,f], "rotation", "rms", "points"}、2 点のときは
+    {"scale", "ox", "oy", "rms", "points"}。合わせられなければ ValueError。
     """
     ags = [el for el in elements(data) if el.get("type") == "agent"]
     if len(ags) < 2:
@@ -140,24 +143,22 @@ def calibrate(data: dict, meta: dict, tpl: dict | None = None) -> dict:
         key = TARGETS.get(nm)
         if key and f"{key[0]}:{key[1]}" in tg:
             pairs.append((tg[f"{key[0]}:{key[1]}"], _center(el)))
-    if len(pairs) >= 3:                       # 縦横べつべつに最小二乗
-        res = {}
-        for i, (a, b) in enumerate((("sx", "ox"), ("sy", "oy"))):
-            n = len(pairs)
-            sn = sum(q[0][i] for q in pairs)
-            sp_ = sum(q[1][i] for q in pairs)
-            snn = sum(q[0][i] ** 2 for q in pairs)
-            snp = sum(q[0][i] * q[1][i] for q in pairs)
-            den = n * snn - sn * sn
-            if abs(den) < 1e-12:
-                raise ValueError("置いた駒が一直線で、倍率を決められません")
-            res[a] = (n * snp - sn * sp_) / den
-            res[b] = (sp_ - res[a] * sn) / n
-        err = sum(math.hypot(q[0][0] * res["sx"] + res["ox"] - q[1][0],
-                             q[0][1] * res["sy"] + res["oy"] - q[1][1]) for q in pairs) / len(pairs)
-        return {"sx": round(res["sx"], 3), "sy": round(res["sy"], 3),
-                "ox": round(res["ox"], 2), "oy": round(res["oy"], 2),
-                "rms": round(err, 2), "points": len(pairs)}
+    if len(pairs) >= 3:
+        # アフィン変換（回転・鏡映・縦横の倍率をまとめて）。TactiVal の Split は
+        # valorant-api の画像に対して 90 度回っているので、倍率と原点だけでは合わない。
+        import numpy as np
+        A = np.array([[q[0][0], q[0][1], 1.0] for q in pairs], float)
+        m = []
+        for i in (0, 1):
+            b = np.array([q[1][i] for q in pairs], float)
+            sol, *_ = np.linalg.lstsq(A, b, rcond=None)
+            m += [float(v) for v in sol]
+        if abs(m[0] * m[4] - m[1] * m[3]) < 1e-9:
+            raise ValueError("置いた駒が一直線で、向きを決められません")
+        err = sum(math.hypot(m[0] * q[0][0] + m[1] * q[0][1] + m[2] - q[1][0],
+                             m[3] * q[0][0] + m[4] * q[0][1] + m[5] - q[1][1]) for q in pairs) / len(pairs)
+        return {"m": [round(v, 4) for v in m], "rms": round(err, 2), "points": len(pairs),
+                "rotation": round(math.degrees(math.atan2(m[3], m[0])), 1)}
     # 2 点：1 つの倍率で合わせる（スポーンが縦に並ぶマップでは横の精度が落ちる）
     if len(pairs) == 2:
         cand = [(pairs[0][0], pairs[0][1], pairs[1][0], pairs[1][1])]
@@ -201,10 +202,14 @@ def save_calib(cfg: dict, mid: str, c: dict) -> Path:
 
 
 def to_px(x: float, y: float, c: dict) -> tuple[float, float]:
-    """0..1 → TactiVal のピクセル。縦横べつべつの倍率（sx/sy）があればそれを使う。"""
+    """0..1 → TactiVal のピクセル。アフィン（m）があればそれ、無ければ倍率と原点。"""
+    x, y = float(x), float(y)
+    m = c.get("m")
+    if m:
+        return round(m[0] * x + m[1] * y + m[2], 2), round(m[3] * x + m[4] * y + m[5], 2)
     sx = c.get("sx", c.get("scale"))
     sy = c.get("sy", c.get("scale"))
-    return round(float(x) * sx + c["ox"], 2), round(float(y) * sy + c["oy"], 2)
+    return round(x * sx + c["ox"], 2), round(y * sy + c["oy"], 2)
 
 
 # ---------------------------------------------------------------- ボードを作る

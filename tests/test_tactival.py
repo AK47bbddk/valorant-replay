@@ -126,11 +126,11 @@ def test_calibrate_with_four_named_targets():
     want = {"jett": tg["spawn:攻撃"], "sage": tg["spawn:防衛"], "omen": tg["site:A"], "viper": tg["site:B"]}
     els = [_agent_at(a, n[0] * sx + ox, n[1] * sy + oy) for a, n in want.items()]
     c = TV.calibrate(_export(els), meta)
-    assert c["points"] == 4
-    assert abs(c["sx"] - sx) < 1 and abs(c["sy"] - sy) < 1
-    assert abs(c["ox"] - ox) < 1 and abs(c["oy"] - oy) < 1 and c["rms"] < 1
-    # 縦横べつべつの倍率が to_px に効く
-    assert TV.to_px(0.5, 0.5, c) == (round(0.5 * c["sx"] + c["ox"], 2), round(0.5 * c["sy"] + c["oy"], 2))
+    assert c["points"] == 4 and c["rms"] < 1 and abs(c["rotation"]) < 0.5
+    a, b, cc, d, e, f = c["m"]
+    assert abs(a - sx) < 1 and abs(e - sy) < 1 and abs(b) < 1 and abs(d) < 1
+    assert abs(cc - ox) < 1 and abs(f - oy) < 1
+    assert TV.to_px(0.5, 0.5, c) == (round(0.5 * sx + ox, 2), round(0.5 * sy + oy, 2))
 
 
 def test_calibrate_uses_the_icon_centre():
@@ -143,3 +143,22 @@ def test_calibrate_uses_the_icon_centre():
     assert els[0]["x"] == tg["spawn:攻撃"][0] * s - 24        # 書くときは左上
     c = TV.calibrate(_export(els), meta)
     assert abs(c["scale"] - s) < 1 and abs(c["ox"]) < 1 and abs(c["oy"]) < 1 and c["rms"] < 1
+
+
+def test_calibrate_recovers_rotation():
+    """TactiVal の Split はマップ画像に対して 90 度回っている。アフィンで向きごと合わせる。"""
+    meta = _meta("split")
+    tg = TV._targets(meta)
+    s, ox, oy = 1089.62, 540.87, -114.73
+    want = {"jett": tg["spawn:攻撃"], "sage": tg["spawn:防衛"], "omen": tg["site:A"], "viper": tg["site:B"]}
+    els = [_agent_at(a, (1 - n[1]) * s + ox, n[0] * s + oy) for a, n in want.items()]   # 90 度回す
+    c = TV.calibrate(_export(els), meta)
+    assert c["points"] == 4 and c["rotation"] == 90.0 and c["rms"] < 0.5
+    for a, n in want.items():
+        assert TV.to_px(n[0], n[1], c) == (round((1 - n[1]) * s + ox, 2), round(n[0] * s + oy, 2))
+    # 回転の無いマップ（倍率と原点だけ）も同じ仕組みで合う
+    m2 = _meta("sunset")
+    tg2 = TV._targets(m2)
+    want2 = {"jett": tg2["spawn:攻撃"], "sage": tg2["spawn:防衛"], "omen": tg2["site:A"], "viper": tg2["site:B"]}
+    c2 = TV.calibrate(_export([_agent_at(a, n[0] * s + ox, n[1] * s + oy) for a, n in want2.items()]), m2)
+    assert abs(c2["rotation"]) < 0.5 and c2["rms"] < 0.5
