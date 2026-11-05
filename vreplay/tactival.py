@@ -93,38 +93,97 @@ def load_calib(cfg: dict | None) -> dict:
     return out
 
 
-def calibrate(data: dict, meta: dict) -> dict:
-    """スポーンに 1 体ずつ置いたボードから、0..1 → ピクセルの倍率と原点を出す。
+# 座標合わせ用に、どのエージェントをどこに置いてもらうか
+TARGETS = {"jett": ("spawn", "攻撃"), "sage": ("spawn", "防衛"),
+           "omen": ("site", "A"), "viper": ("site", "B"), "cypher": ("site", "C")}
 
-    data: TactiVal の書き出し（駒がちょうど 2 体）。meta: `tactics.load_map` の返り値。
-    返り値 {"scale", "ox", "oy", "rms"}。合わせられなければ ValueError。
+
+def _center(el: dict) -> tuple[float, float]:
+    """駒の x/y は左上なので、真ん中に直す。"""
+    return float(el["x"]) + float(el.get("width") or 0) / 2, float(el["y"]) + float(el.get("height") or 0) / 2
+
+
+def _targets(meta: dict) -> dict[str, tuple[float, float]]:
+    """「攻撃スポーン」「A サイト」などの 0..1 座標。"""
+    out = {}
+    for side, xy in ((meta or {}).get("spawns") or {}).items():
+        out[f"spawn:{side}"] = xy
+    for c in (meta or {}).get("callouts") or []:
+        if str(c.get("name", "")).lower() == "site" and c.get("super") in ("A", "B", "C"):
+            out[f"site:{c['super']}"] = (float(c["x"]), float(c["y"]))
+    return out
+
+
+def _agent_names(data: dict, tpl: dict | None = None) -> dict[str, str]:
+    src = (data.get("patchSnapshot") or {}).get("agents") or \
+        ((tpl or {}).get("patchSnapshot") or {}).get("agents") or {}
+    return {u: str(a.get("displayName") or "") for u, a in src.items()}
+
+
+def calibrate(data: dict, meta: dict, tpl: dict | None = None) -> dict:
+    """置いた駒から、0..1 → ピクセルの倍率と原点を出す。
+
+    Jett＝攻撃側スポーン／Sage＝防衛側スポーン／Omen＝A サイト／Viper＝B サイト／Cypher＝C サイト
+    の約束で置いてもらう。3 点以上あれば縦横べつべつの倍率で合わせる（横に離れた点があるほど正確）。
+    どのエージェントか分からない 2 体だけのときは、スポーン 2 つとみなして 1 つの倍率で合わせる。
+
+    返り値 {"scale" | "sx","sy", "ox", "oy", "rms", "points"}。合わせられなければ ValueError。
     """
     ags = [el for el in elements(data) if el.get("type") == "agent"]
-    if len(ags) != 2:
-        raise ValueError(f"駒がちょうど 2 体のボードが要ります（いまは {len(ags)} 体）")
-    sp = (meta or {}).get("spawns") or {}
-    pts = [sp.get("攻撃"), sp.get("防衛")]
-    if not all(pts):
-        raise ValueError("このマップのスポーンの座標が valorant-api から取れません")
-    P = [(float(a["x"]), float(a["y"])) for a in ags]
+    if len(ags) < 2:
+        raise ValueError(f"駒が 2 体以上のボードが要ります（いまは {len(ags)} 体）")
+    tg = _targets(meta)
+    names = _agent_names(data, tpl)
+    pairs = []
+    for el in ags:
+        nm = names.get((el.get("data") or {}).get("agentId") or "", "").lower()
+        key = TARGETS.get(nm)
+        if key and f"{key[0]}:{key[1]}" in tg:
+            pairs.append((tg[f"{key[0]}:{key[1]}"], _center(el)))
+    if len(pairs) >= 3:                       # 縦横べつべつに最小二乗
+        res = {}
+        for i, (a, b) in enumerate((("sx", "ox"), ("sy", "oy"))):
+            n = len(pairs)
+            sn = sum(q[0][i] for q in pairs)
+            sp_ = sum(q[1][i] for q in pairs)
+            snn = sum(q[0][i] ** 2 for q in pairs)
+            snp = sum(q[0][i] * q[1][i] for q in pairs)
+            den = n * snn - sn * sn
+            if abs(den) < 1e-12:
+                raise ValueError("置いた駒が一直線で、倍率を決められません")
+            res[a] = (n * snp - sn * sp_) / den
+            res[b] = (sp_ - res[a] * sn) / n
+        err = sum(math.hypot(q[0][0] * res["sx"] + res["ox"] - q[1][0],
+                             q[0][1] * res["sy"] + res["oy"] - q[1][1]) for q in pairs) / len(pairs)
+        return {"sx": round(res["sx"], 3), "sy": round(res["sy"], 3),
+                "ox": round(res["ox"], 2), "oy": round(res["oy"], 2),
+                "rms": round(err, 2), "points": len(pairs)}
+    # 2 点：1 つの倍率で合わせる（スポーンが縦に並ぶマップでは横の精度が落ちる）
+    if len(pairs) == 2:
+        cand = [(pairs[0][0], pairs[0][1], pairs[1][0], pairs[1][1])]
+    else:
+        sp = (meta or {}).get("spawns") or {}
+        if not (sp.get("攻撃") and sp.get("防衛")):
+            raise ValueError("このマップのスポーンの座標が valorant-api から取れません")
+        P = [_center(a) for a in ags[:2]]
+        cand = [(sp["攻撃"], P[0], sp["防衛"], P[1]), (sp["攻撃"], P[1], sp["防衛"], P[0])]
     best = None
-    for order in ((0, 1), (1, 0)):
-        (ax, ay), (bx, by) = pts[order[0]], pts[order[1]]
-        dn = math.hypot(bx - ax, by - ay)
-        dp = math.hypot(P[1][0] - P[0][0], P[1][1] - P[0][1])
+    for na, pa, nb, pb in cand:
+        dn = math.hypot(nb[0] - na[0], nb[1] - na[1])
         if dn <= 1e-9:
             continue
-        s = dp / dn
-        ox = (P[0][0] - ax * s + P[1][0] - bx * s) / 2
-        oy = (P[0][1] - ay * s + P[1][1] - by * s) / 2
-        err = math.hypot(ax * s + ox - P[0][0], ay * s + oy - P[0][1]) + \
-            math.hypot(bx * s + ox - P[1][0], by * s + oy - P[1][1])
+        s = math.hypot(pb[0] - pa[0], pb[1] - pa[1]) / dn
+        ox = (pa[0] - na[0] * s + pb[0] - nb[0] * s) / 2
+        oy = (pa[1] - na[1] * s + pb[1] - nb[1] * s) / 2
+        err = (math.hypot(na[0] * s + ox - pa[0], na[1] * s + oy - pa[1])
+               + math.hypot(nb[0] * s + ox - pb[0], nb[1] * s + oy - pb[1])) / 2
         if best is None or err < best[0]:
             best = (err, s, ox, oy)
     if best is None:
         raise ValueError("座標を合わせられませんでした")
     err, s, ox, oy = best
-    return {"scale": round(s, 3), "ox": round(ox, 2), "oy": round(oy, 2), "rms": round(err / 2, 2)}
+    return {"scale": round(s, 3), "ox": round(ox, 2), "oy": round(oy, 2),
+            "rms": round(err, 2), "points": 2}
 
 
 def save_calib(cfg: dict, mid: str, c: dict) -> Path:
@@ -142,7 +201,10 @@ def save_calib(cfg: dict, mid: str, c: dict) -> Path:
 
 
 def to_px(x: float, y: float, c: dict) -> tuple[float, float]:
-    return round(float(x) * c["scale"] + c["ox"], 2), round(float(y) * c["scale"] + c["oy"], 2)
+    """0..1 → TactiVal のピクセル。縦横べつべつの倍率（sx/sy）があればそれを使う。"""
+    sx = c.get("sx", c.get("scale"))
+    sy = c.get("sy", c.get("scale"))
+    return round(float(x) * sx + c["ox"], 2), round(float(y) * sy + c["oy"], 2)
 
 
 # ---------------------------------------------------------------- ボードを作る

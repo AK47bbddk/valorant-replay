@@ -57,7 +57,8 @@ def test_calibrate_from_two_spawns():
     """スポーンに置いた 2 体から、0..1 → ピクセルの倍率と原点を出す。"""
     meta = _meta()
     s, ox, oy = 1324.0, 37.5, -12.25
-    px = [(x * s + ox, y * s + oy) for x, y in (meta["spawns"]["攻撃"], meta["spawns"]["防衛"])]
+    # 駒の x/y は左上なので、真ん中から 24px 引いて置く
+    px = [(x * s + ox - 24, y * s + oy - 24) for x, y in (meta["spawns"]["攻撃"], meta["spawns"]["防衛"])]
     data = _export([{**REAL_AGENT, "x": px[0][0], "y": px[0][1]},
                     {**REAL_AGENT, "x": px[1][0], "y": px[1][1]}])
     c = TV.calibrate(data, meta)
@@ -107,3 +108,38 @@ def test_export_needs_calibration(tmp_path):
     assert len(out) == 1 and out[0].name.endswith(".tactival.json")
     b = json.loads(out[0].read_text("utf-8"))
     assert b["mapId"] == "split" and b["steps"][0]["elements"][0]["data"]["agentId"]
+
+
+def _agent_at(agent, x, y, tpl=None):
+    ids = TV.agent_ids(tpl or TV.load_template(None))
+    el = dict(REAL_AGENT)
+    el["x"], el["y"] = x - 24, y - 24           # 駒の x/y は左上
+    el["data"] = {**REAL_AGENT["data"], "agentId": ids[agent]}
+    return el
+
+
+def test_calibrate_with_four_named_targets():
+    """Jett=攻撃スポーン / Sage=防衛スポーン / Omen=A サイト / Viper=B サイト で、縦横べつべつに合わせる。"""
+    meta = _meta()
+    sx, sy, ox, oy = 1200.0, 1100.0, 30.0, -40.0
+    tg = {k: v for k, v in TV._targets(meta).items()}
+    want = {"jett": tg["spawn:攻撃"], "sage": tg["spawn:防衛"], "omen": tg["site:A"], "viper": tg["site:B"]}
+    els = [_agent_at(a, n[0] * sx + ox, n[1] * sy + oy) for a, n in want.items()]
+    c = TV.calibrate(_export(els), meta)
+    assert c["points"] == 4
+    assert abs(c["sx"] - sx) < 1 and abs(c["sy"] - sy) < 1
+    assert abs(c["ox"] - ox) < 1 and abs(c["oy"] - oy) < 1 and c["rms"] < 1
+    # 縦横べつべつの倍率が to_px に効く
+    assert TV.to_px(0.5, 0.5, c) == (round(0.5 * c["sx"] + c["ox"], 2), round(0.5 * c["sy"] + c["oy"], 2))
+
+
+def test_calibrate_uses_the_icon_centre():
+    """駒の x/y は左上なので、真ん中に直してから合わせる。"""
+    meta = _meta()
+    s, ox, oy = 1000.0, 0.0, 0.0
+    tg = TV._targets(meta)
+    els = [_agent_at("jett", tg["spawn:攻撃"][0] * s, tg["spawn:攻撃"][1] * s),
+           _agent_at("sage", tg["spawn:防衛"][0] * s, tg["spawn:防衛"][1] * s)]
+    assert els[0]["x"] == tg["spawn:攻撃"][0] * s - 24        # 書くときは左上
+    c = TV.calibrate(_export(els), meta)
+    assert abs(c["scale"] - s) < 1 and abs(c["ox"]) < 1 and abs(c["oy"]) < 1 and c["rms"] < 1
