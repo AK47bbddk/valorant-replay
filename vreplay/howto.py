@@ -135,7 +135,9 @@ def comp_notes(roles: dict[str, str]) -> dict:
     strong = [COMP_NOTES[k][0] for k in keys if k in COMP_NOTES and (k, "strong") not in skip]
     weak = [COMP_NOTES[k][1] for k in keys if k in COMP_NOTES and (k, "weak") not in skip]
     return {"line": line or "役割が分かりません", "counts": dict(c), "strong": strong, "weak": weak,
-            "agents": [{"agent": a, "role": ROLE_JA.get(r, "?")} for a, r in sorted(roles.items())]}
+            "roles": dict(roles),
+            "agents": [{"agent": a, "role": ROLE_JA.get(r, "?"), "role_en": r}
+                       for a, r in sorted(roles.items())]}
 
 
 def duties(rows: list[dict], top: int = 1) -> list[dict]:
@@ -275,3 +277,106 @@ def glossary_for(texts: list[str], k: int = 12) -> list[tuple[str, str]]:
         if w not in [x for x, _ in out] and w in GLOSSARY:
             out.insert(0, (w, GLOSSARY[w]))
     return out[:k]
+
+
+# ---------------------------------------------------------------- 難しさ（ランク帯・フルパ向けの但し書き）
+# 型の種類ごとの、そろえるものと難しさ。プロの型をそのまま持ってくると、
+# スキルの精度やコールが要るものがあるので、それを先に書いておく。
+DIFFICULTY = {
+    "Rush": ("やさしい", "決めごとが少ないので、野良でもそろえやすい。合図（誰が先に入るか）だけ決める"),
+    "Pistol": ("やさしい", "1 ラウンド目だけなので、形を 1 つ覚えれば使える"),
+    "AntiEco": ("やさしい", "固まらず距離を取るだけ。スキルはほぼ要らない"),
+    "Eco": ("やさしい", "固まって 1 ピックを狙うだけ。無理に勝ちに行かない"),
+    "Default": ("ふつう", "立ち位置を 5 人で割り振れば真似できる。誰がどこを見るかだけ決めておく"),
+    "Execute": ("ふつう", "入る合図とスキルの順番を決めておく。バラバラに入らない"),
+    "PostPlant": ("ふつう", "設置後の立ち位置を覚えるだけ。固まらないのがいちばん大事"),
+    "Retake": ("ふつう", "入る前に人数をそろえる。ばらばらに入ると数的不利になる"),
+    "Split": ("むずかしい", "見せる側と入る側で時間を合わせる必要がある。声を出せる 5 人向け"),
+    "Counter": ("むずかしい", "出る時間と引く時間を全員で合わせる。外すと数的不利になる"),
+    "Push": ("むずかしい", "出る時間（1:15〜1:00）を全員で合わせる。相手に読まれると弱い"),
+}
+
+
+def difficulty(g: dict, side: str | None = None) -> dict:
+    """その型を真似するときの難しさと、そろえておくこと。"""
+    kind, name = g.get("kind") or "", g.get("name") or ""
+    level, note = DIFFICULTY.get(kind, ("ふつう", "立ち位置を 5 人で割り振れば真似できる"))
+    if "後取り" in name or "レイト" in name:
+        level, note = "むずかしい", "1:05・残り 0:45 といった時間を全員が覚えてから使う"
+    elif name.endswith("前目"):
+        level, note = "むずかしい", "出る時間と引く時間を合わせる。来なければ必ずデフォルトの位置へ戻る"
+    elif "ファストリテイク" in name:
+        level, note = "むずかしい", "設置から 12 秒以内に 4 人そろえる。声が出せないと間に合わない"
+    elif "3人守り" in name:
+        level, note = "やさしい", "3 人をそのサイトに置くだけ。反対側はリテイク前提と決めておく"
+    rows = g.get("rows") or []
+    ults = sum(1 for r in rows if len(r.get("ults") or []) >= 2)
+    if rows and ults / len(rows) >= 0.5:
+        note += "。ULT を 2 つ以上使うラウンドが多い（" + f"{ults}/{len(rows)}）ので、溜まっていないときは別の型にする"
+    return {"level": level, "note": note}
+
+
+# ---------------------------------------------------------------- 構成の代替案
+# 同じ役割の中でも、できることが違うグループ（分かっているものだけ）
+SUBGROUP = {
+    "viper": "壁型スモーク", "harbor": "壁型スモーク",
+    "omen": "置くスモーク", "brimstone": "置くスモーク", "astra": "置くスモーク", "clove": "置くスモーク",
+    "killjoy": "設置型センチネル", "cypher": "設置型センチネル", "vyse": "設置型センチネル",
+    "deadlock": "設置型センチネル",
+    "sage": "足止め・蘇生", "chamber": "狙撃型センチネル",
+    "sova": "索敵イニシエーター", "fade": "索敵イニシエーター", "gekko": "索敵イニシエーター",
+    "tejo": "索敵イニシエーター",
+    "breach": "フラッシュ・スタン", "skye": "フラッシュ・スタン", "kayo": "フラッシュ・スタン",
+    "jett": "入り込むデュエリスト", "raze": "入り込むデュエリスト", "neon": "入り込むデュエリスト",
+    "yoru": "だまし型デュエリスト", "phoenix": "自分で入るデュエリスト", "reyna": "撃ち合いデュエリスト",
+    "iso": "撃ち合いデュエリスト",
+}
+
+
+# 内蔵の表で名前を出すとき、そのままでは読めないもの
+FALLBACK_NAMES = {"kayo": "KAY/O"}
+
+
+def all_roles(cfg: dict | None = None, log=None) -> dict[str, str]:
+    """全エージェントの表示名 → 役割。API が使えないときは内蔵の表。"""
+    names = None
+    try:
+        meta = None
+        if cfg and (cfg.get("output") or {}).get("dir"):
+            p = Path(cfg["output"]["dir"]) / "_cache" / "agent_names.json"
+            if p.exists() and time.time() - p.stat().st_mtime < CACHE_DAYS * 86400:
+                meta = json.loads(p.read_text("utf-8"))
+        if meta is None:
+            with urlopen(API, timeout=20) as r:
+                meta = {a["displayName"]: _norm((a.get("role") or {}).get("displayName"))
+                        for a in json.load(r)["data"]}
+            if cfg and (cfg.get("output") or {}).get("dir"):
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(json.dumps(meta, ensure_ascii=False), "utf-8")
+        names = {k: v for k, v in (meta or {}).items() if v}
+    except Exception as e:
+        if log:
+            log(f"    エージェントの一覧を取れませんでした（{e}）")
+    return names or {FALLBACK_NAMES.get(n, n.title()): r for n, r in FALLBACK_ROLES.items()}
+
+
+def alternatives(roles: dict[str, str], cfg: dict | None = None, k: int = 3) -> list[dict]:
+    """「このエージェントがいないとき、誰で代われるか」。同じ役割の中から出す。
+
+    スキルの中身までは見ていないので、できることが近いグループ（壁型スモーク・設置型センチネルなど）が
+    分かるものはそれも添える。
+    """
+    pool = all_roles(cfg)
+    have = {_norm(a) for a in roles}
+    out = []
+    for agent, role in sorted(roles.items()):
+        if role in (None, "", "?"):
+            out.append({"agent": agent, "role": "?", "subgroup": None, "picks": [], "near": []})
+            continue
+        same = [n for n, r in sorted(pool.items()) if r == role and _norm(n) not in have]
+        sub = SUBGROUP.get(_norm(agent))
+        near = [a for a in same if SUBGROUP.get(_norm(a)) == sub] if sub else []
+        picks = (near + [a for a in same if a not in near])[:k]
+        out.append({"agent": agent, "role": ROLE_JA.get(role, role), "subgroup": sub,
+                    "picks": picks, "near": near[:k]})
+    return out

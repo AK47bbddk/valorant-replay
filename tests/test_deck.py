@@ -47,6 +47,14 @@ def test_build_decks_from_warehouse(tmp_path, monkeypatch):
     assert "Default 一覧" in page and "テイクデフォ" in page and "ポストプラント" in page
     assert "ファストリテイク" in page and "Pistol" in page
     assert " #1" not in page and "散開" not in page         # 番号つきの型・スポーンに引っ張られた名前は出さない
+    # 初心者向け：手順・構成・読み合い・用語・やること・難しさ・1 枚のチートシート
+    assert "まず覚えること" in page and "この構成の形" in page and "相手の形を見てどうするか" in page
+    assert "この冊子で使っている言葉" in page and "エージェントが足りないとき" in page
+    assert "やさしい" in page and "むずかしい" in page and "見本の動画" in page
+    name = next(n for n in names if n.startswith("team_G2"))
+    cheat = out / name.replace(".html", "_cheat.html")
+    assert cheat.exists() and "まず覚えること" in cheat.read_text("utf-8")
+    assert cheat.name in page                              # 冊子から 1 枚へのリンク
     assert (out / "index.html").exists()
 
 
@@ -237,3 +245,60 @@ def test_reads_tell_what_to_do_against_each_opponent_shape(tmp_path, monkeypatch
     assert rs and all(g["n"] >= 2 for g in rs)
     line = deck.read_line(rs[0], deck.ATTACK)
     assert "相手が「" in line and "いちばん勝てているのは" in line
+
+
+def _split_callouts():
+    from .deckfx import areas
+    return [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]}
+            for v in areas("split").values()]
+
+
+def test_setup_png_draws_five_positions(tmp_path, monkeypatch):
+    """初動の型の図：エリアごとに人数の丸と、担当エージェントの名前を描く。"""
+    import cv2
+    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
+    rows = [r for rep in [report(str(i), "G2", "SEN", i) for i in range(3)] for r in deck.records(rep)]
+    g2 = [r for r in rows if r["team"] == "G2"]
+    prs = deck.playbook_rows([r for r in g2 if r["side"] == deck.ATTACK], deck.ATTACK)
+    g = next(x for x in prs if x["kind"] == "Default")
+    assert sum(g["spread"].values()) >= 4.0 and max(g["spread"].values()) >= 2.0
+    p = deck.setup_png({"output": {"dir": str(tmp_path)}}, "Split", g, tmp_path / "s.jpg", _split_callouts())
+    assert p and p.exists() and cv2.imread(str(p)) is not None
+    # コールアウトが無ければ描けない（ヒートマップに戻す）
+    assert deck.setup_png({"output": {"dir": str(tmp_path)}}, "Split", g, tmp_path / "x.jpg", []) is None
+
+
+def test_difficulty_video_and_alternatives(tmp_path, monkeypatch):
+    """真似するときの難しさ・見本の動画の時刻・足りないときの代わり。"""
+    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
+    from vreplay import howto as H
+    rows = [r for rep in [report(str(i), "G2", "SEN", i) for i in range(3)] for r in deck.records(rep)]
+    g2 = [r for r in rows if r["team"] == "G2"]
+    prs = deck.playbook_rows([r for r in g2 if r["side"] == deck.ATTACK], deck.ATTACK)
+    lv = {g["name"]: g["difficulty"]["level"] for g in prs}
+    assert lv[next(n for n in lv if "ラッシュ" in n)] == "やさしい"
+    assert lv[next(n for n in lv if "後取り" in n)] == "むずかしい"
+    assert all(g["difficulty"]["note"] for g in prs)
+    assert deck.yt_at("https://youtu.be/x?t=3725") == "1:02:05" and deck.yt_at("https://youtu.be/x") == ""
+    vid = next(x for x in prs[0]["lines"] if x.startswith("見本の動画"))
+    assert "から" in vid and "R" in vid
+    alt = H.alternatives(H.agent_roles(None, ["Viper", "Jett"]), None)
+    viper = next(a for a in alt if a["agent"] == "Viper")
+    assert viper["subgroup"] == "壁型スモーク" and viper["picks"][0] == "Harbor"
+    assert "Viper" not in viper["picks"]
+
+
+def test_cheatsheet_is_one_page(tmp_path, monkeypatch):
+    """A4 1 枚のチートシート：手順・読み合い・そろってから使う型・用語が入る。"""
+    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
+    rows = [r for rep in [report(str(i), "G2", "SEN", i) for i in range(3)] for r in deck.records(rep)]
+    g2 = [r for r in rows if r["team"] == "G2"]
+    prs = {sd: deck.playbook_rows([r for r in g2 if r["side"] == sd], sd)
+           for sd in (deck.ATTACK, deck.DEFENSE)}
+    key = {"title": "Split G2 Comp PlayBook", "map": "Split", "slug": "x", "comp": list(g2[0]["comp"])}
+    p = deck.build_cheatsheet({"output": {"dir": str(tmp_path)}}, key, g2, prs, tmp_path)
+    s = p.read_text("utf-8")
+    assert p.name.endswith("_cheat.html")
+    assert "size:A4" in s and "まず覚えること" in s
+    assert "5 人の役割と担当を決める" in s and "相手の形を見てどうするか" in s
+    assert "そろってから使う型" in s and "言葉" in s

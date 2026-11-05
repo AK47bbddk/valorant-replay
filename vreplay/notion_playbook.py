@@ -214,6 +214,17 @@ def _howto_blocks(cfg: dict, key: dict, rows: list[dict], prs: dict) -> list[dic
         out.append(_bullet(_rt("強み：", bold=True), _rt(x)))
     for x in comp["weak"]:
         out.append(_bullet(_rt("気をつける：", bold=True), _rt(x)))
+    alt = H.alternatives(comp.get("roles") or {}, cfg)
+    if alt:
+        out.append(_h(3, "エージェントが足りないとき（同じ役割で代える）"))
+        for a in alt:
+            if not a["picks"]:
+                continue
+            sub = f"（{a['subgroup']}）" if a.get("subgroup") else ""
+            out.append(_bullet(_rt(f"{a['agent']}{sub}　", bold=True),
+                               _rt("→ " + "、".join(a["picks"]))))
+        out.append(_para(_rt("役割が同じというだけで、スキルの中身は違います。スモークの位置や合わせ方は"
+                             "型ごとの見本の動画を見て作り直してください。", color="gray")))
     for side, label in ((ATTACK, "攻め"), (DEFENSE, "守り")):
         rs = D.reads([r for r in rows if r["side"] == side], side)
         if not rs:
@@ -263,10 +274,17 @@ def export(nt: Notion, cfg: dict, key: dict, rows: list[dict], base: list[dict],
                                                     "icon": {"type": "emoji", "emoji": "🎯"}}},
                     _para(_rt(g["lines"][0], bold=True))]
             left += [_bullet(_rt(x)) for x in g["lines"][1:]]
+            d = g.get("difficulty") or {}
+            if d:
+                left.append(_bullet(_rt(f"真似する難しさ：{d['level']}　", bold=True), _rt(d.get("note") or "")))
             if g["mentions"]:
                 left.append(_bullet(_rt("解説の言及：" + "・".join(g["mentions"]))))
-            # アイコン照合の配置図（Valotactics 風）があればそれ、無ければ点の位置の重ね描き
-            img = next((Path(b) for b in g.get("boards") or [] if Path(b).exists()), None)
+            # 初動の型は「5 人がどこに立つか」の図。無ければアイコン照合の配置図か、点の重ね描き
+            img = None
+            if g["kind"] in ("Default", "Push"):
+                img = D.setup_png(cfg, key["map"], g, img_dir / f"np_{label}_{g['slug']}_set.jpg", meta, rows)
+            if img is None:
+                img = next((Path(b) for b in g.get("boards") or [] if Path(b).exists()), None)
             if img is None:
                 im = g.get("img") or {}
                 img = D.position_png(cfg, key["map"], g["rows"], im.get("mark"),

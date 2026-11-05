@@ -1033,6 +1033,25 @@ def buy_rows(rows: list[dict], min_n: int = 1) -> list[dict]:
 
 
 # ---------------------------------------------------------------- 行（Notion のデータベース・HTML 共通）
+def yt_at(url: str | None) -> str:
+    """YouTube の ?t=秒 → 「1:23:45」。無ければ空。"""
+    m = re.search(r"[?&]t=(\d+)", str(url or ""))
+    if not m:
+        return ""
+    t = int(m.group(1))
+    return f"{t // 3600}:{t % 3600 // 60:02d}:{t % 60:02d}" if t >= 3600 else f"{t // 60}:{t % 60:02d}"
+
+
+def video_line(rows: list[dict], k: int = 3) -> str:
+    """「スキルの出し方は動画で見る」ための見本（どの試合の何分から）。"""
+    ex = _ex_rows(rows, k)
+    if not ex:
+        return ""
+    body = "、".join(f"vs {r['opp_tag']} R{r['n']}（{'勝ち' if r['win'] else '負け'}"
+                     + (f"・{yt_at(r['yt'])} から" if yt_at(r["yt"]) else "") + "）" for r in ex)
+    return "見本の動画（スキルの出し方はここで見る）：" + body
+
+
 def _ex_rows(rows: list[dict], k: int = 3) -> list[dict]:
     rs = [r for r in rows if r.get("yt")]
     rs.sort(key=lambda r: (not r["win"], str(r["date"]), r["n"]))
@@ -1148,7 +1167,11 @@ def playbook_rows(rows: list[dict], side: str, k: int = 6) -> list[dict]:
     for g in out:
         g.setdefault("tags", [])
         g["todo"] = H.row_todo(g, side)                 # 初心者向けの「やること」
+        g["difficulty"] = H.difficulty(g, side)         # 真似するときの難しさ
         g["mentions"] = _caster_tags(g["rows"])
+        v = video_line(g["rows"])
+        if v:
+            g["lines"] = list(g["lines"]) + [v]
         g["buys"] = Counter(r["buy"] for r in g["rows"] if r.get("buy") and r["buy"] != "?")
         if g["kind"] != "Pistol":
             g["buys"].pop("Pistol", None)          # ピストルでない型の購入に Pistol を付けない
@@ -1283,6 +1306,85 @@ def position_png(cfg: dict, map_name: str, rows: list[dict], mark: str | None, p
     return path
 
 
+def _area_xy(callouts: list[dict]) -> dict[str, tuple[float, float]]:
+    """エリア名（「A Site」「Mid Vent」）→ マップ画像の 0..1 座標。"""
+    from . import tactics
+    out = {}
+    for c in callouts or []:
+        z = tactics.zone_of(c)
+        nm = tactics.area_name(z, c.get("name"))
+        if nm:
+            out[nm] = (float(c["x"]), float(c["y"]))
+    return out
+
+
+def setup_png(cfg: dict, map_name: str, g: dict, path: Path, callouts: list[dict] | None = None,
+              rows: list[dict] | None = None) -> Path | None:
+    """型の立ち位置図：エリアごとに人数の丸を置き、担当のエージェント名を書く。
+
+    ヒートマップより「5 人がどこに立つか」が分かりやすいので、初心者向けのカードはこちらを使う。
+    文字は地図の上に置くのでローマ字（コールアウトとエージェント名）だけにする。
+    """
+    import cv2
+    spread = {a: v for a, v in (g.get("spread") or {}).items() if v >= 0.5}
+    xy = _area_xy(callouts)
+    pts = [(a, v, xy[a]) for a, v in spread.items() if a in xy]
+    if len(pts) < 2:
+        return None
+    who: dict[str, Counter] = defaultdict(Counter)
+    for r in g.get("rows") or []:
+        for area, ags in ((r.get("setup") or {}).get("who_area") or {}).items():
+            for ag in ags:
+                who[area][ag] += 1
+    bg = None
+    for r in (rows if rows is not None else g.get("rows") or []):
+        p_ = r.get("uv_base")
+        if p_ and Path(p_).exists():
+            bg = cv2.resize(cv2.imread(p_), (512, 512))
+            break
+    if bg is None:
+        bg = _icon(cfg, map_name)
+    if bg is None:
+        bg = np.full((512, 512, 3), 245, np.uint8)
+        for c in callouts or []:
+            cv2.circle(bg, (int(c["x"] * 512), int(c["y"] * 512)), 3, (180, 180, 180), -1)
+    img = (bg.astype(np.float32) * 0.45 + 255 * 0.55).astype(np.uint8)       # うすくして上の丸を目立たせる
+    S = img.shape[0]
+    key = (193, 23, 0)                                   # デジタル庁のキーカラー #0017C1（BGR）
+    over = img.copy()
+    for a, v, (ux, uy) in sorted(pts, key=lambda t: -t[1]):
+        x, y = int(ux * S), int(uy * S)
+        r_ = int(14 + 10 * min(3.0, v))
+        cv2.circle(over, (x, y), r_, key, -1, cv2.LINE_AA)
+    img = cv2.addWeighted(over, 0.55, img, 0.45, 0)
+    used: list[tuple[int, int, int]] = []
+    for a, v, (ux, uy) in sorted(pts, key=lambda t: -t[1]):
+        x, y = int(ux * S), int(uy * S)
+        r_ = int(14 + 10 * min(3.0, v))
+        cv2.circle(img, (x, y), r_, key, 2, cv2.LINE_AA)
+        txt = f"{v:g}"
+        cv2.putText(img, txt, (x - 7 * len(txt) // 2, y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                    (255, 255, 255), 4, cv2.LINE_AA)
+        cv2.putText(img, txt, (x - 7 * len(txt) // 2, y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                    key, 1, cv2.LINE_AA)
+        label = a + ("  " + "/".join(n for n, _ in who[a].most_common(2)) if who.get(a) else "")
+        (tw, th_), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+        lx, ly = min(max(2, x - tw // 2), S - tw - 2), y + r_ + 14
+        while any(abs(ly - uy) < 13 and lx < ux + uw and ux < lx + tw for ux, uy, uw in used):
+            ly += 14                                      # 文字が重なったら下にずらす
+        used.append((lx, ly, tw))
+        for col, th in (((255, 255, 255), 4), ((26, 26, 26), 1)):
+            cv2.putText(img, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.42, col, th, cv2.LINE_AA)
+    for c in callouts or []:
+        if c.get("super") in CORE and str(c.get("name", "")).lower() == "site":
+            x, y = int(c["x"] * S), int(c["y"] * S)
+            for col, th in (((255, 255, 255), 5), ((26, 26, 26), 2)):
+                cv2.putText(img, c["super"], (x - 30, y + 8), cv2.FONT_HERSHEY_SIMPLEX, 0.9, col, th, cv2.LINE_AA)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(path), img, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    return path
+
+
 # ============================================================== 5. HTML
 def _e(s) -> str:
     return html.escape(str(s if s is not None else ""))
@@ -1328,6 +1430,8 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 .card{border:1px solid var(--line-weak);border-radius:var(--radius);padding:12px 14px;min-height:0;overflow:hidden}
 .card p{margin:0 0 4px;font-size:14px}
 figure{margin:0}figure img{width:100%;max-height:330px;object-fit:contain;border-radius:4px;background:var(--bg-sub)}
+.cols3 .card figure img{max-height:168px}.cols3 .card figure figcaption{font-size:11px}
+.card .todo{font-size:13px;line-height:1.55}
 figcaption{font-size:13px;color:var(--text-sub)}
 ul.plain{margin:0;padding-left:1.2em}ul.plain li{margin:0 0 6px}
 .empty{color:var(--text-sub);font-size:14px}
@@ -1429,6 +1533,18 @@ def howto_slides(cfg: dict, key: dict, rows: list[dict], prs: dict, foot: str) -
                       f'<div><span class="label ok">構成の形から言えること</span><ul class="plain sub">{sw[0]}</ul>'
                       f'<span class="label ng">気をつけること</span><ul class="plain sub">{sw[1]}</ul></div></div>',
                       foot))
+    # エージェントが足りないとき（同じ役割で代える）
+    alt = H.alternatives(comp.get("roles") or {}, cfg)
+    if alt:
+        trs = "".join(f'<tr><td>{_e(a["agent"])}</td><td>{_e(a["role"])}</td>'
+                      f'<td>{_e(a["subgroup"] or "-")}</td><td>{_e("、".join(a["picks"]) or "-")}</td></tr>'
+                      for a in alt)
+        out.append(_slide("Comp", "エージェントが足りないとき（同じ役割で代える）",
+                          f'<table><thead><tr><th>いないとき</th><th>役割</th><th>できること</th>'
+                          f'<th>代わりになりやすい</th></tr></thead><tbody>{trs}</tbody></table>'
+                          '<p class="sub">役割が同じというだけで、スキルの中身は違います。'
+                          '「できること」が同じもの（壁型スモーク・設置型センチネルなど）から先に試してください。'
+                          'スモークの位置や合わせ方は、型ごとの見本の動画を見て作り直す必要があります。</p>', foot))
     # 相手の形を見てどうするか
     cols = []
     for side in (ATTACK, DEFENSE):
@@ -1448,6 +1564,73 @@ def howto_slides(cfg: dict, key: dict, rows: list[dict], prs: dict, foot: str) -
         lis = "".join(f'<li><b>{_e(w)}</b>：{_e(d)}</li>' for w, d in gl)
         out.append(_slide("Words", "この冊子で使っている言葉", f'<ul class="plain sub cols2">{lis}</ul>', foot))
     return out
+
+
+CHEAT_CSS = """
+:root{--key:#0017c1;--key-weak:#e8f1fe;--text:#1a1a1a;--text-sub:#4d4d4d;--line-weak:#d9d9d9;--bg:#fff;
+--ok:#197a4b;--ng:#ce0000}
+*{box-sizing:border-box}
+body{margin:0;background:#e6e6e6;color:var(--text);font:12px/1.55 "Noto Sans JP",system-ui,sans-serif}
+.sheet{width:210mm;min-height:297mm;margin:0 auto;background:var(--bg);padding:12mm 10mm}
+h1{font-size:19px;margin:0 0 2px}h2{font-size:13px;margin:10px 0 4px;color:var(--key);
+border-bottom:2px solid var(--key);padding-bottom:2px}
+p{margin:0 0 4px}.sub{color:var(--text-sub);font-size:11px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:6mm}
+ol,ul{margin:0;padding-left:1.2em}li{margin:0 0 3px}
+table{border-collapse:collapse;width:100%;font-size:11px}
+th,td{border-bottom:1px solid var(--line-weak);padding:2px 4px;text-align:left;vertical-align:top}
+th{background:#f2f2f2}
+.tag{display:inline-block;border-radius:999px;padding:0 6px;font-size:10px;color:#fff;background:var(--text-sub)}
+.tag.ok{background:var(--ok)}.tag.ng{background:var(--ng)}
+.name{font-weight:700}
+@media print{body{background:#fff}.sheet{width:auto;min-height:0;padding:0}@page{size:A4;margin:10mm}}
+"""
+
+
+def build_cheatsheet(cfg: dict, key: dict, rows: list[dict], prs: dict, out_dir: Path) -> Path:
+    """「まず覚えること」だけを A4 1 枚に。練習前に 5 人で見るための紙。"""
+    from . import howto as H
+    comp = H.comp_notes(H.agent_roles(cfg, list(key.get("comp") or []), log=None))
+    duty = H.duties(rows)
+    st = H.steps(prs[ATTACK], prs[DEFENSE], comp, duty)
+    secs = []
+    for g in st:
+        lis = "".join(f'<li><span class="name">{_e(it["name"])}</span> {_e(it["todo"])}</li>' for it in g["items"])
+        secs.append(f'<h2>{g["no"]}. {_e(g["title"])}</h2><ul>{lis}</ul>')
+    reads_html = ""
+    for side, label in ((ATTACK, "攻め"), (DEFENSE, "守り")):
+        rs = reads([r for r in rows if r["side"] == side], side, k=3)
+        if rs:
+            reads_html += (f'<h2>相手の形を見てどうするか（{label}）</h2><ul>'
+                           + "".join(f"<li>{_e(read_line(g, side))}</li>" for g in rs) + "</ul>")
+    hard = [g for sd in (ATTACK, DEFENSE) for g in prs[sd]
+            if (g.get("difficulty") or {}).get("level") == "むずかしい"][:5]
+    hard_html = ("<h2>そろってから使う型</h2><ul>"
+                 + "".join(f'<li><span class="name">{_e(g["name"])}</span> '
+                           f'{_e((g.get("difficulty") or {}).get("note"))}</li>' for g in hard) + "</ul>") if hard else ""
+    gl = H.glossary_for([g["name"] for sd in prs for g in prs[sd]]
+                        + [g.get("todo") or "" for sd in prs for g in prs[sd]], k=8)
+    gl_html = ("<h2>言葉</h2><ul class=\"sub\">"
+               + "".join(f"<li><b>{_e(w)}</b>：{_e(d)}</li>" for w, d in gl) + "</ul>") if gl else ""
+    maps = len({(r["match_id"], r["order"]) for r in rows})
+    page = (f'<!doctype html><html lang="ja"><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<title>{_e(key["title"])}（1 枚）</title>'
+            f'<link rel="preconnect" href="https://fonts.googleapis.com">'
+            f'<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&display=swap" rel="stylesheet">'
+            f'<style>{CHEAT_CSS}</style></head><body><main class="sheet">'
+            f'<h1>{_e(key["title"])}　まず覚えること</h1>'
+            f'<p class="sub">{_e(" / ".join(key.get("comp") or []))}｜{maps} マップ・'
+            f'{len({(r["match_id"], r["order"], r["n"]) for r in rows})} ラウンドから。'
+            f'カッコの中は回数と勝率。印刷すると A4 1 枚になります。</p>'
+            f'<div class="two"><div>{"".join(secs)}</div>'
+            f'<div>{reads_html}{hard_html}{gl_html}</div></div>'
+            f'<p class="sub">スキル（スモーク・フラッシュ）の出し方は動画でしか分かりません。'
+            f'冊子の型ごとに見本の動画の時刻が書いてあります。</p>'
+            f'</main></body></html>')
+    f = out_dir / f"{key['slug']}_cheat.html"
+    f.write_text(page, encoding="utf-8")
+    return f
 
 
 def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir: Path, log=print) -> Path:
@@ -1473,6 +1656,7 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
 
     prs = {sd: playbook_rows([r for r in rows if r["side"] == sd], sd) for sd in (DEFENSE, ATTACK)}
     slides += howto_slides(cfg, key, rows, prs, foot)
+    cheat = build_cheatsheet(cfg, key, rows, prs, out_dir)
 
     for side in (DEFENSE, ATTACK):
         srows = [r for r in rows if r["side"] == side]
@@ -1517,22 +1701,39 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
             part = [g for g in prs[side] if g["kind"] in grp]
             if not part:
                 continue
-            cards = []
-            for g in part:
-                im = g.get("img") or {}
-                fig = ""
-                if len(part) <= 3:
-                    f_ = position_png(cfg, map_name, g["rows"], im.get("mark"),
-                                      img_dir / f"{g['slug']}.jpg", calls, plant=bool(im.get("plant")))
-                    fig = _fig(f_, "この型のときの位置") if f_ else ""
-                body = "".join(f'<p class="sub">{_e(x)}</p>' for x in g["lines"][1:])
-                cards.append(f'<div class="card"><h3>{_e(g["name"])}<span class="sub"> {_e(g["kind"])}</span></h3>'
-                             f'<p class="todo">{_e(g.get("todo") or "")}</p>'
-                             f'<p>{_e(g["lines"][0])}</p>{body}'
-                             + (f'<p class="sub">解説の言及：{_e("・".join(g["mentions"]))}</p>' if g["mentions"] else "")
-                             + f'<p class="sub">{_ex_links(g["rows"])}</p>{fig}</div>')
-            slides.append(_slide(en, head, f'<div class="cols3">{"".join(cards)}</div>'
-                                 + (f'<p class="sub">{_e(hint)}</p>' if hint else ""), foot))
+            for k0 in range(0, len(part), 3):
+                cards = []
+                for g in part[k0:k0 + 3]:
+                    im = g.get("img") or {}
+                    # 初動の型は「5 人がどこに立つか」の図、2 巡目やリテイクは位置の重ね合わせ
+                    f_ = None
+                    if g["kind"] in ("Default", "Push"):
+                        f_ = setup_png(cfg, map_name, g, img_dir / f"{g['slug']}_set.jpg", calls, rows)
+                    if f_ is None:
+                        f_ = position_png(cfg, map_name, g["rows"], im.get("mark"),
+                                          img_dir / f"{g['slug']}.jpg", calls, plant=bool(im.get("plant")))
+                    cap = "5 人の立ち位置（数字は平均人数）" if g["kind"] in ("Default", "Push") else "この型のときの位置"
+                    fig = _fig(f_, cap) if f_ else ""
+                    d = g.get("difficulty") or {}
+                    lv = {"やさしい": "ok", "ふつう": "", "むずかしい": "ng"}.get(d.get("level"), "")
+                    # 図に出ている情報（よく映る場所・担当）はカードの文からは省く
+                    skip = ("見本の動画", "よく映る場所", "担当（")
+                    keep = [x for x in g["lines"][1:] if not x.startswith(skip)][:2]
+                    body = "".join(f'<p class="sub">{_e(x)}</p>' for x in keep)
+                    vid = next((x for x in g["lines"] if x.startswith("見本の動画")), "")
+                    cards.append(f'<div class="card"><h3>{_e(g["name"])}<span class="sub"> {_e(g["kind"])}</span>'
+                                 + (f'<span class="label {lv}">{_e(d.get("level"))}</span>' if d else "") + '</h3>'
+                                 f'<p class="todo">{_e(g.get("todo") or "")}</p>{fig}'
+                                 f'<p>{_e(g["lines"][0])}</p>{body}'
+                                 + (f'<p class="sub">そろえること：{_e(d.get("note"))}</p>' if d.get("note") else "")
+                                 + (f'<p class="sub">{_e(vid)}</p>' if vid else "")
+                                 + f'<p class="sub">{_ex_links(g["rows"])}</p></div>')
+                n_part = (len(part) + 2) // 3
+                note = (hint + "スキル（スモーク・フラッシュ）の出し方は数字からは分からないので、"
+                        "各カードの見本の動画をその時刻から見てください。") if hint and k0 == 0 else ""
+                slides.append(_slide(en, head + (f" {k0 // 3 + 1}" if n_part > 1 else ""),
+                                     f'<div class="cols3">{"".join(cards)}</div>'
+                                     + (f'<p class="sub">{_e(note)}</p>' if note else ""), foot))
         if side == DEFENSE:
             for s_ in CORE:
                 rr = [r for r in srows if r["plant_site"] == s_]
@@ -1670,7 +1871,8 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
             f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>{_e(title)}</title>'
             f'<link rel="preconnect" href="https://fonts.googleapis.com">'
             f'<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&display=swap" rel="stylesheet">'
-            f'<style>{CSS}</style></head><body><main class="deck"><div class="toolbar"><p><a href="index.html">← 一覧</a></p>'
+            f'<style>{CSS}</style></head><body><main class="deck"><div class="toolbar">'
+            f'<p><a href="index.html">← 一覧</a>　<a href="{_e(cheat.name)}">📄 まず覚えること（A4 1 枚・印刷用）</a></p>'
             f'<p>印刷（PDF 保存）すると 1 スライド 1 ページになります</p></div>{"".join(slides)}</main></body></html>')
     f = out_dir / f"{slug}.html"
     f.write_text(page, encoding="utf-8")
