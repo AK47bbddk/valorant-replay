@@ -883,9 +883,11 @@ def _agent_setups(agent_info: dict | None, round_tac: dict, ranks: dict | None =
             if sum(zones.values()) < 4:
                 continue
             side = ATTACK if (rt.get("side1") == ATTACK) == (tm == 1) else DEFENSE
-            who = {}
+            who, who_area = {}, {}
             for e in sorted((e for e in ents if e.get("agent")), key=lambda e: e["agent"]):
                 who.setdefault(e.get("zone") or "?", []).append(e["agent"])
+                if (a := area_name(e.get("zone"), e.get("callout"))):
+                    who_area.setdefault(a, []).append(e["agent"])
             old_su = (rt.get("setups") or {}).get(str(tm)) or {}
             areas = Counter(a for e in ents if (a := area_name(e.get("zone"), e.get("callout"))))
             shape = " ".join(f"{z}{zones[z]}" for z in CORE_ZONES if zones.get(z))
@@ -900,6 +902,7 @@ def _agent_setups(agent_info: dict | None, round_tac: dict, ranks: dict | None =
                 "callouts": sorted(areas.elements()),
                 "side": side, "n": len(ents), "source": "agents", "mark": label,
                 "who": {z: v for z, v in who.items() if z in CORE_ZONES},
+                "who_area": who_area,           # 誰がどのエリアに立つか（5 人の担当）
                 "dots_shape": old_su.get("shape")}
 
 

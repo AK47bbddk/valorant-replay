@@ -169,6 +169,13 @@ def report(mid, t1, t2, seed, map_name="Split", strong_retake=None):
             side = "攻撃" if tm == atk_no else "防衛"
             su = T.setup_of(ps, t0, side, ranks=ranks) if ranks is not None else T.setup_of(ps, t0, side)
             if su:
+                # アイコン照合ができたマップと同じように、誰がどのエリアにいるかを入れる
+                pat = plan["atk"] if tm == atk_no else plan["def"]
+                who, who_area = {}, {}
+                for ag, lab in zip(AG[name[tm]], pat):
+                    who_area.setdefault(lab, []).append(ag)
+                    who.setdefault(ar[lab]["zone"], []).append(ag)
+                su = {**su, "who": who, "who_area": who_area, "source": "agents"}
                 setups[str(tm)] = su
         e1, e2 = ECOS.get(n, ("full", "full"))
         rounds.append({"n": n, "winner": name[w], "winner_no": w, "score": f"{s1}-{s2}", "how": how,

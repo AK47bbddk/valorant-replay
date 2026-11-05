@@ -727,8 +727,13 @@ def _cluster(name: str, rs: list[dict], merged: list[str] | None = None) -> dict
     shapes = Counter((r.get("setup") or {}).get("shape") or "" for r in rs)
     areas = Counter(a for r in rs if (a := (r.get("setup") or {}).get("area")))
     shape = shapes.most_common(1)[0][0]
+    # 立ち位置：エリアごとの平均人数（「B Link 2人・Mid Top 1人」と読める形）
+    tot: Counter = Counter()
+    for r in rs:
+        tot.update((r.get("setup") or {}).get("areas") or {})
+    spread = {a: round(v / len(rs), 1) for a, v in tot.items() if v / len(rs) >= 0.5}
     from . import tactics
-    return {"name": name, "n": len(rs), "w": sum(r["win"] for r in rs), "rows": rs,
+    return {"name": name, "n": len(rs), "w": sum(r["win"] for r in rs), "rows": rs, "spread": spread,
             "shape": shape, "code": (rs[0].get("setup") or {}).get("code") or tactics.shape_code(shape),
             "area": areas.most_common(1)[0][0] if areas else None,
             "callouts": [c for c, cn in calls.most_common(6) if cn >= max(1, len(rs) * 0.4)],
@@ -966,6 +971,52 @@ def def_sets(rows: list[dict], min_n: int = 2) -> list[dict]:
     return out
 
 
+# ---------------------------------------------------------------- 相手の形を見てどうするか
+def reads(rows: list[dict], side: str, min_n: int = 2, k: int = 6) -> list[dict]:
+    """「相手がこう来たらこうする」。相手の 1:15 の形ごとに、こちらの攻め先（守りなら設置された
+    サイト）と勝率を並べる。初心者がいちばん迷うところなので、数字のまま出す。"""
+    by: dict[str, list] = defaultdict(list)
+    for r in for_default(rows):
+        op = (r.get("opp_setup") or {})
+        nm = op.get("name")
+        if not nm:
+            continue
+        by[nm].append(r)
+    out = []
+    for nm, rs in by.items():
+        if len(rs) < min_n:
+            continue
+        sites = Counter(r["plant_site"] for r in rs if r["plant_site"])
+        best = None
+        if sites:
+            cand = [(s, c, sum(x["win"] for x in rs if x["plant_site"] == s)) for s, c in sites.items()]
+            best = max(cand, key=lambda t: ((t[2] / t[1]) if t[1] else 0, t[1]))
+        out.append({"opp": nm, "n": len(rs), "w": sum(r["win"] for r in rs), "sites": sites,
+                    "best": best, "rows": rs,
+                    "acts": Counter(g["name"] for g in sets(rs, k=3) for _ in range(g["n"]))
+                    if side == ATTACK else Counter()})
+    out.sort(key=lambda g: -g["n"])
+    return out[:k]
+
+
+def read_line(g: dict, side: str) -> str:
+    """reads の 1 行を文にする。"""
+    if side == ATTACK:
+        act = "、".join(f"{a} {c}" for a, c in g["acts"].most_common(2)) or "-"
+        tail = ""
+        if g["best"]:
+            s, c, w = g["best"]
+            tail = f"　→ いちばん勝てているのは {s}（{w}/{c}）"
+        return f"相手が「{g['opp']}」で来たとき（{g['n']} 回・勝ち {g['w']}）：{act}{tail}"
+    sites = "、".join(f"{s} {c}" for s, c in g["sites"].most_common()) or "設置させず勝つことが多い"
+    tail = ""
+    if g["sites"]:
+        s0, c0 = g["sites"].most_common(1)[0]
+        w0 = sum(r["win"] for r in g["rows"] if r["plant_site"] == s0)
+        tail = f"　→ {s0} に来ることが多い（{c0}/{g['n']}）。{s0} を厚めにして、取り返しは {w0}/{c0}"
+    return f"相手が「{g['opp']}」で来たとき（{g['n']} 回・勝ち {g['w']}）：設置されたサイト {sites}{tail}"
+
+
 # ---------------------------------------------------------------- ピストル・アンチエコ
 def buy_rows(rows: list[dict], min_n: int = 1) -> list[dict]:
     out = []
@@ -1093,8 +1144,10 @@ def playbook_rows(rows: list[dict], side: str, k: int = 6) -> list[dict]:
                         "img": {"plant": True} if retake else {"mark": "1:15"}})
     for g in buy_rows(srows):
         out.append({**g, "lines": _lines_plain(g, side), "img": {"mark": "1:15"}, "tags": []})
+    from . import howto as H
     for g in out:
         g.setdefault("tags", [])
+        g["todo"] = H.row_todo(g, side)                 # 初心者向けの「やること」
         g["mentions"] = _caster_tags(g["rows"])
         g["buys"] = Counter(r["buy"] for r in g["rows"] if r.get("buy") and r["buy"] != "?")
         if g["kind"] != "Pistol":
@@ -1280,6 +1333,11 @@ ul.plain{margin:0;padding-left:1.2em}ul.plain li{margin:0 0 6px}
 .empty{color:var(--text-sub);font-size:14px}
 .chips span{display:inline-block;background:var(--key-weak);border-radius:999px;padding:0 10px;margin:0 6px 6px 0;
 font-size:14px}
+.todo{background:var(--key-weak);border-left:6px solid var(--key);border-radius:4px;padding:8px 10px;
+font-size:14px;margin:0 0 6px}
+ol.steps{margin:0;padding-left:1.4em}ol.steps>li{margin:0 0 10px;font-size:15px}
+ol.steps ul{margin:2px 0 0}ol.steps ul li{margin:0 0 3px;font-size:14px;line-height:1.6}
+ul.cols2{columns:2;column-gap:28px}
 @media (max-width:900px){.slide{aspect-ratio:auto;padding:24px 20px 40px}.cols,.cols3{grid-template-columns:1fr}
 .slide h1{font-size:30px}.slide h2{font-size:22px}.foot{left:20px;right:20px}}
 @media print{body{background:#fff}.toolbar{display:none}.deck{padding:0;max-width:none}
@@ -1338,6 +1396,60 @@ def _fig(src, cap: str) -> str:
     return f'<figure><img src="{_e(src)}" alt="{_e(cap)}" loading="lazy"><figcaption>{_e(cap)}</figcaption></figure>'
 
 
+def howto_slides(cfg: dict, key: dict, rows: list[dict], prs: dict, foot: str) -> list[str]:
+    """初心者がそのまま真似するための最初の数枚：手順・構成と担当・読み合い・用語。"""
+    from . import howto as H
+    out = []
+    comp = H.comp_notes(H.agent_roles(cfg, list(key.get("comp") or []), log=None))
+    duty = H.duties(rows)
+    st = H.steps(prs[ATTACK], prs[DEFENSE], comp, duty)
+    if st:
+        for k0 in range(0, len(st), 3):
+            part = st[k0:k0 + 3]
+            lis = ""
+            for g in part:
+                kids = "".join(f'<li><b>{_e(it["name"])}</b>　{_e(it["todo"])}</li>' for it in g["items"])
+                lis += f'<li><b>{_e(g["title"])}</b><ul class="plain sub">{kids}</ul></li>'
+            out.append(_slide("How to copy", "まず覚えること（この順番でそろえる）"
+                              + (f" {k0 // 3 + 1}" if len(st) > 3 else ""),
+                              f'<ol class="steps">{lis}</ol>'
+                              '<p class="sub">カッコの中は回数と勝率です。回数が少ない型は「たまたま」のこともあるので、'
+                              '回数の多いものから覚えてください。</p>', foot))
+    # 構成と担当
+    ag = "".join(f'<tr><td>{_e(a["agent"])}</td><td>{_e(a["role"])}</td>'
+                 f'<td>{_e("・".join(f"{x[0]}（{x[1]} 回）" for x in next((d["areas"] for d in duty if d["agent"] == a["agent"]), [])[:2]) or "-")}</td></tr>'
+                 for a in comp["agents"])
+    sw = ("".join(f'<li>{_e(x)}</li>' for x in comp["strong"]),
+          "".join(f'<li>{_e(x)}</li>' for x in comp["weak"]))
+    out.append(_slide("Comp", "この構成の形（5 人の役割と担当）",
+                      f'<p>{_e(comp["line"])}</p>'
+                      f'<div class="cols"><div><table><thead><tr><th>エージェント</th><th>役割</th>'
+                      f'<th>よく立つ場所</th></tr></thead><tbody>{ag}</tbody></table>'
+                      '<p class="sub">「よく立つ場所」はミニマップのアイコン照合ができたラウンドだけの集計です。</p></div>'
+                      f'<div><span class="label ok">構成の形から言えること</span><ul class="plain sub">{sw[0]}</ul>'
+                      f'<span class="label ng">気をつけること</span><ul class="plain sub">{sw[1]}</ul></div></div>',
+                      foot))
+    # 相手の形を見てどうするか
+    cols = []
+    for side in (ATTACK, DEFENSE):
+        rs = reads([r for r in rows if r["side"] == side], side)
+        if not rs:
+            continue
+        lis = "".join(f'<li>{_e(read_line(g, side))}</li>' for g in rs)
+        cols.append(f'<div><h3>{"攻め" if side == ATTACK else "守り"}</h3><ul class="plain sub">{lis}</ul></div>')
+    if cols:
+        out.append(_slide("Read", "相手の形を見てどうするか", f'<div class="cols">{"".join(cols)}</div>'
+                          '<p class="sub">相手の 1:15 の形ごとに、このチームが実際に選んだ攻め先と勝ち負けを並べています。'
+                          '「人数の少ない方に行く」が基本です。</p>', foot))
+    # 用語
+    texts = [g["name"] for sd in (ATTACK, DEFENSE) for g in prs[sd]] + [g["todo"] for sd in (ATTACK, DEFENSE) for g in prs[sd]]
+    gl = H.glossary_for(texts)
+    if gl:
+        lis = "".join(f'<li><b>{_e(w)}</b>：{_e(d)}</li>' for w, d in gl)
+        out.append(_slide("Words", "この冊子で使っている言葉", f'<ul class="plain sub cols2">{lis}</ul>', foot))
+    return out
+
+
 def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir: Path, log=print) -> Path:
     """1 つのプレイブック（team × map × comp、または comp × map）。"""
     from . import tactics
@@ -1356,8 +1468,11 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
     opps = "、".join(f"{o}（{d or '?'}）" for _, _, d, o in maps[-6:])
     slides.append(_slide(map_name, title, f'<p class="sub" style="font-size:20px">{_e(comp)}</p>'
                          f'<p class="sub">元にした試合：{_e(opps)}</p>'
-                         f'<p class="sub">strong / weak point は同じマップの全チーム平均との差から自動で選んでいます。'
-                         f'人の解説（なぜそうするか）を足して完成させてください。</p>', foot, h1=True))
+                         f'<p class="sub">はじめの 4 枚は「この構成をそのまま真似するための手順」です。'
+                         f'そのあとに数字の裏づけ（strong / weak point・型ごとの集計）が続きます。</p>', foot, h1=True))
+
+    prs = {sd: playbook_rows([r for r in rows if r["side"] == sd], sd) for sd in (DEFENSE, ATTACK)}
+    slides += howto_slides(cfg, key, rows, prs, foot)
 
     for side in (DEFENSE, ATTACK):
         srows = [r for r in rows if r["side"] == side]
@@ -1386,7 +1501,6 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
                              f'<div class="cols" style="grid-template-columns:1fr 1fr;gap:12px">{"".join(figs) or "<p class=empty>位置の画像はまだ作れません</p>"}</div></div>',
                              foot))
         # 型の一覧（Notion のデータベースと同じ名前・同じ行）
-        prs = playbook_rows(srows, side)
         for grp, head, hint in (
             (["Default", "Push"], "Default 一覧（初動の配置）",
              "1:15（取れなければ 6〜20 秒）にミニマップで見えた位置から、取りに行く場所（キーエリア）で型を分けています。"
@@ -1400,7 +1514,7 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
             (["Pistol", "AntiEco"], "ピストル・アンチエコ",
              "デフォルトの集計からは外し、ここだけで見ます。"),
         ):
-            part = [g for g in prs if g["kind"] in grp]
+            part = [g for g in prs[side] if g["kind"] in grp]
             if not part:
                 continue
             cards = []
@@ -1413,6 +1527,7 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
                     fig = _fig(f_, "この型のときの位置") if f_ else ""
                 body = "".join(f'<p class="sub">{_e(x)}</p>' for x in g["lines"][1:])
                 cards.append(f'<div class="card"><h3>{_e(g["name"])}<span class="sub"> {_e(g["kind"])}</span></h3>'
+                             f'<p class="todo">{_e(g.get("todo") or "")}</p>'
                              f'<p>{_e(g["lines"][0])}</p>{body}'
                              + (f'<p class="sub">解説の言及：{_e("・".join(g["mentions"]))}</p>' if g["mentions"] else "")
                              + f'<p class="sub">{_ex_links(g["rows"])}</p>{fig}</div>')
@@ -1463,6 +1578,7 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
         srows = sorted([r for r in rows if r["side"] == side], key=lambda r: (str(r["date"]), r["match_id"], r["n"]))
         if not srows:
             continue
+        srows = srows[-26:]                 # 生のログなので直近 26 ラウンドだけ（残りは元データから追える）
         for k0 in range(0, len(srows), 13):
             part = srows[k0:k0 + 13]
             trs = "".join(
@@ -1475,7 +1591,8 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
                 f"<td>{_e('・'.join((r.get('caster') or {}).get('tags', [])[:3]))}</td>"
                 f"<td>{('<a href=' + chr(34) + _e(r['yt']) + chr(34) + '>▶</a>') if r['yt'] else ''}</td></tr>"
                 for r in part)
-            slides.append(_slide(SIDE_EN[side], f"ラウンドの流れ（{side}）" + (f" {k0 // 13 + 1}" if len(srows) > 13 else ""),
+            slides.append(_slide(SIDE_EN[side], f"ラウンドの流れ（{side}・直近）"
+                                 + (f" {k0 // 13 + 1}" if len(srows) > 13 else ""),
                                  f'<table><thead><tr><th>ラウンド</th><th>組み立て</th><th>初動の配置・攻め先</th><th>初動ファイト</th>'
                                  f'<th>設置（残り）</th><th>結果・勝因</th><th>解説の言及</th><th></th></tr></thead>'
                                  f'<tbody>{trs}</tbody></table>', foot))

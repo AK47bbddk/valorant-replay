@@ -194,6 +194,36 @@ def _summary_lines(llm_text: str | None, side_label: str, strong: list[dict], we
     return out or [_para(_rt("まだデータが少なく、はっきりした傾向は出ていません", color="gray"))]
 
 
+def _howto_blocks(cfg: dict, key: dict, rows: list[dict], prs: dict) -> list[dict]:
+    """初心者がそのまま真似できるように、冊子の頭に置く「まず覚えること」。"""
+    from . import howto as H
+    comp = H.comp_notes(H.agent_roles(cfg, list(key.get("comp") or []), log=None))
+    duty = H.duties(rows)
+    out = [_h(1, "まず覚えること（この順番でそろえる）"),
+           {"type": "callout", "callout": {"rich_text": [_rt(
+               "5 人そろったら上から順にそろえてください。カッコの中は回数と勝率です。"
+               "回数の多い型から覚えると、同じ形で練習しやすくなります。")],
+               "icon": {"type": "emoji", "emoji": "🔰"}}}]
+    for st in H.steps(prs[ATTACK], prs[DEFENSE], comp, duty):
+        out.append(_h(3, f"{st['no']}. {st['title']}"))
+        for it in st["items"]:
+            out.append(_bullet(_rt(f"{it['name']}　", bold=True), _rt(it["todo"])))
+    out.append(_h(3, "この構成の形"))
+    out.append(_para(_rt(comp["line"])))
+    for x in comp["strong"]:
+        out.append(_bullet(_rt("強み：", bold=True), _rt(x)))
+    for x in comp["weak"]:
+        out.append(_bullet(_rt("気をつける：", bold=True), _rt(x)))
+    for side, label in ((ATTACK, "攻め"), (DEFENSE, "守り")):
+        rs = D.reads([r for r in rows if r["side"] == side], side)
+        if not rs:
+            continue
+        out.append(_h(3, f"相手の形を見てどうするか（{label}）"))
+        for g in rs:
+            out.append(_bullet(_rt(D.read_line(g, side))))
+    return out
+
+
 def export(nt: Notion, cfg: dict, key: dict, rows: list[dict], base: list[dict], parent: str, img_dir: Path,
            log=print, reps: dict | None = None) -> str:
     """1 冊ぶんを Notion に書く。同じ名前のページが親の下にあれば中身を作り直す。返り値はページ URL。"""
@@ -217,6 +247,8 @@ def export(nt: Notion, cfg: dict, key: dict, rows: list[dict], base: list[dict],
         _h(1, "概要")])
     meta = D.tactics_meta(cfg, key["map"])
     up = _Uploader(nt)
+    prs = {sd: D.playbook_rows([r for r in rows if r["side"] == sd], sd) for sd in (ATTACK, DEFENSE)}
+    nt.append(pid, _howto_blocks(cfg, key, rows, prs))
     for side, label in ((ATTACK, "ATK"), (DEFENSE, "DEF")):
         srows = [r for r in rows if r["side"] == side]
         ms = D.evaluate(rows, base, side)
@@ -226,8 +258,10 @@ def export(nt: Notion, cfg: dict, key: dict, rows: list[dict], base: list[dict],
             continue
         nt.append(pid, _plan_blocks(rows, side, label))
         ds = _db(nt, pid, label, D.KINDS)
-        for g in D.playbook_rows(srows, side):
-            left = [_para(_rt(g["lines"][0], bold=True))]
+        for g in prs[side]:
+            left = [{"type": "callout", "callout": {"rich_text": [_rt(g.get("todo") or g["lines"][0])],
+                                                    "icon": {"type": "emoji", "emoji": "🎯"}}},
+                    _para(_rt(g["lines"][0], bold=True))]
             left += [_bullet(_rt(x)) for x in g["lines"][1:]]
             if g["mentions"]:
                 left.append(_bullet(_rt("解説の言及：" + "・".join(g["mentions"]))))
@@ -255,5 +289,12 @@ def export(nt: Notion, cfg: dict, key: dict, rows: list[dict], base: list[dict],
     for side, label in ((ATTACK, "ATK"), (DEFENSE, "DEF")):
         for p in D.points(D.evaluate(rows, base, side), False, k=2):
             memo.append(_bullet(_rt(f"{label} 弱み：", bold=True), _rt(p["title"])))
+    from . import howto as H
+    gl = H.glossary_for([g["name"] for sd in prs for g in prs[sd]]
+                        + [g.get("todo") or "" for sd in prs for g in prs[sd]])
+    if gl:
+        memo.append({"type": "toggle", "toggle": {
+            "rich_text": [_rt("この冊子で使っている言葉（クリックで開く）")],
+            "children": [_bullet(_rt(f"{w}：", bold=True), _rt(d)) for w, d in gl]}})
     nt.append(pid, memo)
     return f"https://www.notion.so/{pid.replace('-', '')}"

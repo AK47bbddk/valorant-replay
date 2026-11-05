@@ -194,3 +194,46 @@ def test_notion_playbook_export(tmp_path, monkeypatch):
     assert videos
     assert NP.page_id("https://app.notion.com/p/delight-split-vyse-comp-14fd54a7c90b806b967ed86afa4f4e8e") == \
         "14fd54a7c90b806b967ed86afa4f4e8e"
+
+
+def test_howto_makes_copyable_instructions(tmp_path, monkeypatch):
+    """初心者がそのまま真似できる形：行ごとの「やること」・5 人の担当・覚える順番・用語。"""
+    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
+    from vreplay import howto as H
+    monkeypatch.setattr(H, "agent_roles", lambda cfg, names, log=None:
+                        {n: H.FALLBACK_ROLES.get(H._norm(n), "?") for n in names})
+    rows = [r for rep in [report(str(i), "G2", "SEN", i) for i in range(4)] for r in deck.records(rep)]
+    g2 = [r for r in rows if r["team"] == "G2"]
+    atk = deck.playbook_rows([r for r in g2 if r["side"] == deck.ATTACK], deck.ATTACK)
+    dfd = deck.playbook_rows([r for r in g2 if r["side"] == deck.DEFENSE], deck.DEFENSE)
+    # 行ごとの「やること」は指示形で、立ち位置と回数が入る
+    first = next(g for g in atk if g["kind"] == "Default")
+    assert "人" in first["todo"] and "始める" in first["todo"] and f"{first['n']} 回" in first["todo"]
+    assert all(g.get("todo") for g in atk + dfd)
+    rush = next((g for g in atk if g["kind"] == "Rush"), None)
+    assert rush and "まっすぐ入る" in rush["todo"]
+    ret = next(g for g in dfd if g["kind"] == "Retake")
+    assert "設置" in ret["todo"]
+    # 5 人の担当（アイコン照合できたラウンドから）
+    duty = H.duties([r for r in g2 if r["side"] == deck.ATTACK])
+    assert len(duty) == 5 and all(d["areas"] for d in duty)
+    # 構成の形：食い違う指摘は出さない
+    comp = H.comp_notes(H.agent_roles(None, list(g2[0]["comp"])))
+    assert "コントローラー 2" in comp["line"] and comp["strong"]
+    assert not any("スモークが 1 枚" in x for x in comp["weak"])
+    # 覚える順番と用語
+    st = H.steps(atk, dfd, comp, duty)
+    assert st[0]["title"].startswith("5 人") and len(st) >= 4
+    assert all(s["items"] for s in st)
+    gl = H.glossary_for([g["name"] for g in atk + dfd] + [g["todo"] for g in atk + dfd])
+    assert any(w == "テイクデフォ" for w, _ in gl) and any(w == "2 巡目" for w, _ in gl)
+
+
+def test_reads_tell_what_to_do_against_each_opponent_shape(tmp_path, monkeypatch):
+    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
+    rows = [r for rep in [report(str(i), "G2", "SEN", i) for i in range(4)] for r in deck.records(rep)]
+    g2 = [r for r in rows if r["team"] == "G2"]
+    rs = deck.reads([r for r in g2 if r["side"] == deck.ATTACK], deck.ATTACK)
+    assert rs and all(g["n"] >= 2 for g in rs)
+    line = deck.read_line(rs[0], deck.ATTACK)
+    assert "相手が「" in line and "いちばん勝てているのは" in line
