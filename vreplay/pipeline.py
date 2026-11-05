@@ -1040,8 +1040,9 @@ def _run_body(cfg: dict, days, match_urls, no_video, force, upsert_only, log, t0
     pcfg = cfg.get("pipeline") or {}
     map_workers = max(1, int(pcfg.get("map_workers") or 1))
     _SCAN_SLOT = threading.BoundedSemaphore(max(1, int(pcfg.get("scan_slots") or 1)))
-    from . import extract as _X
-    _X.set_ocr_pool(int(pcfg.get("ocr_pool") or map_workers + 1))
+    if not upsert_only:  # extract は cv2 を使う。毎朝の Notion 更新（cv2 なし）では読まない
+        from . import extract as _X
+        _X.set_ocr_pool(int(pcfg.get("ocr_pool") or map_workers + 1))
 
     token = os.environ.get("NOTION_TOKEN")
     nt = Notion(token) if token and cfg["notion"]["enabled"] else None
