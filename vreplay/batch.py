@@ -21,7 +21,9 @@ from . import db, perf, report, vlr
 from .pipeline import _slug, _work_root, analyze_video, base_report, download
 
 
-def _status_sql(retry_failed: bool) -> str:
+def _status_sql(retry_failed: bool, force: bool = False) -> str:
+    if force:                       # --force：解析済みのマップも新しいコードでやり直す
+        return "('meta','failed','done')"
     return "('meta','failed')" if retry_failed else "('meta')"
 
 
@@ -39,8 +41,8 @@ def _shard_ok(match_id: str, order: int, shard: str | None) -> bool:
 
 
 def _rows(conn, start: str | None, end: str | None, retry_failed: bool,
-          shard: str | None, limit: int | None):
-    statuses = _status_sql(retry_failed)
+          shard: str | None, limit: int | None, force: bool = False):
+    statuses = _status_sql(retry_failed, force)
     sql = ("SELECT mp.match_id, mp.map_order, mp.map_name, mp.vod_id, mp.vod_t, "
            "       m.url, m.dt_jst, m.team1, m.team2, m.event, m.stage "
            "FROM maps mp JOIN matches m ON m.id = mp.match_id "
@@ -68,7 +70,7 @@ def run(cfg: dict, start: str | None = None, end: str | None = None, limit: int 
     perf.start()
     t0 = time.time()
     conn = db.open_warehouse(cfg)
-    rows = _rows(conn, start, end, retry_failed, shard, limit)
+    rows = _rows(conn, start, end, retry_failed, shard, limit, force)
     if not rows:
         log("処理待ちのマップがありません。先に `vreplay backfill` を実行してください。")
         perf.stop()

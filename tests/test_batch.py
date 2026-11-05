@@ -41,3 +41,10 @@ def test_batch_processes_once_then_skips(tmp_path, monkeypatch):
 
     st = batch.run(cfg, log=lambda *a: None)
     assert st["maps_done"] == 1
+    # --force：解析済みのマップも新しいコードでやり直す
+    calls = []
+    monkeypatch.setattr(batch, "analyze_video", lambda *a, **k: calls.append(1) or fake_analyze(*a, **k))
+    batch.run(cfg, log=lambda *a: None)
+    assert calls == []
+    batch.run(cfg, force=True, log=lambda *a: None)
+    assert calls == [1]
