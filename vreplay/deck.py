@@ -1951,7 +1951,8 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
     export_positions(cfg, key, prs, calls, out_dir)
     try:                                  # 作戦ボードアプリ（TactiVal）に読み込ませる JSON
         from . import tactival as TV
-        TV.export(cfg, key, prs, out_dir, lambda g, side: motion_frames(g, calls, side), log=log)
+        TV.export(cfg, key, prs, out_dir, lambda g, side: motion_frames(g, calls, side), log=log,
+                  areas_xy=_area_xy(calls))
     except Exception as e:
         log(f"  TactiVal のボードを作れませんでした（{e}）")
 

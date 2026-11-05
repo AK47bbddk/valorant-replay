@@ -167,3 +167,50 @@ def test_calibrate_recovers_rotation():
     want2 = {"jett": tg2["spawn:攻撃"], "sage": tg2["spawn:防衛"], "omen": tg2["site:A"], "viper": tg2["site:B"]}
     c2 = TV.calibrate(_export([_agent_at(a, n[0] * s + ox, n[1] * s + oy) for a, n in want2.items()]), m2)
     assert abs(c2["rotation"]) < 0.5 and c2["rms"] < 0.5
+
+
+def test_calib_board_for_any_map():
+    """どのマップでも座標合わせ用のボードを作れる。すでに分かっていればその位置に置く。"""
+    meta = _meta("split")
+    b = TV.calib_board(None, "Split", meta)
+    assert b["mapId"] == "split" and len(b["steps"]) == 1
+    els = b["steps"][0]["elements"]
+    assert len(els) == 4 and "Jett=攻撃" in b["steps"][0]["label"]
+    ids = TV.agent_ids(TV.load_template(None))
+    assert [e["data"]["agentId"] for e in els] == [ids["jett"], ids["sage"], ids["omen"], ids["viper"]]
+    # guess があれば、その変換どおりの位置に置く（ドラッグがほぼ要らない）
+    g = TV.load_calib(None)["split"]
+    b2 = TV.calib_board(None, "Split", meta, guess=g)
+    tg = TV._targets(meta)
+    x, y = TV.to_px(*tg["spawn:攻撃"], g)
+    assert abs(b2["steps"][0]["elements"][0]["x"] - (x - 24)) < 0.1
+
+
+def test_bundled_calibration_has_split_and_sunset():
+    c = TV.load_calib(None)
+    assert c["split"]["points"] == 4 and abs(c["split"]["rotation"] - 92.9) < 0.1
+    assert c["sunset"]["approx"] is True and c["sunset"]["points"] == 2
+
+
+def test_arrows_are_written_only_when_the_template_shows_how():
+    """矢印の形は雛形から学ぶ。例が無ければ矢印は入れない。"""
+    frames = {"marks": ["1:15", "設置後"],
+              "dots": [{"label": "Viper", "xy": [[0.3, 0.3], [0.5, 0.5]]}]}
+    calib = {"scale": 1000.0, "ox": 0.0, "oy": 0.0}
+    areas_xy = {"B Link": (0.2, 0.2), "B Site": (0.8, 0.8)}
+    tpl = TV.load_template(None)
+    assert TV.arrow_sample(tpl) is None                       # 同梱の雛形には矢印が無い
+    b = TV.board(None, "Split", "型", frames, calib, tpl, arrows=[("B Link", "B Site")], areas_xy=areas_xy)
+    assert all(e["type"] == "agent" for st in b["steps"] for e in st["elements"])
+    # 矢印の入った雛形を渡すと、その形をまねて両端だけ差し替える
+    arrow = {"id": "a1", "type": "arrow", "x": 1.0, "y": 2.0, "x2": 3.0, "y2": 4.0,
+             "style": {"stroke": "#f00"}, "order": 9, "data": {"kind": "arrow"}}
+    tpl2 = {**tpl, "steps": [{"id": "s", "label": "", "transition": 1.5, "hold": 0,
+                              "elements": [arrow], "zoneVisibility": {}, "overrides": {}}]}
+    assert TV.arrow_sample(tpl2) is arrow or TV.arrow_sample(tpl2)["id"] == "a1"
+    b2 = TV.board(None, "Split", "型", frames, calib, tpl2,
+                  arrows=[("B Link", "B Site")], areas_xy=areas_xy)
+    ar = [e for e in b2["steps"][0]["elements"] if e["type"] == "arrow"]
+    assert len(ar) == 1
+    assert (ar[0]["x"], ar[0]["y"]) == (200.0, 200.0) and (ar[0]["x2"], ar[0]["y2"]) == (800.0, 800.0)
+    assert ar[0]["style"] == {"stroke": "#f00"} and ar[0]["id"] != "a1"
