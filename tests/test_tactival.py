@@ -95,19 +95,24 @@ def test_board_turns_marks_into_steps(tmp_path):
 
 
 def test_export_needs_calibration(tmp_path):
+    """座標合わせの済んでいないマップではボードを作らない。Split は既定値を同梱している。"""
     from vreplay import deck as D
     frames = {"marks": ["1:15"], "dots": [{"label": "Viper", "xy": [[0.5, 0.5]]}]}
     prs = {D.ATTACK: [{"name": "B Link テイクデフォ", "kind": "Default"}], D.DEFENSE: []}
-    key = {"map": "Split", "slug": "x", "title": "T"}
     cfg = {"output": {"dir": str(tmp_path)}}
     msgs = []
-    assert TV.export(cfg, key, prs, tmp_path, lambda g, s: frames, log=msgs.append) == []
+    haven = {"map": "Haven", "slug": "h", "title": "T"}
+    assert TV.export(cfg, haven, prs, tmp_path, lambda g, s: frames, log=msgs.append) == []
     assert any("座標合わせ" in m for m in msgs)
-    TV.save_calib(cfg, "split", {"scale": 1000.0, "ox": 0.0, "oy": 0.0})
-    out = TV.export(cfg, key, prs, tmp_path, lambda g, s: frames, log=lambda *a: None)
+    TV.save_calib(cfg, "haven", {"scale": 1000.0, "ox": 0.0, "oy": 0.0})
+    out = TV.export(cfg, haven, prs, tmp_path, lambda g, s: frames, log=lambda *a: None)
     assert len(out) == 1 and out[0].name.endswith(".tactival.json")
     b = json.loads(out[0].read_text("utf-8"))
-    assert b["mapId"] == "split" and b["steps"][0]["elements"][0]["data"]["agentId"]
+    assert b["mapId"] == "haven" and b["steps"][0]["elements"][0]["data"]["agentId"]
+    # Split は同梱の既定値があるので、何もしなくても作れる
+    split = {"map": "Split", "slug": "s", "title": "T"}
+    assert TV.load_calib(None).get("split", {}).get("m")
+    assert TV.export(cfg, split, prs, tmp_path, lambda g, s: frames, log=lambda *a: None)
 
 
 def _agent_at(agent, x, y, tpl=None):

@@ -80,9 +80,17 @@ def calib_path(cfg: dict) -> Path:
     return Path(cfg["output"]["dir"]) / "_cache" / CALIB
 
 
+BUNDLED_CALIB = Path(__file__).parent / "data" / "tactival_calib.json"
+
+
 def load_calib(cfg: dict | None) -> dict:
-    """{mapId: {"scale", "ox", "oy"}}。config の tactival.calibration が優先。"""
+    """{mapId: 変換}。同梱の既定値 < 自分で合わせたもの < config の tactival.calibration。"""
     out = {}
+    try:
+        if BUNDLED_CALIB.exists():
+            out.update(json.loads(BUNDLED_CALIB.read_text("utf-8")))
+    except Exception:
+        pass
     try:
         p = calib_path(cfg or {})
         if p.exists():
