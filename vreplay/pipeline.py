@@ -98,17 +98,47 @@ def _segment_bounds(m: vlr.Match, md: vlr.MapData, cfg: dict) -> tuple[int, int]
     return start, end
 
 
+class LowResolution(RuntimeError):
+    """取れた動画の解像度が低すぎて、HUD（キルログ・カード・ミニマップの縁）が読めない。"""
+
+
+def remove_download(p: Path) -> None:
+    """取得した動画（分割なら parts.json と各部分）を消す。キャッシュに低解像度のものを残さないため。"""
+    from .video import parts_of
+    for f, _, _ in parts_of(p) or []:
+        Path(f).unlink(missing_ok=True)
+    Path(p).unlink(missing_ok=True)
+
+
 def download(cfg: dict, m: vlr.Match, md: vlr.MapData, log=print) -> Path:
-    from .video import download_segment, resolve_cookies, video_size
+    from .video import download_segment, probe, resolve_cookies, video_size
     start, end = _segment_bounds(m, md, cfg)
     tag = f"{m.id}:{md.order}"
+    method = str(cfg["video"].get("download_method") or "range")
+    min_h = int(cfg["video"].get("min_height") or 0)
+
+    def get(how: str) -> Path:
+        return download_segment(md.vod_id, start, end, _work_root(cfg), cfg["video"]["max_height"],
+                                resolve_cookies(cfg), cache_dirs=[video_cache_dir(cfg)], log=log,
+                                fragments=int(cfg["video"].get("download_fragments") or 4),
+                                parts=int(cfg["video"].get("download_parts") or 1),
+                                method=how, range_threads=int(cfg["video"].get("download_threads") or 8))
     with perf.stage("download", tag=tag, label="動画の取得") as st:
-        p = download_segment(md.vod_id, start, end, _work_root(cfg), cfg["video"]["max_height"],
-                             resolve_cookies(cfg), cache_dirs=[video_cache_dir(cfg)], log=log,
-                             fragments=int(cfg["video"].get("download_fragments") or 4),
-                             parts=int(cfg["video"].get("download_parts") or 1),
-                             method=str(cfg["video"].get("download_method") or "range"),
-                             range_threads=int(cfg["video"].get("download_threads") or 8))
+        p = get(method)
+        # 1080p が取れずに 360p などへ落ちると、キルログ・カード・ミニマップの縁が読めず、
+        # 解析は「成功」しても中身がほぼ空になる（以前の良いレポートを上書きしてしまう）。
+        # 低ければ消して、もう一方の取得方法で 1 回だけ取り直し、それでも低ければこのマップは失敗にする
+        h = probe(p)[1]
+        if min_h and h < min_h:
+            other = "range" if method != "range" else "sections"
+            log(f"    {h}p しか取れなかったので、取得方法 {other} で取り直します")
+            remove_download(p)
+            p = get(other)
+            h = probe(p)[1]
+            if h < min_h:
+                remove_download(p)
+                raise LowResolution(f"{h}p の動画しか取れませんでした（{min_h}p 以上が必要）。"
+                                    "YouTube に高画質の形式を断られています。しばらく待つか、cookies を更新してから取り直してください")
         st["bytes"] = video_size(p)
     size = video_size(p)
     mbps = size / 1e6 / st["seconds"] if st["seconds"] > 0.05 else 0

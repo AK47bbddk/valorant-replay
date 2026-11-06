@@ -511,6 +511,9 @@ powershell -ExecutionPolicy Bypass -File .\valorant-replay\scripts\fetch_windows
 **動画の取得**：YouTube は 1 本の接続を 1 MB/s 前後に絞るので、本数で稼ぎます。既定は区間を 16 に分けて yt-dlp で同時に取る方法です
 （Colab で 12〜16 MB/s。次のマップの取得は解析と並行して進むので、待つのは最初のマップだけ）。
 Colab では範囲取得（下）に使える形式が返らないことが多かったので、`video.download_method: range` は試したいときだけにしています。
+**解像度の確認**：YouTube に高画質の形式を断られると、yt-dlp は 360p に落として取ってきます。360p ではキルログ・カード・ミニマップの縁が読めず、
+解析は「成功」しても中身がほぼ空になるので、`video.min_height`（既定 720）より低ければ動画を消してもう一方の取得方法（sections ↔ range）で 1 回取り直し、
+それでも低ければそのマップは失敗にします（以前のレポートは上書きされません。`batch` の再実行で取り直せます）。
 まず DASH の目次（sidx）から必要な時間帯のバイト範囲だけを 16 本同時に取ります（`video.download_method: range`）。
 URL の取得と通信はプロセス内の yt-dlp（区間取得と同じ cookies・クライアント・JS ランタイム）で行い、
 クライアント（tv・web_safari・既定・visionos・mweb・android_vr）ごとに、DASH（mp4）なら 1KB だけ取ってみて Range ヘッダーか

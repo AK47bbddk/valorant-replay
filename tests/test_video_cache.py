@@ -337,3 +337,45 @@ def test_split_download_redoes_low_resolution_parts(tmp_path, monkeypatch):
     man = V.download_segment("vid", 0, 480, tmp_path, 1080, method="sections", parts=2, overlap=12)
     hs = [f.read_text() for f, _, _ in V.parts_of(man)]
     assert hs == ["1080", "1080"]
+
+
+def _low_res_setup(tmp_path, monkeypatch, heights):
+    cfg = config.load()
+    cfg["output"]["dir"] = str(tmp_path)
+    cfg["video"]["download_method"] = "sections"
+    cfg["video"]["min_height"] = 720
+    m = vlr.Match(id="1", url="https://www.vlr.gg/1/x", team1="A", team2="B",
+                  dt_jst=datetime(2026, 10, 21, 20, tzinfo=vlr.JST))
+    md = vlr.MapData(order=1, name="Bind", game_id="1", score1=13, score2=5, vod_id="v", vod_t=100)
+    m.maps = [md]
+    calls, files = [], {}
+
+    def fake_dl(vid, s, e, out, h, cookies, log=None, method="range", **kwargs):
+        calls.append(method)
+        p = Path(out) / f"{vid}_{s}_{e}_{len(calls)}.mp4"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+        files[str(p)] = heights[len(calls) - 1]
+        return p
+    monkeypatch.setattr(video, "download_segment", fake_dl)
+    monkeypatch.setattr(video, "probe", lambda p: (16 * files[str(p)] // 9, files[str(p)], 100.0))
+    monkeypatch.setattr(video, "video_size", lambda p: 1)
+    monkeypatch.setattr(pipeline, "_work_root", lambda cfg: tmp_path / "work")
+    return cfg, m, md, calls
+
+
+def test_low_resolution_retries_other_method(tmp_path, monkeypatch):
+    """1080p が取れずに 360p に落ちたら、もう一方の取得方法で取り直す（360p では HUD が読めない）。"""
+    cfg, m, md, calls = _low_res_setup(tmp_path, monkeypatch, [360, 1080])
+    p = pipeline.download(cfg, m, md, log=lambda *a: None)
+    assert calls == ["sections", "range"]
+    assert p.exists() and not any(f.name.endswith("_1.mp4") for f in (tmp_path / "work").iterdir())
+
+
+def test_low_resolution_fails_map(tmp_path, monkeypatch):
+    """どちらの方法でも低解像度なら、解析せずに失敗にする（以前の良いレポートを上書きしない）。"""
+    import pytest
+    cfg, m, md, calls = _low_res_setup(tmp_path, monkeypatch, [360, 360])
+    with pytest.raises(pipeline.LowResolution):
+        pipeline.download(cfg, m, md, log=lambda *a: None)
+    assert not list((tmp_path / "work").iterdir())

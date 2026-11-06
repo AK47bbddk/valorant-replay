@@ -38,6 +38,7 @@ video:
   download_threads: 16   # range のときの同時接続数（YouTube は 1 本を 1 MB/s 前後に絞るので本数で稼ぐ）
   download_parts: 16     # sections のとき（range が使えないとき）に区間をいくつに分けて同時に取るか
   download_fragments: 4  # 1 本の動画を yt-dlp が分割して並列取得する数（回線が速いなら 8 などに）
+  min_height: 720        # これより低い解像度しか取れなければ、そのマップは解析せず失敗にする（360p では HUD が読めない）
 
 hud:
   # タイマー・スコア・ラウンド表記の位置は放送ごとのプリセット（vreplay/layout.py）から自動で選ぶ。
