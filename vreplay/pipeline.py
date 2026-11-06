@@ -102,16 +102,8 @@ class LowResolution(RuntimeError):
     """取れた動画の解像度が低すぎて、HUD（キルログ・カード・ミニマップの縁）が読めない。"""
 
 
-def remove_download(p: Path) -> None:
-    """取得した動画（分割なら parts.json と各部分）を消す。キャッシュに低解像度のものを残さないため。"""
-    from .video import parts_of
-    for f, _, _ in parts_of(p) or []:
-        Path(f).unlink(missing_ok=True)
-    Path(p).unlink(missing_ok=True)
-
-
 def download(cfg: dict, m: vlr.Match, md: vlr.MapData, log=print) -> Path:
-    from .video import download_segment, probe, resolve_cookies, video_size
+    from .video import download_segment, probe, remove_video, resolve_cookies, video_size
     start, end = _segment_bounds(m, md, cfg)
     tag = f"{m.id}:{md.order}"
     method = str(cfg["video"].get("download_method") or "range")
@@ -132,11 +124,11 @@ def download(cfg: dict, m: vlr.Match, md: vlr.MapData, log=print) -> Path:
         if min_h and h < min_h:
             other = "range" if method != "range" else "sections"
             log(f"    {h}p しか取れなかったので、取得方法 {other} で取り直します")
-            remove_download(p)
+            remove_video(p)
             p = get(other)
             h = probe(p)[1]
             if h < min_h:
-                remove_download(p)
+                remove_video(p)
                 raise LowResolution(f"{h}p の動画しか取れませんでした（{min_h}p 以上が必要）。"
                                     "YouTube に高画質の形式を断られています。しばらく待つか、cookies を更新してから取り直してください")
         st["bytes"] = video_size(p)

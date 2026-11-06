@@ -19,6 +19,7 @@ from pathlib import Path
 
 from . import db, perf, report, vlr
 from .pipeline import _slug, _work_root, analyze_video, base_report, download
+from .video import remove_video
 
 
 def _status_sql(retry_failed: bool, force: bool = False) -> str:
@@ -138,11 +139,10 @@ def run(cfg: dict, start: str | None = None, end: str | None = None, limit: int 
                     conn.commit()
                     failed += 1
                     continue
+                path = None
                 try:
                     path = fut.result()
                     analyze_video(cfg, m, md, rep, map_dir, path, log)
-                    if not cfg["video"].get("keep_video") and path.parent == _work_root(cfg):
-                        path.unlink(missing_ok=True)
                     rep["timings"] = perf.for_tag(tag)
                     rep["perf_note"] = perf.note(rep["timings"])
                     map_dir.mkdir(parents=True, exist_ok=True)
@@ -161,6 +161,11 @@ def run(cfg: dict, start: str | None = None, end: str | None = None, limit: int 
                     db.mark_failed(conn, m.id, md.order, str(e))
                     conn.commit()
                     log(f"  {md.order}. {md.name}: 失敗 {e}")
+                finally:
+                    # 分割取得なら parts.json だけでなく各部分の動画も消す（1 マップ約 2GB。消し忘れると
+                    # 100 マップ前後で Colab のディスク 235GB が埋まってランタイムが落ちる）。失敗したマップも消す
+                    if path is not None and not cfg["video"].get("keep_video") and path.parent == _work_root(cfg):
+                        remove_video(path)
         finally:
             dl.shutdown(wait=False, cancel_futures=True)
 

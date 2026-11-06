@@ -56,3 +56,45 @@ def test_batch_processes_once_then_skips(tmp_path, monkeypatch):
     assert calls == [1, 1]
     batch.run(cfg, redo_before="2026-06-01T00:00:00", log=lambda *a: None)
     assert calls == [1, 1]
+
+
+def test_batch_removes_all_video_parts(tmp_path, monkeypatch):
+    """分割取得の動画は parts.json と各部分をすべて消す（消し忘れると Colab のディスクが埋まる）。失敗したマップも。"""
+    import json as _json
+    from vreplay import pipeline
+    cfg = config.load()
+    cfg["output"]["dir"] = str(tmp_path)
+    cfg["warehouse"]["path"] = str(tmp_path / "w.sqlite3")
+    cfg["notion"]["enabled"] = False
+    cfg["video"]["keep_video"] = False
+    m = vlr.Match(id="1", url="https://www.vlr.gg/1/a-vs-b", team1="A", team2="B",
+                  event="VCT 2026", stage="Group", dt_jst=datetime(2026, 1, 2, 12))
+    for k in (1, 2):
+        m.maps.append(vlr.MapData(order=k, name="Ascent", game_id=str(k), score1=13, score2=10,
+                                  rounds=[vlr.Round(1, 1, "攻撃", "elim")], vod_id=f"v{k}", vod_t=100,
+                                  vod_url=f"https://youtu.be/v{k}?t=100"))
+    conn = db.connect(db.warehouse_path(cfg))
+    db.upsert_match(conn, m)
+    conn.commit()
+    work = pipeline._work_root(cfg)
+
+    def fake_download(cfg_, m_, md, log=None):
+        parts = []
+        for i in range(3):
+            f = work / f"{md.vod_id}_100_200.p{i}.mp4"
+            f.write_bytes(b"x" * 10)
+            parts.append({"file": f.name, "offset": i * 30, "length": 30})
+        man = work / f"{md.vod_id}_100_200.parts.json"
+        man.write_text(_json.dumps({"parts": parts}), encoding="utf-8")
+        return man
+    monkeypatch.setattr(vlr, "parse_match", lambda url: m)
+    monkeypatch.setattr(batch, "download", fake_download)
+
+    def fake_analyze(cfg_, m_, md_, rep, out_dir, path, log):
+        if md_.order == 2:
+            raise RuntimeError("解析に失敗")
+        rep["video_ok"] = True
+        return rep
+    monkeypatch.setattr(batch, "analyze_video", fake_analyze)
+    batch.run(cfg, log=lambda *a: None)
+    assert not [p for p in work.iterdir() if p.suffix in (".mp4", ".json")]
