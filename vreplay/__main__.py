@@ -73,6 +73,7 @@ def main():
     bt.add_argument("--no-retry", action="store_true", help="失敗済みマップを飛ばす")
     bt.add_argument("--shard", help="1/4 のように分割（別プロセスで回すとき用）")
     bt.add_argument("--force", action="store_true", help="report.json があっても作り直す")
+    bt.add_argument("--redo-before", help="この時刻（例 2026-11-06T02:00）より前に解析したマップだけ作り直す。止まっても同じ値で再開できる")
     bt.add_argument("--out", help="出力ルート（既定 output.dir）")
     bt.add_argument("--config")
 
@@ -132,7 +133,8 @@ def main():
     elif a.cmd == "batch":
         from .batch import run as batch
         batch(cfg, start=parse_day(a.start).isoformat() if a.start else None, end=parse_day(a.end).isoformat() if a.end else None, limit=a.limit, retry_failed=not a.no_retry,
-              shard=a.shard, force=a.force, out_root=Path(a.out) if a.out else None)
+              shard=a.shard, force=a.force, out_root=Path(a.out) if a.out else None,
+              redo_before=a.redo_before)
     elif a.cmd == "playbook":
         from . import db, deck
         from .playbook import build

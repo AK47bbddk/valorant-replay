@@ -48,3 +48,11 @@ def test_batch_processes_once_then_skips(tmp_path, monkeypatch):
     assert calls == []
     batch.run(cfg, force=True, log=lambda *a: None)
     assert calls == [1]
+    # --redo-before：その時刻より前に解析したマップだけやり直す（やり直した後は、同じ値で再開しても飛ばす）
+    conn = db.connect(db.warehouse_path(cfg))
+    conn.execute("UPDATE maps SET updated_at='2026-01-01T00:00:00'")
+    conn.commit()
+    batch.run(cfg, redo_before="2026-06-01T00:00:00", log=lambda *a: None)
+    assert calls == [1, 1]
+    batch.run(cfg, redo_before="2026-06-01T00:00:00", log=lambda *a: None)
+    assert calls == [1, 1]

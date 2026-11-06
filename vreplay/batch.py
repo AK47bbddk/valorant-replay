@@ -41,13 +41,17 @@ def _shard_ok(match_id: str, order: int, shard: str | None) -> bool:
 
 
 def _rows(conn, start: str | None, end: str | None, retry_failed: bool,
-          shard: str | None, limit: int | None, force: bool = False):
-    statuses = _status_sql(retry_failed, force)
+          shard: str | None, limit: int | None, force: bool = False, redo_before: str | None = None):
+    statuses = _status_sql(retry_failed, force or bool(redo_before))
     sql = ("SELECT mp.match_id, mp.map_order, mp.map_name, mp.vod_id, mp.vod_t, "
            "       m.url, m.dt_jst, m.team1, m.team2, m.event, m.stage "
            "FROM maps mp JOIN matches m ON m.id = mp.match_id "
            f"WHERE mp.status IN {statuses} AND mp.vod_id IS NOT NULL AND mp.vod_t IS NOT NULL ")
     args: list = []
+    if redo_before and not force:
+        # 解析済みでも、この時刻より前に解析したマップだけやり直す（途中で止まっても、やり直した分は飛ばして再開できる）
+        sql += "AND (mp.status != 'done' OR mp.updated_at IS NULL OR mp.updated_at < ?) "
+        args.append(redo_before)
     if start:
         sql += "AND substr(m.dt_jst,1,10) >= ? "
         args.append(start)
@@ -66,11 +70,11 @@ def _rows(conn, start: str | None, end: str | None, retry_failed: bool,
 
 def run(cfg: dict, start: str | None = None, end: str | None = None, limit: int | None = None,
         retry_failed: bool = True, shard: str | None = None, force: bool = False,
-        out_root: Path | None = None, log=print) -> dict:
+        out_root: Path | None = None, log=print, redo_before: str | None = None) -> dict:
     perf.start()
     t0 = time.time()
     conn = db.open_warehouse(cfg)
-    rows = _rows(conn, start, end, retry_failed, shard, limit, force)
+    rows = _rows(conn, start, end, retry_failed, shard, limit, force, redo_before)
     if not rows:
         log("処理待ちのマップがありません。先に `vreplay backfill` を実行してください。")
         perf.stop()
@@ -115,7 +119,7 @@ def run(cfg: dict, start: str | None = None, end: str | None = None, limit: int 
             for r in target:
                 md = md_by_order[r["map_order"]]
                 map_dir = out_dir_day / f"{m.id}_{md.order}_{_slug(md.name)}"
-                if not force and (map_dir / "report.json").exists():
+                if not (force or redo_before) and (map_dir / "report.json").exists():
                     try:
                         prev = json.loads((map_dir / "report.json").read_text("utf-8"))
                         if prev.get("video_ok"):
