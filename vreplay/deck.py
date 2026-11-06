@@ -2089,21 +2089,17 @@ def round_story(r: dict) -> dict:
 def example_slide(g: dict, side: str, set_img, out_dir: Path, foot: str) -> str | None:
     """型の実例：重ね合わせ（参考）→ そのラウンドの開幕の配置図 → ラウンド中の GIF、の順に並べ、
     「誰がどこからどこへ動いたか」「そのラウンドで起きたこと」を書き出す。"""
-    import os
     r = example_round(g)
     if r is None:
         return None
     figs = []
     if set_img:
         figs.append(_fig(set_img, "① 型の重ね合わせ（この型の全ラウンド・参考）"))
-    if r.get("board") and Path(r["board"]).exists():
-        figs.append(_fig(Path(r["board"]), f"② このラウンドの配置（{board_mark(r['board'])}・アイコン照合）"))
-    if r.get("gif") and Path(r["gif"]).exists():
-        try:
-            rel = os.path.relpath(str(r["gif"]), str(out_dir)).replace(os.sep, "/")
-        except ValueError:
-            rel = str(r["gif"])
-        figs.append(f'<figure><img src="{_e(rel)}" alt="ラウンド中のミニマップ" loading="lazy">'
+    if _has(r.get("board")):
+        cap = f"② このラウンドの配置（{board_mark(r['board'])}・アイコン照合）"
+        figs.append(f'<figure>{media_img(r["board"], "jpg", cap)}<figcaption>{_e(cap)}</figcaption></figure>')
+    if _has(r.get("gif")):
+        figs.append(f'<figure>{media_img(r["gif"], "gif", "ラウンド中のミニマップ")}'
                     f'<figcaption>③ このラウンドのミニマップ（倍速・リプレイ除外）</figcaption></figure>')
     st = round_story(r)
     if not figs and not st["moves"]:
@@ -2136,6 +2132,101 @@ def board_mark(path) -> str:
     return f"{m.group(1)}:{m.group(2)}" if m else "開幕"
 
 
+# ---------------------------------------------------------------- 冊子に埋め込む画像・GIF（小さくして 1 回だけ）
+_MEDIA: dict[str, str] = {}               # キー → data URI（冊子ごとに作り直す）
+_THUMB_DIR: Path | None = None            # 縮小版のキャッシュ（output.dir/_cache/thumbs）
+GIF_W, GIF_FRAMES, JPG_W = 280, 60, 360
+
+
+def media_reset(cfg: dict | None = None) -> None:
+    global _THUMB_DIR
+    _MEDIA.clear()
+    d = ((cfg or {}).get("output") or {}).get("dir")
+    _THUMB_DIR = Path(d) / "_cache" / "thumbs" if d else None
+
+
+def _thumb_bytes(p: Path, kind: str) -> tuple[bytes, str] | None:
+    """GIF → 小さな動く WebP（幅 GIF_W・最大 GIF_FRAMES 枚、間引いた分は表示時間に足す）、画像 → 小さな JPEG。"""
+    import io
+    from PIL import Image
+    try:
+        im = Image.open(p)
+        if kind == "gif" and getattr(im, "n_frames", 1) > 1:
+            n = im.n_frames
+            step = max(1, math.ceil(n / GIF_FRAMES))
+            frames, durs = [], []
+            for k in range(0, n, step):
+                im.seek(k)
+                fr = im.convert("RGB")
+                h = max(1, round(fr.height * GIF_W / fr.width))
+                frames.append(fr.resize((GIF_W, h), Image.LANCZOS))
+                d = 0
+                for j in range(k, min(n, k + step)):
+                    im.seek(j)
+                    d += int(im.info.get("duration") or 100)
+                durs.append(max(20, d))
+            buf = io.BytesIO()
+            frames[0].save(buf, "WEBP", save_all=True, append_images=frames[1:], duration=durs, loop=0,
+                           quality=55, method=4)
+            return buf.getvalue(), "image/webp"
+        fr = im.convert("RGB")
+        if fr.width > JPG_W:
+            fr = fr.resize((JPG_W, max(1, round(fr.height * JPG_W / fr.width))), Image.LANCZOS)
+        buf = io.BytesIO()
+        fr.save(buf, "JPEG", quality=72)
+        return buf.getvalue(), "image/jpeg"
+    except Exception:
+        return None
+
+
+def media_key(path, kind: str = "jpg") -> str | None:
+    """画像・GIF を冊子に埋め込む用に縮小して登録し、キーを返す（同じものは 1 回だけ）。"""
+    import base64
+    import hashlib
+    if not _has(path):
+        return None
+    p = Path(path)
+    try:
+        key = hashlib.sha1(f"{p}:{p.stat().st_mtime_ns}:{kind}".encode()).hexdigest()[:12]
+    except OSError:
+        return None
+    if key in _MEDIA:
+        return key
+    data, mime = None, None
+    cache = (_THUMB_DIR / f"{key}.{'webp' if kind == 'gif' else 'jpg'}") if _THUMB_DIR else None
+    if cache is not None and cache.exists():
+        data, mime = cache.read_bytes(), ("image/webp" if kind == "gif" else "image/jpeg")
+    else:
+        got = _thumb_bytes(p, kind)
+        if got is None:
+            return None
+        data, mime = got
+        if kind == "gif" and mime != "image/webp":
+            cache = cache.with_suffix(".jpg") if cache else None
+        if cache is not None:
+            try:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                cache.write_bytes(data)
+            except OSError:
+                pass
+    _MEDIA[key] = f"data:{mime};base64," + base64.b64encode(data).decode()
+    return key
+
+
+def media_img(path, kind: str, alt: str) -> str:
+    k = media_key(path, kind)
+    return f'<img data-m="{k}" alt="{_e(alt)}" loading="lazy">' if k else ""
+
+
+def media_js() -> str:
+    """登録した画像・GIF をまとめて 1 回だけ載せ、ページを開いたときに img に入れる（同じ GIF を何度も埋め込まない）。"""
+    if not _MEDIA:
+        return ""
+    return ("<script>(function(){var M=" + json.dumps(_MEDIA) + ";"
+            "document.querySelectorAll('img[data-m]').forEach(function(i){var s=M[i.dataset.m];if(s){i.src=s;}});"
+            "})();</script>")
+
+
 def yt_plus(url: str | None, sec: float | None) -> str | None:
     """ラウンド開始の動画リンク（?t=秒）に、開始からの秒を足す。"""
     if not url:
@@ -2148,29 +2239,20 @@ def yt_plus(url: str | None, sec: float | None) -> str | None:
     return url[:m.start(2)] + str(max(0, int(m.group(2)) + int(sec))) + url[m.end(2):]
 
 
-def _rel(p, out_dir: Path) -> str:
-    import os
-    try:
-        return os.path.relpath(str(p), str(out_dir)).replace(os.sep, "/")
-    except ValueError:
-        return str(p)
-
-
 def _has(p) -> bool:
     return bool(p) and Path(p).exists()
 
 
 def tile(r: dict, out_dir: Path, at: float | None = None, note: str = "") -> str:
     """1 ラウンドぶん：開幕のミニマップ（配置図）＋ラウンド中の GIF ＋ 動画リンク（at があればその時刻から）。
-    画像は重いので埋め込まず、冊子からの相対パスで出す（Drive のフォルダのまま開けば見える）。"""
+    画像と GIF は小さくして冊子に埋め込む（HTML だけを開いても・ダウンロードしても見える）。"""
     imgs = ""
     if _has(r.get("board")):
-        imgs += (f'<img src="{_e(_rel(r["board"], out_dir))}" alt="配置（{board_mark(r["board"])}）"'
-                 ' loading="lazy">')
+        imgs += media_img(r["board"], "jpg", f"配置（{board_mark(r['board'])}）")
     elif _has(r.get("start_img")):
-        imgs += f'<img src="{_e(_rel(r["start_img"], out_dir))}" alt="開幕のミニマップ" loading="lazy">'
+        imgs += media_img(r["start_img"], "jpg", "開幕のミニマップ")
     if _has(r.get("gif")):
-        imgs += f'<img src="{_e(_rel(r["gif"], out_dir))}" alt="ラウンド中のミニマップ（GIF）" loading="lazy">'
+        imgs += media_img(r["gif"], "gif", "ラウンド中のミニマップ（GIF）")
     url = yt_plus(r.get("yt"), at)
     cap = (f'vs {_e(r.get("opp_tag") or r.get("opp"))} R{r.get("n")} {"〇" if r.get("win") else "✕"}'
            + (f"　{_e(note)}" if note else "")
@@ -2280,7 +2362,7 @@ def area_take_slides(rows: list[dict], side: str, out_dir: Path, foot: str) -> l
                       note=lambda r, a=a: (f"{a} 着 残り {_left(_arrive(r, a))}" if _arrive(r, a) is not None else ""))
         out.append(_slide(SIDE_EN[side], f"エリアテイク：{a}（{'攻め' if side == ATTACK else '守り'}）",
                           f'<ul class="plain">{ul}</ul>{gal}'
-                          '<p class="sub">左が開幕の配置（1:40）、右がラウンド中のミニマップ（GIF）。'
+                          '<p class="sub">左が配置図、右がラウンド中のミニマップ（GIF）。'
                           '動画はそのエリアに着く少し前から再生します。</p>', foot))
     return out
 
@@ -2468,6 +2550,7 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
     map_name = key["map"]
     slug = key["slug"]
     img_dir = out_dir / "img" / slug
+    media_reset(cfg)
     meta = tactics.load_map(map_name, cfg, log=None) or {}
     calls = meta.get("callouts") or []
     maps = sorted({(r["match_id"], r["order"], r["date"], r["opp"]) for r in rows}, key=lambda x: str(x[2]))
@@ -2730,7 +2813,7 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
             f'<style>{CSS}</style></head><body><main class="deck"><div class="toolbar">'
             f'<p><a href="index.html">← 一覧</a>　<a href="{_e(cheat.name)}">📄 まず覚えること（A4 1 枚・印刷用）</a></p>'
             f'<p>印刷（PDF 保存）すると 1 スライド 1 ページになります</p></div>{"".join(slides)}</main>'
-            f'{MOTION_JS}</body></html>')
+            f'{MOTION_JS}{media_js()}</body></html>')
     f = out_dir / f"{slug}.html"
     f.write_text(page, encoding="utf-8")
     data = {"key": {k: v for k, v in key.items() if k != "rows"}, "rounds": len(rows),

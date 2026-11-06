@@ -407,16 +407,10 @@ def test_route_goes_around_walls():
 
 def test_example_slide_shows_board_gif_and_moves(tmp_path):
     """実例：重ね合わせ → 開幕の配置図 → GIF の順に並べ、エージェントごとの動きと起きたことを書く。"""
-    import numpy as np
-    import cv2
     rows = _agent_rows()
-    day = tmp_path / "2026-03-01" / "1_1_Split"
-    day.mkdir(parents=True)
+    board, gif = _media(tmp_path)
     for r in rows:
-        b, gf = day / f"board_r{r['n']:02d}.jpg", day / f"r{r['n']:02d}_minimap.gif"
-        cv2.imwrite(str(b), np.full((20, 20, 3), 200, np.uint8))
-        gf.write_bytes(b"GIF89a")
-        r["board"], r["gif"] = str(b), str(gf)
+        r["board"], r["gif"] = str(board), str(gif)
     g = {"name": "A Main テイクデフォ", "rows": rows}
     ex = deck.example_round(g)
     assert ex["win"] and ex["n"] in (1, 3)
@@ -424,30 +418,51 @@ def test_example_slide_shows_board_gif_and_moves(tmp_path):
     jett = next(m for m in st["moves"] if m["agent"] == "Jett")
     assert jett["line"] == "A Lobby（1:40） → A Main（1:15） → A Site（0:40）"
     assert any("最初のキル" in e and "Jett" in e for e in st["events"]) and any("設置：A" in e for e in st["events"])
-    out = tmp_path / "playbook"
-    out.mkdir()
-    s = deck.example_slide(g, deck.ATTACK, None, out, "foot")
-    assert "実例：A Main テイクデフォ" in s and "data:image/jpeg;base64," in s
-    assert f'src="../2026-03-01/1_1_Split/r{ex["n"]:02d}_minimap.gif"' in s     # GIF は重いので相対パスで
+    deck.media_reset({"output": {"dir": str(tmp_path)}})
+    s = deck.example_slide(g, deck.ATTACK, None, tmp_path, "foot")
+    assert "実例：A Main テイクデフォ" in s and "data-m=" in s and "このラウンドの配置（1:40" in s
+    assert "data:image/webp" in deck.media_js()               # GIF は HTML に入っている
     assert "GIF から読み取れる動き" in s and "Jett" in s and "youtu.be" in s
 
 
-def test_yt_plus_and_tiles_link_gif_and_board(tmp_path):
+def _media(tmp_path):
+    """本物に近い配置図（JPEG）とミニマップの GIF を作る。"""
+    from PIL import Image, ImageDraw
+    d = tmp_path / "2026-03-01" / "m"
+    d.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (512, 512), (90, 90, 90)).save(d / "board_r07_140.jpg")
+    frames = []
+    for i in range(90):
+        im = Image.new("RGB", (480, 480), (30, 30, 30))
+        ImageDraw.Draw(im).ellipse((i * 4, 200, i * 4 + 20, 220), fill=(255, 60, 60))
+        frames.append(im)
+    frames[0].save(d / "r07_minimap.gif", save_all=True, append_images=frames[1:], duration=100, loop=0)
+    return d / "board_r07_140.jpg", d / "r07_minimap.gif"
+
+
+def test_yt_plus_and_tiles_embed_gif_and_board(tmp_path):
+    """GIF と配置図は小さくして HTML に埋め込む（HTML だけを開いても見える）。同じものは 1 回だけ。"""
     assert deck.yt_plus("https://youtu.be/x?t=100", 25.7) == "https://youtu.be/x?t=125"
     assert deck.yt_plus("https://youtu.be/x?t=100", None) == "https://youtu.be/x?t=100"
     assert deck.yt_plus(None, 3) is None
-    d = tmp_path / "2026-03-01" / "m"
-    d.mkdir(parents=True)
-    (d / "b.jpg").write_bytes(b"x")
-    (d / "g.gif").write_bytes(b"x")
-    out = tmp_path / "playbook"
-    out.mkdir()
-    r = {"board": str(d / "b.jpg"), "gif": str(d / "g.gif"), "yt": "https://youtu.be/x?t=10", "win": True,
+    board, gif = _media(tmp_path)
+    deck.media_reset({"output": {"dir": str(tmp_path)}})
+    r = {"board": str(board), "gif": str(gif), "yt": "https://youtu.be/x?t=10", "win": True,
          "n": 7, "opp_tag": "SEN", "date": "2026-03-01"}
-    t = deck.tile(r, out, at=30)
-    assert 'src="../2026-03-01/m/b.jpg"' in t and 'src="../2026-03-01/m/g.gif"' in t and "t=40" in t
+    t = deck.tile(r, tmp_path, at=30)
+    assert t.count("data-m=") == 2 and "t=40" in t and "../" not in t and "1:40" in t
+    js = deck.media_js()
+    assert "data:image/webp;base64," in js and "data:image/jpeg;base64," in js
+    from PIL import Image
+    import base64, io, re
+    w = Image.open(io.BytesIO(base64.b64decode(re.search(r"data:image/webp;base64,([A-Za-z0-9+/=]+)", js).group(1))))
+    assert w.width == deck.GIF_W and w.n_frames <= deck.GIF_FRAMES      # 動く・小さい・コマを間引く
+    # 同じラウンドが何度出ても、埋め込みは 1 回
+    deck.tile(r, tmp_path, at=50)
+    assert deck.media_js().count("data:image/webp") == 1
+    assert list((tmp_path / "_cache" / "thumbs").glob("*.webp"))    # 次からは縮小版を使い回す
     # 動画リンクのあるものは全部 GIF つきで並ぶ（k 個まで）
-    g = deck.gallery([r, {**r, "n": 8, "win": False}, {**r, "n": 9, "yt": None, "gif": None}], out, k=4)
+    g = deck.gallery([r, {**r, "n": 8, "win": False}, {**r, "n": 9, "yt": None, "gif": None}], tmp_path, k=4)
     assert g.count('class="tile"') == 2
 
 
