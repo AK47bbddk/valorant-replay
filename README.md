@@ -514,6 +514,9 @@ Colab では範囲取得（下）に使える形式が返らないことが多�
 **解像度の確認**：YouTube に高画質の形式を断られると、yt-dlp は 360p に落として取ってきます。360p ではキルログ・カード・ミニマップの縁が読めず、
 解析は「成功」しても中身がほぼ空になるので、`video.min_height`（既定 720）より低ければ動画を消してもう一方の取得方法（sections ↔ range）で 1 回取り直し、
 それでも低ければそのマップは失敗にします（以前のレポートは上書きされません。`batch` の再実行で取り直せます）。
+2026 年 11 月時点の YouTube は PO トークンの無い取得に 360p しか返さないので、Colab のセル1で
+PO トークンのサーバー（[bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)、`scripts/pot_server.sh`）を起動します。
+yt-dlp のプラグインが 127.0.0.1:4416 から自動でトークンをもらうので、ほかの設定は要りません。
 まず DASH の目次（sidx）から必要な時間帯のバイト範囲だけを 16 本同時に取ります（`video.download_method: range`）。
 URL の取得と通信はプロセス内の yt-dlp（区間取得と同じ cookies・クライアント・JS ランタイム）で行い、
 クライアント（tv・web_safari・既定・visionos・mweb・android_vr）ごとに、DASH（mp4）なら 1KB だけ取ってみて Range ヘッダーか
