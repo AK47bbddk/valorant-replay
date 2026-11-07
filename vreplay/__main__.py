@@ -42,6 +42,7 @@ def main():
     r.add_argument("--date", default="yesterday", help="YYYY-MM-DD（JST）または yesterday")
     r.add_argument("--to", dest="date_to", help="この日まで（--date からの複数日をまとめて 1 回で処理）")
     r.add_argument("--match", nargs="*", help="VLR の試合 URL（指定時は日付より優先）")
+    r.add_argument("--map", nargs="*", dest="maps", help="このマップだけ解析する（例 --map Sunset）")
     r.add_argument("--no-video", action="store_true")
     r.add_argument("--force", action="store_true", help="作成済みのページも作り直す")
     r.add_argument("--upsert-only", action="store_true", help="Notion の試合・マップ行だけ更新（本文・動画解析なし）")
@@ -161,6 +162,8 @@ def main():
     cfg = config.load(a.config)
 
     if a.cmd == "run":
+        if getattr(a, "maps", None):
+            cfg.setdefault("filters", {})["maps"] = a.maps
         day = None if a.date == "yesterday" else parse_day(a.date)
         from .pipeline import run
         days = None

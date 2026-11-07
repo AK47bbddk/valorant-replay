@@ -1124,7 +1124,10 @@ def _run_body(cfg: dict, days, match_urls, no_video, force, upsert_only, log, t0
                         log(f"  Notion upsert 失敗: {e}")
                 if upsert_only:
                     continue
+                only = [x.lower() for x in (cfg.get("filters") or {}).get("maps") or []]
                 for md in m.maps:
+                    if only and (md.name or "").lower() not in only:
+                        continue                       # --map で絞ったときは、ほかのマップを解析しない
                     map_dir = out_root / f"{m.id}_{md.order}_{_slug(md.name)}"
                     page = pages.get(md.order)
                     done_json = map_dir / "report.json"
