@@ -508,7 +508,23 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
             _fit_overlay(background, placed, dots, fit_path)
         except Exception:
             fit_path = None
-    color_team = {"warm": 1 if warm1 else 2, "cool": 2 if warm1 else 1}
+    # 色の決まり方は放送で 2 通り：チームで決まる（暖色＝いつも同じチーム）か、攻守で決まる（暖色＝いつも攻め）。
+    # 攻守で決まる放送（Champions 2026 など）を 1 つの対応で数えると、後半のラウンドの攻守が全部逆になる。
+    # 前半・後半で別々に「暖色＝チーム1か」を決め、食い違えば攻守で決まる放送とみなす
+    side1_by_n = {int(r["n"]): _canon(r.get("side1")) for r in rlist}
+    warm1_of: dict[int, bool] = {}
+    color_mode = "team"
+    if T.get("ok"):
+        warm1_of, color_mode, cmsg = color_by_round(samples, placed, start_by_n, alive_fn, side1_by_n)
+        if color_mode == "side":
+            warm1 = warm1_of.get(1, warm1)
+            if log:
+                log(f"    {cmsg}")
+
+    def ct(n_) -> dict:
+        w_ = warm1_of.get(int(n_), warm1)
+        return {"warm": 1 if w_ else 2, "cool": 2 if w_ else 1}
+    color_team = ct(1)
 
     grid = np.zeros((GRID, GRID), int)
     grid_team = {1: np.zeros((GRID, GRID), int), 2: np.zeros((GRID, GRID), int)}
@@ -533,7 +549,7 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
     if alive_fn is not None:
         by_t: dict = {}
         for d in dots:
-            by_t.setdefault((d["t"], color_team.get(d["color"])), []).append(d)
+            by_t.setdefault((d["t"], ct(d["n"]).get(d["color"])), []).append(d)
         for (tt, team), ds in by_t.items():
             try:
                 al = alive_fn(tt)
@@ -553,7 +569,7 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
             continue
         gx, gy = min(GRID - 1, max(0, int(x * GRID))), min(GRID - 1, max(0, int(y * GRID)))
         grid[gy, gx] += 1
-        team = color_team.get(d["color"])
+        team = ct(n).get(d["color"])
         grid_team[team][gy, gx] += 1
         side = d.get("side1") if team == 1 else _opp(d.get("side1"))
         if side in grid_side:
@@ -631,14 +647,14 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
     agent_info = None
     mcache: dict = {}                     # 節目の照合結果を追跡でも使い回す（id(ミニマップ) → 照合結果）
     if agent_teams and keep:
-        agent_info = _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed, aspect,
+        agent_info = _agent_positions(cfg, meta, keep, agent_teams, ct, mask, reg, placed, aspect,
                                       T if T.get("ok") else None, background, out_dir, round_tac, log,
                                       icons=icons, icon_frac=icon_frac, alive_fn=alive_fn, art=art_crop,
                                       cache=mcache)
         _agent_setups(agent_info, round_tac, ranks)
     if agent_teams and (keep_trk or keep):
         try:
-            _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, placed, aspect, background,
+            _agent_tracks(cfg, keep_trk, keep, agent_teams, ct, mask, reg, placed, aspect, background,
                           round_tac, log, icons=icons, icon_frac=icon_frac, alive_fn=alive_fn,
                           every=track_every or 5.0, cache=mcache, threads=int(tcfg.get("track_threads") or 4))
         except Exception as e:                       # 追跡に失敗しても、ほかの結果は出す
@@ -663,6 +679,8 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
                       if k_ in T} if T.get("ok") else None,
         "orientation": k,
         "warm_team1": bool(warm1),
+        "color_mode": color_mode,                     # team＝色がチームで決まる／side＝攻守で決まる
+        "warm_team1_by_round": {str(k_): v_ for k_, v_ in sorted(warm1_of.items())} if warm1_of else None,
         "calibration": cal_msg,
         "calibration_score": round(float(score), 3),
         "callouts_placed": [{"name": c["name"], "super": c["super"], "x": round(c["x"], 4), "y": round(c["y"], 4)}
@@ -898,6 +916,27 @@ def _warm_team1(samples: list[dict], placed: list[dict], starts: dict, alive_fn=
     return yes >= no, f"スポーンと生存人数で {max(yes, no)}/{yes + no}"
 
 
+def color_by_round(samples: list[dict], placed: list[dict], starts: dict, alive_fn, side1_by_n: dict
+                   ) -> tuple[dict[int, bool], str, str]:
+    """色の決まり方（チームで決まる／攻守で決まる）を見分け、ラウンドごとの「暖色＝チーム1か」を返す。
+    前半（1〜12）と後半（13〜24）で別々に _warm_team1 を求め、食い違えば攻守で決まる放送とみなす
+    （そのときは延長も含め、各ラウンドの攻守から決める）。返り値 (warm1_of, "team"|"side", 説明)。"""
+    h1 = [s_ for s_ in samples if s_["n"] <= 12]
+    h2 = [s_ for s_ in samples if 13 <= s_["n"] <= 24]
+    if not h1 or not h2:
+        return {}, "team", ""
+    w1, v1 = _warm_team1(h1, placed, starts, alive_fn)
+    w2, v2 = _warm_team1(h2, placed, starts, alive_fn)
+    s1 = next((v for k_, v in sorted(side1_by_n.items()) if k_ <= 12 and v in (ATTACK, DEFENSE)), None)
+    if w1 == w2 or s1 is None:
+        return {}, "team", ""
+    # 前半の最初のラウンドで、暖色が攻めだったか
+    warm_is_atk = w1 == (s1 == ATTACK)
+    out = {n_: (sd == ATTACK) == warm_is_atk for n_, sd in side1_by_n.items() if sd in (ATTACK, DEFENSE)}
+    return out, "side", (f"ミニマップの色は攻守で決まる放送です（暖色＝{'攻め' if warm_is_atk else '守り'}・"
+                         f"前半 {v1}／後半 {v2}）→ ラウンドごとに色とチームを対応づけます")
+
+
 def _agent_setups(agent_info: dict | None, round_tac: dict, ranks: dict | None = None) -> None:
     """アイコンで 4 人以上を読めたチームは、初動の配置（型・形）をエージェントの位置で上書きする。
     点の数え方（重なり・スモークの誤検出）より確か。誰がどこにいるか（'A: Sova・Jett'）も付ける。"""
@@ -1077,7 +1116,7 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
     if not icons:
         return None
     icon_frac = icon_frac or ICON_FRAC
-    team_color = {v: k for k, v in color_team.items()}
+    ct_fn = color_team if callable(color_team) else (lambda n_, _c=color_team: _c)
     base = board_base(background, mask, art=art)
     out = {}
     first = None
@@ -1086,6 +1125,8 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
         if isinstance(frames, tuple):                 # 古い形（1 枚）
             frames = [frames]
         t = frames[0][1]
+        color_team_n = ct_fn(n)
+        team_color = {v: k for k, v in color_team_n.items()}
         alive = None
         if alive_fn is not None:
             try:
@@ -1095,7 +1136,7 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
                 alive = None
         per = []
         for d_, t_, mm in frames:
-            f_ = AG.match(mm, icons, agent_teams, color_team, icon_frac=icon_frac,
+            f_ = AG.match(mm, icons, agent_teams, color_team_n, icon_frac=icon_frac,
                           mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
                           alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None)
             per.append((t_ - frames[0][1] + d_, f_))
@@ -1181,7 +1222,9 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
     n_pts = n_det = 0
     cache = cache if cache is not None else {}
 
-    def one(item):
+    ct_fn = color_team if callable(color_team) else (lambda n_, _c=color_team: _c)
+
+    def one(item, n=0):
         t, mm = item
         if id(mm) in cache:
             return t, cache[id(mm)]
@@ -1192,7 +1235,7 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
                 alive = {1: a1, 2: a2} if a1 is not None and a2 is not None else None
             except Exception:
                 alive = None
-        return t, AG.match(mm, icons, agent_teams, color_team, icon_frac=icon_frac,
+        return t, AG.match(mm, icons, agent_teams, ct_fn(n), icon_frac=icon_frac,
                            mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
                            alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None)
 
@@ -1200,7 +1243,7 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
     from concurrent.futures import ThreadPoolExecutor
     todo = [(n, it) for n, frs in sorted(frames_by_n.items()) for it in sorted(frs, key=lambda x: x[0])]
     with ThreadPoolExecutor(max_workers=max(1, threads), thread_name_prefix="素材-追跡") as ex:
-        res = list(ex.map(lambda x: (x[0], one(x[1])), todo))
+        res = list(ex.map(lambda x: (x[0], one(x[1], x[0])), todo))
     found_by_n: dict[int, list] = {}
     for n, tf in res:
         found_by_n.setdefault(n, []).append(tf)

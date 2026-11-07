@@ -258,3 +258,19 @@ def test_key_area_takes_two_players_or_the_front():
     assert tactics.area_name("Mid", "Vent") == "Mid Vent" and tactics.area_name("A", "A Site") == "A Site"
     assert tactics.is_spawn("攻撃側", "Spawn") and not tactics.is_spawn("Mid", "Vent")
     assert tactics.shape_code("A1 Mid3 B1") == "1-3-1" and tactics.shape_code("A1 B2 C1 Mid1") == "1-2-1・MID1"
+
+
+def test_color_by_round_detects_side_colored_broadcast():
+    """暖色＝いつも攻め（攻守で色が決まる放送）なら、後半はチームと色の対応が入れ替わる。"""
+    placed = [{"name": "Spawn", "super": "Attacker Side", "x": 0.5, "y": 0.9},
+              {"name": "Spawn", "super": "Defender Side", "x": 0.5, "y": 0.1}]
+    side1 = {n: ("攻撃" if n <= 12 else "防衛") for n in range(1, 25)}
+    starts = {n: n * 100.0 for n in side1}
+    side_s = [{"n": n, "t": starts[n] - 2, "side1": side1[n], "warm": (0.5, 0.88), "cool": (0.5, 0.12)}
+              for n in side1]                                     # 暖色は毎ラウンド攻めのスポーン
+    w, mode, msg = tactics.color_by_round(side_s, placed, starts, None, side1)
+    assert mode == "side" and w[1] is True and w[13] is False and "攻守" in msg
+    team_s = [{**s, "warm": (s["warm"] if s["side1"] == "攻撃" else s["cool"]),
+               "cool": (s["cool"] if s["side1"] == "攻撃" else s["warm"])} for s in side_s]
+    w2, mode2, _ = tactics.color_by_round(team_s, placed, starts, None, side1)
+    assert mode2 == "team" and not w2
