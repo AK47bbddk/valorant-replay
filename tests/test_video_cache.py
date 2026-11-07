@@ -385,3 +385,28 @@ def test_low_resolution_fails_map(tmp_path, monkeypatch):
     with pytest.raises(pipeline.LowResolution):
         pipeline.download(cfg, m, md, log=lambda *a: None)
     assert not list((tmp_path / "work").iterdir())
+
+
+def test_one_failed_part_does_not_fail_the_map(tmp_path, monkeypatch):
+    """16 分割のうち 1 つが 403 などで取れなくても、待って取り直し、だめならその区間を除いて返す。"""
+    from vreplay import video as V
+    calls = {}
+
+    def fake_one(vid, a, b, out_dir, *args, **kw):
+        calls[a] = calls.get(a, 0) + 1
+        if a == 1200:
+            raise RuntimeError("yt-dlp failed（10 通りの取得方法をすべて試しました）: HTTP error 403 Forbidden")
+        f = out_dir / f"{vid}_{a}_{b}.mp4"
+        f.write_bytes(b"x")
+        return f
+    monkeypatch.setattr(V, "_download_one", fake_one)
+    monkeypatch.setattr(V, "has_video", lambda f: True)
+    monkeypatch.setattr(V, "_part_height", lambda f: 1080)
+    monkeypatch.setattr(V, "probe", lambda f: (1920, 1080, 10.0))
+    monkeypatch.setattr(V.time, "sleep", lambda s: None)
+    logs = []
+    man = V.download_segment("vid", 0, 2400, tmp_path, parts=4, method="sections", log=logs.append)
+    import json
+    parts = json.loads(man.read_text(encoding="utf-8"))["parts"]
+    assert len(parts) == 3 and calls[1200] == 3
+    assert any("除いて解析" in x for x in logs)

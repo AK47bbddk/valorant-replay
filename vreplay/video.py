@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 import os
 import shutil
 import subprocess
@@ -198,7 +199,25 @@ def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_hei
     bounds = [int(round(start + (end - start) * k / parts)) for k in range(parts + 1)]
     pieces = [(bounds[k], min(end, bounds[k + 1] + overlap)) for k in range(parts)]
     def get(se, retry=True):
-        f = _download_one(video_id, se[0], se[1], out_dir, max_height, cookies, cache_dirs, None, fragments)
+        # 1 つの部分が取れなくても（403・503・「ページを読み込み直して」など、同時に何本も取ると一時的に弾かれる）
+        # マップ全体を失敗にしない：間を空けて取り直し、それでもだめならその区間を除いて解析する
+        f, err = None, None
+        for k, wait in enumerate((0, 30, 90)):
+            if wait:
+                if log:
+                    log(f"    部分 {se[0]}〜{se[1]} 秒が取れなかったので、{wait} 秒待って取り直します（{k}/2）")
+                time.sleep(wait)
+            try:
+                f = _download_one(video_id, se[0], se[1], out_dir, max_height, cookies, cache_dirs, None, fragments)
+                break
+            except Exception as e:
+                if "Sign in to confirm" in str(e):
+                    raise
+                err = e
+        if f is None:
+            if log:
+                log(f"    部分 {se[0]}〜{se[1]} 秒は取れませんでした（{str(err).splitlines()[0][:200]}）。その区間を除いて解析します")
+            return None
         if has_video(f) or not retry:
             return f
         # 映像の入っていない部分（途中で切れた・音声だけ）は消して 1 回だけ取り直す
@@ -211,7 +230,7 @@ def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_hei
     with ThreadPoolExecutor(max_workers=parts, thread_name_prefix="取得-部分") as ex:
         files = list(ex.map(get, pieces))
     # 解像度をそろえる：max_height の部分があるのに低い部分があれば、その部分だけ max_height ちょうどで取り直す
-    hs = [_part_height(f) for f in files]
+    hs = [_part_height(f) if f is not None else 0 for f in files]
     low = [k for k, hh in enumerate(hs) if 0 < hh < max_height]
     if low and max(hs) >= max_height:
         if log:
@@ -230,12 +249,12 @@ def download_segment(video_id: str, start: int, end: int, out_dir: Path, max_hei
                 if f is not None and has_video(f):
                     files[k] = f
                 else:                                   # 取り直せなければ、低い解像度のまま（解析時に拡大してそろえる）
-                    files[k] = get(pieces[k], retry=False)
+                    files[k] = get(pieces[k], retry=False) or files[k]
     man = out_dir / f"{video_id}_{start}_{end}{PARTS}"
     entries = []
-    bad = [k for k, f in enumerate(files) if not has_video(f)]
+    bad = [k for k, f in enumerate(files) if f is None or not has_video(f)]
     if bad and log:
-        log(f"    {len(bad)} 個の部分は取り直しても映像が無かったので、その区間を除いて解析します")
+        log(f"    {len(bad)} 個の部分は取り直しても映像が無い・取れなかったので、その区間を除いて解析します")
     if len(bad) == len(files):
         raise RuntimeError("取得した動画に映像がありません（すべての部分）")
     for k, (f, (a, _)) in enumerate(zip(files, pieces)):

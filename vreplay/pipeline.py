@@ -1227,6 +1227,16 @@ def _run_body(cfg: dict, days, match_urls, no_video, force, upsert_only, log, t0
                 else:
                     traceback.print_exc()
                 rep["analysis_note"] = f"動画解析に失敗：{e}"
+        if not rep.get("video_ok") and not no_video:
+            # 作り直し（--force）で動画の取得・解析に失敗したとき、前回の動画解析済みの結果を VLR だけの中身で上書きしない
+            try:
+                old = json.loads((map_dir / "report.json").read_text(encoding="utf-8"))
+            except Exception:
+                old = None
+            if old and old.get("video_ok"):
+                log(f"    動画解析に失敗したので、前回の解析結果（report.json・Notion のページ）をそのまま残します"
+                    f"（{rep.get('analysis_note') or ''}）")
+                return day, old
         if any("reason" not in rr for rr in rep["rounds"]):
             add_reasons(rep)
         rep["timings"] = perf.for_tag(tag)
