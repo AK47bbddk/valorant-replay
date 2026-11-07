@@ -1582,6 +1582,13 @@ def mark_alignment(rows: list[dict], walk, th: float = 0.7) -> dict:
     if walk is None:
         return {}
     n = walk.shape[0]
+    # アイコンの中心は壁際だと細い通路の床から少しはみ出す（Champions の放送はアイコンが 16px と小さい）ので、
+    # 床をアイコン半個ぶん（マップの約 1.3%）広げてから数える
+    try:
+        import cv2
+        walk = cv2.dilate(walk.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+    except Exception:
+        pass
     by = defaultdict(list)
     for r in rows:
         by[(r.get("match_id"), r.get("order"))].append(r)
