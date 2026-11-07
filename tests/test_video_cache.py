@@ -9,8 +9,14 @@ def test_resolve_cookies(tmp_path, monkeypatch):
     cfg["output"]["dir"] = str(tmp_path)
     monkeypatch.delenv("YT_COOKIES", raising=False)
     assert video.resolve_cookies(cfg) == ""
+    (tmp_path / "cookies.txt").write_text("")
+    assert video.resolve_cookies(cfg) == ""                  # 空のファイルは無いものとする
     (tmp_path / "cookies.txt").write_text("# Netscape HTTP Cookie File\n")
-    assert video.resolve_cookies(cfg) == str(tmp_path / "cookies.txt")
+    c = video.resolve_cookies(cfg)
+    assert c != str(tmp_path / "cookies.txt") and open(c).read() == "# Netscape HTTP Cookie File\n"
+    open(c, "w").close()                                     # yt-dlp がコピーを空にしても元は残る
+    assert (tmp_path / "cookies.txt").read_text() == "# Netscape HTTP Cookie File\n"
+    assert open(video.resolve_cookies(cfg)).read() == "# Netscape HTTP Cookie File\n"
     monkeypatch.setenv("YT_COOKIES", ".youtube.com\tTRUE\t/\tTRUE\t0\tSID\tx")
     p = video.resolve_cookies(cfg)
     assert open(p).read().startswith("# Netscape HTTP Cookie File\n.youtube.com")

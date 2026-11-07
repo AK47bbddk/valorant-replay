@@ -21,20 +21,42 @@ COOKIE_HELP = (
     "手順は README の「YouTube に弾かれるとき」")
 
 
+def _cookie_copy(src: Path, tag: str) -> str:
+    """cookies.txt の作業用コピー（このプロセス専用）。空のファイルは無いものとする。
+
+    yt-dlp は終了時に --cookies のファイルへ cookies を書き戻す。元のファイルを直接渡すと、
+    分割取得の 16 本が同時に書き戻して壊したり、ディスクが一杯のときに 0 バイトにしたりする
+    （2026-11-06 に Drive の cookies.txt が 0 バイトになった）。元のファイルには書かせない。"""
+    try:
+        if src.stat().st_size == 0:
+            return ""
+    except OSError:
+        return ""
+    dst = Path(tempfile.gettempdir()) / f"vreplay_cookies_{tag}_{os.getpid()}.txt"
+    if not dst.exists() or dst.stat().st_size == 0 or dst.stat().st_mtime < src.stat().st_mtime:
+        shutil.copyfile(src, dst)
+        os.chmod(dst, 0o600)
+    return str(dst)
+
+
 def resolve_cookies(cfg: dict) -> str:
-    """cookies.txt の場所：config の video.cookies → 環境変数 YT_COOKIES（中身）→ 出力フォルダの cookies.txt。"""
+    """cookies.txt の場所：config の video.cookies → 環境変数 YT_COOKIES（中身）→ 出力フォルダの cookies.txt。
+    どれも作業用のコピーを返す（yt-dlp が元のファイルに書き戻さないように）。"""
     p = cfg["video"].get("cookies") or ""
     if p and Path(p).exists():
-        return p
+        c = _cookie_copy(Path(p), "cfg")
+        if c:
+            return c
     text = os.environ.get("YT_COOKIES", "").strip()
     if text:
-        f = Path(tempfile.gettempdir()) / "vreplay_cookies.txt"
+        f = Path(tempfile.gettempdir()) / f"vreplay_cookies_env_{os.getpid()}.txt"
         if not text.startswith("#"):
             text = "# Netscape HTTP Cookie File\n" + text
         f.write_text(text.replace("\r\n", "\n") + "\n", encoding="utf-8")
+        os.chmod(f, 0o600)
         return str(f)
     default = Path(cfg["output"]["dir"]) / "cookies.txt"
-    return str(default) if default.exists() else ""
+    return _cookie_copy(default, "drive") if default.exists() else ""
 
 
 def _ytdlp_env() -> dict:
