@@ -925,6 +925,36 @@ def color_by_round(samples: list[dict], placed: list[dict], starts: dict, alive_
     h2 = [s_ for s_ in samples if 13 <= s_["n"] <= 24]
     if not h1 or not h2:
         return {}, "team", ""
+    # ① 位置：開始の前後（−6〜+6 秒）に、暖色の重心が攻め側スポーンの方に近いラウンドの割合（前半・後半それぞれ）。
+    #    生存人数の手がかりは、カードの左右とチームの対応にも左右されるので、まずこちらで決める
+    sp = {("a" if "attacker" in str(c.get("super", "")).lower() else "d"): (c["x"], c["y"]) for c in placed or []
+          if str(c.get("name", "")).lower() == "spawn"}
+    if "a" in sp and "d" in sp:
+        def frac(hs):
+            per: dict = {}
+            for s_ in hs:
+                st = starts.get(s_["n"])
+                if st is None or not (st - 6 <= s_["t"] <= st + 6) or not s_.get("warm") or not s_.get("cool"):
+                    continue
+                dw = math.hypot(s_["warm"][0] - sp["a"][0], s_["warm"][1] - sp["a"][1]) - \
+                    math.hypot(s_["warm"][0] - sp["d"][0], s_["warm"][1] - sp["d"][1])
+                dc = math.hypot(s_["cool"][0] - sp["a"][0], s_["cool"][1] - sp["a"][1]) - \
+                    math.hypot(s_["cool"][0] - sp["d"][0], s_["cool"][1] - sp["d"][1])
+                per.setdefault(s_["n"], []).append(dw < dc)
+            vals = [sum(v) / len(v) >= 0.5 for v in per.values() if v]
+            return (sum(vals) / len(vals), len(vals)) if vals else (None, 0)
+        f1, n1 = frac(h1)
+        f2, n2 = frac(h2)
+        if f1 is not None and f2 is not None and n1 >= 4 and n2 >= 4:
+            sure = lambda f: f >= 0.7 or f <= 0.3
+            if sure(f1) and sure(f2) and (f1 >= 0.7) == (f2 >= 0.7):
+                warm_is_atk = f1 >= 0.7
+                out = {n_: (sd == ATTACK) == warm_is_atk for n_, sd in side1_by_n.items() if sd in (ATTACK, DEFENSE)}
+                return out, "side", (f"ミニマップの色は攻守で決まる放送です（暖色＝{'攻め' if warm_is_atk else '守り'}・"
+                                     f"開始直後に暖色が攻め側スポーン寄りのラウンド 前半 {f1:.0%}／後半 {f2:.0%}）"
+                                     f"→ ラウンドごとに色とチームを対応づけます")
+            if sure(f1) and sure(f2):
+                return {}, "team", ""
     w1, v1 = _warm_team1(h1, placed, starts, alive_fn)
     w2, v2 = _warm_team1(h2, placed, starts, alive_fn)
     s1 = next((v for k_, v in sorted(side1_by_n.items()) if k_ <= 12 and v in (ATTACK, DEFENSE)), None)

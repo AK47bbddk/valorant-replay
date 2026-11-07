@@ -274,3 +274,16 @@ def test_color_by_round_detects_side_colored_broadcast():
                "cool": (s["cool"] if s["side1"] == "攻撃" else s["warm"])} for s in side_s]
     w2, mode2, _ = tactics.color_by_round(team_s, placed, starts, None, side1)
     assert mode2 == "team" and not w2
+
+
+def test_color_by_round_uses_positions_even_if_alive_votes_mislead():
+    """生存人数の手がかりが前後半とも同じ答えを出しても、開始直後の位置で攻守の色を見分ける。"""
+    placed = [{"name": "Spawn", "super": "Attacker Side", "x": 0.5, "y": 0.9},
+              {"name": "Spawn", "super": "Defender Side", "x": 0.5, "y": 0.1}]
+    side1 = {n: ("攻撃" if n <= 12 else "防衛") for n in range(1, 25)}
+    starts = {n: n * 100.0 for n in side1}
+    sm = [{"n": n, "t": starts[n] + 3, "side1": side1[n], "warm": (0.5, 0.7), "cool": (0.5, 0.3),
+           "n_warm": 5, "n_cool": 2} for n in side1]
+    alive = lambda t: (5, 2)                     # 生存人数はいつも「暖色＝チーム1」を指す（誤った手がかり）
+    w, mode, msg = tactics.color_by_round(sm, placed, starts, alive, side1)
+    assert mode == "side" and w[1] and not w[13] and "スポーン寄り" in msg
