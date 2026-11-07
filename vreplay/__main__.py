@@ -76,6 +76,7 @@ def main():
     bt.add_argument("--force", action="store_true", help="report.json があっても作り直す")
     bt.add_argument("--redo-before", help="この時刻（例 2026-11-06T02:00）より前に解析したマップだけ作り直す。止まっても同じ値で再開できる")
     bt.add_argument("--out", help="出力ルート（既定 output.dir）")
+    bt.add_argument("--map", nargs="*", dest="maps", help="このマップだけ（例 --map Sunset）")
     bt.add_argument("--config")
 
     pb = sub.add_parser("playbook", help="DB からチーム別・構成別の HTML を作る")
@@ -185,7 +186,7 @@ def main():
         from .batch import run as batch
         batch(cfg, start=parse_day(a.start).isoformat() if a.start else None, end=parse_day(a.end).isoformat() if a.end else None, limit=a.limit, retry_failed=not a.no_retry,
               shard=a.shard, force=a.force, out_root=Path(a.out) if a.out else None,
-              redo_before=a.redo_before)
+              redo_before=a.redo_before, maps=a.maps)
     elif a.cmd == "playbook":
         from . import db, deck
         from .playbook import build

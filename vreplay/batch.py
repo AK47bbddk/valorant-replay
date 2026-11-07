@@ -42,7 +42,8 @@ def _shard_ok(match_id: str, order: int, shard: str | None) -> bool:
 
 
 def _rows(conn, start: str | None, end: str | None, retry_failed: bool,
-          shard: str | None, limit: int | None, force: bool = False, redo_before: str | None = None):
+          shard: str | None, limit: int | None, force: bool = False, redo_before: str | None = None,
+          maps: list[str] | None = None):
     statuses = _status_sql(retry_failed, force or bool(redo_before))
     sql = ("SELECT mp.match_id, mp.map_order, mp.map_name, mp.vod_id, mp.vod_t, "
            "       m.url, m.dt_jst, m.team1, m.team2, m.event, m.stage "
@@ -59,6 +60,9 @@ def _rows(conn, start: str | None, end: str | None, retry_failed: bool,
     if end:
         sql += "AND substr(m.dt_jst,1,10) <= ? "
         args.append(end)
+    if maps:
+        sql += "AND lower(mp.map_name) IN (" + ",".join("?" * len(maps)) + ") "
+        args += [x.lower() for x in maps]
     sql += "ORDER BY m.dt_jst, mp.match_id, mp.map_order"
     out = []
     for r in conn.execute(sql, args):
@@ -71,11 +75,12 @@ def _rows(conn, start: str | None, end: str | None, retry_failed: bool,
 
 def run(cfg: dict, start: str | None = None, end: str | None = None, limit: int | None = None,
         retry_failed: bool = True, shard: str | None = None, force: bool = False,
-        out_root: Path | None = None, log=print, redo_before: str | None = None) -> dict:
+        out_root: Path | None = None, log=print, redo_before: str | None = None,
+        maps: list[str] | None = None) -> dict:
     perf.start()
     t0 = time.time()
     conn = db.open_warehouse(cfg)
-    rows = _rows(conn, start, end, retry_failed, shard, limit, force, redo_before)
+    rows = _rows(conn, start, end, retry_failed, shard, limit, force, redo_before, maps)
     if not rows:
         log("処理待ちのマップがありません。先に `vreplay backfill` を実行してください。")
         perf.stop()
