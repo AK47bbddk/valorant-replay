@@ -37,6 +37,7 @@ class ScanJob:
     hwaccel: bool
     panel_geo: dict | None = None
     minimap_every: float = 0.0
+    minimap_quality: int = 95
     panel_every: float = 0.0
     killfeed_on_change: bool = True
     keyframes: bool = False                 # True: キーフレームだけを読む
@@ -149,7 +150,7 @@ def scan_chunk(job: ScanJob) -> dict:
         if any(a <= t <= b for a, b in job.table_windows):
             futs.append(pool.submit(_save, store, idx, "table", crop(f, list(job.table_roi)), 90))
         if job.keyframes or _due(idx, job.fps, job.minimap_every):
-            futs.append(pool.submit(_save, store, idx, "minimap", crop(f, job.roi["minimap"]), 80))
+            futs.append(pool.submit(_save, store, idx, "minimap", crop(f, job.roi["minimap"]), job.minimap_quality))
         kf = crop(f, job.roi["killfeed"])
         if not job.killfeed_on_change:
             save_kf = True
@@ -235,7 +236,7 @@ def scan(path: Path, duration: float, fps: float, roi: dict, geo: dict | None, c
     tw = tuple((float(a), float(b)) for a, b in table_windows)
     jobs = [ScanJob(str(path), a, d + (0.5 / fps), fps, roi, geo,
                     str(store), cfg["output"]["gif_width"], cfg["hud"]["round_timer_sec"], hwaccel,
-                    panel_geo=panel_geo, minimap_every=me, panel_every=pe, killfeed_on_change=kc,
+                    panel_geo=panel_geo, minimap_every=me, minimap_quality=int(cfg["video"].get("minimap_quality") or 95), panel_every=pe, killfeed_on_change=kc,
                     keyframes=keyframes, save=save, table_windows=tuple(w for w in tw if w[1] >= a and w[0] <= a + d + 1),
                     table_roi=troi)
             for a, d in pieces]

@@ -1,0 +1,77 @@
+# スプリットのメタ。エリアの評価は Obsidian（maps/Split.md）からも自動で入る。ここには手と相性を書く。
+map: Split
+summary: >-
+  MID（ベント・メールボックス）を取った側がローテーションの主導権を持つマップ。攻めは「MID・A で見せて B にコンタクト」
+  「A ランプを取ってヘブンに圧」、守りは「初動 A メインテイク」「サイト耐えモク＋ファストローテート」が軸。
+
+areas:
+  - name: A Main
+    callouts: [A Main, A Lobby]
+    choke: true
+    dry: false
+    eval: {distance: 近, take: 中, branch: あり, long: あり, hold: 容易}
+    note: サイトエントリー・ヘブン進行・ベント抜けの起点。攻めはヴァイパーのカーテンでリソースを吐かせる
+  - name: MID
+    callouts: [Mid Top, Mid Mail, Mid Vent, Mid Bottom]
+    choke: false
+    dry: true
+    eval: {distance: 遠, take: 高, branch: あり, long: あり, hold: 困難}
+    note: 手前までドライで進み、チョークを一気に抜ける。スキルトレード（犬とスロウの交換）が起きやすい
+  - name: B Main
+    callouts: [B Main, B Lobby, B Garage]
+    choke: true
+    dry: true
+    eval: {distance: 近, take: 低, branch: なし, long: あり, hold: 容易}
+    note: コンタクトでの B セットが強い。守りはジャンピで初動の情報を取り続ける
+
+hands:
+  defense:
+    - name: 初動 A メインテイク
+      style: skill_counter
+      when: {push: A}
+      detail: 初動で A メインへ前に出て、攻めの A 起点の選択肢を消す
+      beats: [A ラッシュ, ランプテイク デフォルト]
+      loses_to: [MID フェイク → コンタクト B]
+    - name: mid focus
+      style: skill_counter
+      when: {zone_min: {Mid: 2}}
+      detail: MID に 2 人以上でスキルトレードに応じ、ベントを渡さない
+      beats: [MID フェイク → コンタクト B]
+      loses_to: [A ラッシュ]
+    - name: B 3人守り
+      style: offangle
+      when: {zone_min: {B: 3}}
+      detail: B に人数を寄せる
+      beats: [A フェイク → コンタクト B]
+      loses_to: [A ラッシュ]
+    - name: 平たく守る
+      style: offangle
+      when: {flat: true}
+      detail: サイト耐えモクで時間を稼ぎ、逆サイドから速く寄る
+      beats: []
+      loses_to: []
+  attack:
+    - name: MID フェイク → コンタクト B
+      style: dry
+      when: {site: B, shown: Mid}
+      detail: MID でアクションを起こして守りを寄せ、B へ静かに進んでコンタクトでセット
+      beats: [B 3人守り, 平たく守る]
+      loses_to: [mid focus]
+    - name: A フェイク → コンタクト B
+      style: dry
+      when: {site: B, shown: A}
+      detail: A メインでリソースを吐かせ、本命は B
+      beats: [初動 A メインテイク]
+      loses_to: [B 3人守り]
+    - name: A ラッシュ
+      style: skill_take
+      when: {site: A, commit_by: 30}
+      detail: A メインから速く入る
+      beats: [mid focus, B 3人守り]
+      loses_to: [初動 A メインテイク]
+    - name: ランプテイク デフォルト
+      style: skill_take
+      when: {site: A, via_any: [A Ramps]}
+      detail: A ランプを取ってヘブンへの圧を保ち、A を取る
+      beats: []
+      loses_to: [初動 A メインテイク]

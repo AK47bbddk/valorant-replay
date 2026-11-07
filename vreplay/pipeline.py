@@ -77,6 +77,29 @@ def base_report(m: vlr.Match, md: vlr.MapData, cfg: dict) -> dict:
     }
 
 
+def rounds_from_hud(m: vlr.Match, md: vlr.MapData, det: list, rep: dict, cfg: dict, log=print) -> None:
+    """VLR の無い動画（スクリム）で、HUD から見つけたラウンドの勝者（スコアが増えた側）を md.rounds にする。
+    画面の左＝チーム1（scrim.team1_right: true なら右）。攻守は scrim.start_side（チーム1 の前半の側）から。"""
+    sc = cfg.get("scrim") or {}
+    right = bool(sc.get("team1_right"))
+    start = db._canon(sc.get("start_side")) if sc.get("start_side") else None
+    rounds = []
+    for r in sorted(det, key=lambda r: r.n):
+        if r.winner_side not in ("L", "R"):
+            continue
+        w = 1 if (r.winner_side == "L") != right else 2
+        s1 = db._side1_for_round(r.n, start)
+        side = (s1 if w == 1 else db._opp(s1)) if s1 else None
+        rounds.append(vlr.Round(n=r.n, winner=w, side=side, how=None))
+    md.rounds = rounds
+    md.score1 = sum(r.winner == 1 for r in rounds)
+    md.score2 = sum(r.winner == 2 for r in rounds)
+    new = base_report(m, md, cfg)
+    rep["rounds"], rep["score1"], rep["score2"] = new["rounds"], new["score1"], new["score2"]
+    log(f"    HUD からラウンドを {len(rounds)} 個見つけました（{md.score1}-{md.score2}・"
+        f"{'攻守はチーム1 の前半＝' + start if start else '攻守は不明（--start-side で指定）'}）")
+
+
 def add_reasons(rep: dict):
     """各ラウンドの勝因（vreplay.reasons）。動画が無いラウンドも VLR の情報だけで分かる範囲を出す。"""
     from .reasons import analyze
@@ -523,6 +546,9 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
             log(f"    OCR が CPU で動いている理由：{obs['ocr_note']}")
         t, timer = obs["t"], obs["timer"]
         conf, live, linfo, det, stats = find_rounds(obs)
+        if not md.rounds and det:
+            # VLR の無い動画（スクリム）：ラウンドの勝敗は HUD のスコアの増え方から決める
+            rounds_from_hud(m, md, det, rep, cfg, log)
         if mode == "full":
             # 装備表の切り抜きは 2 パス目で保存する。全区間を密に読んだときは、ラウンドの直前だけを読み直す
             with perf.stage("table", tag=tag, label="装備表の切り抜き"):
@@ -578,6 +604,8 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                         "setups": rt.get("setups") or {},
                         "agents": ((tac.get("agents") or {}).get(str(rr["n"])) or {}),
                         "boards": rt.get("boards") or {},
+                        "tracks": rt.get("tracks") or {},      # エージェントごとの軌跡（5 秒ごと）
+                        "snaps": rt.get("snaps") or {},        # 開始から 10 秒ごとのゾーン・エリアの人数
                         "aligned": bool(tac.get("aligned")),
                     }
                     bd = (rt.get("boards") or {})
@@ -828,7 +856,8 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                 spike_deaths(kills, plant, r.t_end)
             rr.update({
                 "kills": kills,
-                "yt_url": f"https://youtu.be/{md.vod_id}?t={int(start + max(0, r.t_drop - 5))}",
+                "yt_url": f"https://youtu.be/{md.vod_id}?t={int(start + max(0, r.t_drop - 5))}" if md.vod_id else None,
+                "video_t": round(float(start + r.t_drop), 1),        # 元の動画でのラウンド開始（スクリムの切り出し用）
                 "duration": X.clock(r.t_end - r.t_drop),
                 "t_drop": round(float(r.t_drop), 1),
                 "plant_t": round(plant, 1) if plant else None,

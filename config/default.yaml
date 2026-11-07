@@ -17,6 +17,7 @@ video:
   max_height: 1080
   fps: 2
   minimap_every: 1.0     # ミニマップ保存の秒間隔（0で毎フレーム）
+  minimap_quality: 95    # ミニマップの JPEG 品質。アイコン（1080p で直径 約 24px）の顔の照合のため高め（以前は 80）
   panel_every: 1.0       # プレイヤーパネル保存の秒間隔（0で毎フレーム）
   killfeed_on_change: true  # キルフィードは見た目が変わったフレームだけ保存
   per_round_sec: 140     # 次マップの開始秒が分からないときの見積もり
@@ -88,6 +89,11 @@ tactics:
   max_dot_area: 450
   # ミニマップのアイコンをエージェントの顔と照合して「誰がどこにいるか」を読む（配置図 _tactics/board_*.jpg）
   agents: true
+  # エージェントの追跡：開始から何秒ごとにアイコンを照合して軌跡にするか（0 で止める。節目の 3 枚も使う）
+  track_every: 5
+  # 1:40 から何秒ごとの配置（ゾーン・エリアの人数）を残すか。プレイブックの「手」の判定と時間の並びに使う
+  snap_every: 10
+  track_threads: 4     # 追跡の照合を何本のスレッドで並べるか
 
 output:
   dir: /content/drive/MyDrive/valorant-replay
@@ -115,3 +121,16 @@ pipeline:
   scan_slots: 1
   ocr_pool: 0           # メインのプロセスで同時に動かす OCR の数（0 = map_workers + 1）。結果は 1 つのときと同じ
   prefetch_maps: 2      # 解析中のマップに加えて、何マップ先まで動画を先に取っておくか（ディスクを埋めないように）
+
+kb:
+  # 知識ベース（マップのメタ・手と相性・構成メモ）。同梱の config/kb/ に、ここで指定した YAML を重ねる
+  dir: ""              # 追加の YAML の置き場所（既定でも <output.dir>/kb があれば使う。Drive で編集できる）
+  # Obsidian の Valo-wiki の content フォルダ（maps/*.md のエリア評価・セオリー、agents/ の役割、Current_Meta の Tier）
+  # 空なら <output.dir>/kb/vault → /content/Valo-wiki/content の順に探す。`vreplay kb --pull` で取ってこられる
+  vault: ""
+  vault_git: https://github.com/AK47bbddk/Valo-wiki.git
+
+scrim:
+  # `vreplay scrim` のときだけ使う（コマンドの引数で上書き）
+  start_side: ""       # チーム1 の前半の側（攻撃 / 防衛）
+  team1_right: false   # チーム1 が画面の右

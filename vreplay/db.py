@@ -114,6 +114,19 @@ CREATE TABLE IF NOT EXISTS failures (
   updated_at TEXT
 );
 
+-- プレイブック用：ラウンド × チームの「手」（vreplay.hands）。vreplay meta / pick / playbook のたびに上書き
+CREATE TABLE IF NOT EXISTS round_hands (
+  match_id TEXT NOT NULL,
+  map_order INTEGER NOT NULL,
+  n INTEGER NOT NULL,
+  team INTEGER NOT NULL,
+  team_name TEXT, opp_name TEXT, map_name TEXT, date TEXT, source TEXT,
+  side TEXT, hand TEXT, opp_hand TEXT, kb INTEGER, win INTEGER, buy TEXT, rtype TEXT,
+  plant_site TEXT, commit_e REAL, turns TEXT, yt_url TEXT, video_t REAL,
+  updated_at TEXT,
+  PRIMARY KEY (match_id, map_order, n, team)
+);
+
 CREATE INDEX IF NOT EXISTS idx_maps_status ON maps(status);
 CREATE INDEX IF NOT EXISTS idx_rounds_map ON rounds(match_id, map_order);
 CREATE INDEX IF NOT EXISTS idx_comps_key ON comps(comp_key);
@@ -507,4 +520,33 @@ def sync_reports(conn: sqlite3.Connection, root: Path, log=print) -> int:
         except Exception as e:
             log(f"  スキップ {p}: {e}")
     conn.commit()
+    return n
+
+
+def store_hands(conn: sqlite3.Connection, rows: list[dict]) -> int:
+    """hands.annotate 済みの行を round_hands に入れる（SQL で「この手のラウンド」を引けるように）。"""
+    from . import hands as H
+    now = _now()
+    n = 0
+    for r in rows:
+        h = r.get("hand") or {}
+        if not h:
+            continue
+        o = r.get("_opp_row")
+        tl = ""
+        if o is not None:
+            try:
+                a, d = (r, o) if r["side"] == H.ATTACK else (o, r)
+                tl = H.turn_line(H.turns(a, d))
+            except Exception:
+                tl = ""
+        conn.execute(
+            """INSERT OR REPLACE INTO round_hands(match_id,map_order,n,team,team_name,opp_name,map_name,date,source,
+               side,hand,opp_hand,kb,win,buy,rtype,plant_site,commit_e,turns,yt_url,video_t,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (r["match_id"], r["order"], r["n"], r["no"], r.get("team"), r.get("opp"), r.get("map"), r.get("date"),
+             r.get("source"), r["side"], h.get("name"), (r.get("opp_hand") or {}).get("name"), int(bool(h.get("kb"))),
+             int(bool(r.get("win"))), r.get("buy"), (r.get("rtype") or {}).get("label"), r.get("plant_site"),
+             (h.get("feat") or {}).get("commit_e"), tl, r.get("yt"), r.get("video_t"), now))
+        n += 1
     return n

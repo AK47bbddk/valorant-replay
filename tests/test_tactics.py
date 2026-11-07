@@ -196,6 +196,12 @@ def test_analyze_video_aligns_minimap_and_reads_plant_site(tmp_path, monkeypatch
     tl = tac["rounds"]["1"]["timeline"]
     assert "1:00" in tl and sum(tl["1:00"]["1"].values()) >= 4
     assert tac["fit_image"] and (tmp_path / "o" / "_tactics" / "test_fit.jpg").exists()
+    # 追跡：5 秒ごとの軌跡と、10 秒ごとのスナップショット（エージェントが 3 人以上ならアイコンから）
+    trk = tac["rounds"]["1"]["tracks"]["1"]
+    assert set(trk) == set(ags) and len(trk["Jett"]) >= 5 and trk["Jett"][0][5] == "A"
+    sn = tac["rounds"]["1"]["snaps"]
+    assert "0" in sn and "10" in sn and sn["10"]["1"]["src"] == "agents" and sn["10"]["1"]["zones"].get("A", 0) >= 4
+    assert sn["10"]["2"]["src"] == "dots"
 
 
 # ---------------------------------------------------------------- 初動の型（コーチの書き方）

@@ -261,6 +261,50 @@ vreplay playbook --sync --team G2 --map Split
   キャッシュの部分が混ざっていればその部分だけ取り直す。それでも残れば解析時に拡大してそろえる（_fit）。
 - 前回「動画解析に失敗」したマップ（report.json の video_ok が偽）は、`--force` なしの次の実行で自動でやり直し、Notion のページも書き直す。
 
+## マップのメタ・じゃんけん・追跡・スクリム（v2）
+
+プレイブックを「数字の集計」から「マップのメタを理解して、じゃんけんの手を選べる冊子」にする。
+考え方の元はコーチの Obsidian（Valo-wiki：戦術のじゃんけん構造・ターン・チョークポイントの守り方・エリア評価・1-X の陣形）。
+
+- **追跡（`vreplay/track.py`）**：ミニマップのアイコン照合を 6 つの節目だけでなく開始から `tactics.track_every`（既定 5）秒ごとに行い、
+  エージェントごとに「前の点から走って届く距離（両スポーン間の距離 × 0.10/秒＋揺れ。テレポート・ダッシュのあるエージェントは広げる）」の点だけを
+  つないだ、似ている度合いの合計が最大の鎖（動的計画法）を選び、5 秒ごとに補間する（12 秒より空いた区間は補間しない）。
+  `rt["tracks"]`＝`{チーム: {エージェント: [[e, x, y, conf, det|interp, zone, callout]]}}`、
+  `rt["snaps"]`＝開始（1:40）から `tactics.snap_every`（既定 10）秒ごとのチーム別ゾーン・エリアの人数（3 人以上追跡できたチームはアイコン、無ければ点）。
+  ミニマップの JPEG 品質は `video.minimap_quality`（既定 95。以前 80 で 1080p の直径 24px ほどの顔がつぶれていた）。取得はもともと 1080p ちょうど。
+- **知識ベース（`vreplay/kb.py`・`config/kb/`）**：`concepts.yaml`（じゃんけんの 4 つの手・壊す/返す/殺す・エントリーの種類・ターン・1-X とトレード・バリューとブラフ）、
+  `agents.yaml`（役割と特徴 traits）、`comps.yaml`（構成メモ：強み・弱み・主軸・今のメタ・アンチピックと工夫）、`maps/<map>.yaml`
+  （エリア：callouts・評価・choke・dry、手：name・style・when・detail・how・beats・loses_to、cycles＝読み合いの回り方）。
+  Obsidian（`kb.vault`、Colab では `vreplay kb --pull` で Valo-wiki を `<output.dir>/kb/vault` に取る）の `maps/*.md` の
+  「評価：サイト距離(近)、テイク難易度(中)…」と「強い動き（セオリー）」、`agents/<role>/` の役割、`meta/Current_Meta.md` の Tier を重ねる。
+  `<output.dir>/kb/` に同じ形の YAML を置くと上書き（Drive で編集できる）。
+- **手（`vreplay/hands.py`）**：各ラウンド・各チームを知識ベースの手（`when` の条件：攻め＝site・commit_by/after・via_any/all/min・shown・no_plant、
+  守り＝開始 5〜25 秒の zone_min/max・area_min・push・flat）に当て、無ければ自動の名前（「B ラッシュ」「MID 経由 A スプリット」「A3」「MID プッシュ」「平たく守る」）。
+  サイトに「入った」は、入口の通路（Main・Lobby・Long・Short と攻め側の陣地）より先に 3 人いるか設置。
+  手 × 手の相性表（攻めの勝ち/回数、ピストル・エコ除く）と知識ベースの見立て（▲▼）、cycles の各段が実際に勝った回数、
+  ターン（10 秒ごとの配置の変化：テイク・前に出る・ローテ・転換、先制キル・集団戦・設置。相手の出来事から 15 秒以内は「↪ リアクション」）、
+  読み替え（負けた次のラウンドに何を出したか）、1 ピックの形（場所 × エージェント × 時間）、後衛のトレード（4 秒以内の倒し返し）。
+  DB の `round_hands` に手・相手の手・ターンを入れる（meta / pick / playbook のたびに上書き）。
+- **構成（`vreplay/comp.py`）**：役割の内訳・型（2 デュエ・2 コン・2 イニシ・KAY/O 入り・オペ持ち・フラッシュなし…）、traits からの一般的な見立て（灰色）、
+  comps.yaml のメモ（黒）、相手の型・相手のエージェントごとの勝率（平均へ 3 ラウンド寄せる）から苦手な相手（アンチピック）と得意な相手。
+- **プレイブック**：表紙の後に「{map} のメタ：どのエリアをどう取るか」（評価・進め方・初動で攻めが 2 人以上入った回数と勝率・初動のファイトの場所）→
+  「チョークポイントで守る原理（壊す・返す・殺す）」→「じゃんけん：攻めの手 × 守りの手」→「この構成の特徴」→「今のメタとアンチピック」。
+  後ろ（12R の組み立ての前）に「手のディテール」（説明・判定・回数と勝率・その手に一番勝っている相手の手・相手の手ごと・1:40 から 10 秒ごとの位置 6 枚・見本）、
+  「ターン」「読み替え」。Notion 版にも「マップのメタ」「じゃんけん」「この構成の特徴」の節。
+- **`vreplay meta`**：チームを問わない「マップのメタ」の冊子（`playbook/meta_<map>.html` と `.json`）。`vreplay playbook`（--team なし）でも作る。
+- **スクリム（`vreplay scrim`・`vreplay/scrim.py`）**：VLR の無い動画（Drive のファイルか YouTube の URL）を同じ解析にかける。
+  `md.rounds` が空なら `pipeline.rounds_from_hud` が HUD のスコアの増え方から勝者を決め（画面の左＝チーム1、`--team1-right`）、
+  攻守は `--start-side`（チーム1 の前半）から。matches.source = "scrim"、report.json に video_path・各ラウンドに video_t。
+- **`vreplay pick`**：条件（map・team・opp・side・hand・opp-hand・win/loss・buy・site・rtype・source・期間）に合うラウンドを
+  `<output.dir>/picks/<名前>.html/.csv` に（動画リンク・開始時ミニマップ・GIF・手・ターン）。`--clips` でスクリムの動画から ffmpeg で切り出す。
+
+```powershell
+vreplay kb --pull
+vreplay meta --map Sunset
+vreplay scrim --video D:\scrim\sunset.mp4 --map Sunset --team1 OURS --team2 OPP --start-side 攻撃 --agents1 Chamber,Sage,Viper,Sova,Neon --agents2 Jett,Omen,Fade,Killjoy,Phoenix
+vreplay pick --map Sunset --team OURS --side 攻撃 --hand "B スプリット" --win
+```
+
 ## 非機能要件
 
 - HUD の位置は放送で変わるので、レイアウトのプリセット選択・カードの円検出・キルフィードの選手名検出で自動で合わせる。
@@ -283,3 +327,5 @@ vreplay playbook --sync --team G2 --map Split
 - ラウンド一覧表は 1 ラウンド 1 行：R（▶ リンク）・スコア・勝者・勝ち方（攻守）・勝因・両チームの購入と武器・先制キル・キル数・ULT 使用・時間。
 - リプレイ映像のキルがキルログに重複して入らない。
 - `vreplay playbook` で、チーム × マップ × 構成ごとに strong / weak point つきのスライドができる。
+- 冊子の最初にマップのメタ・じゃんけん（手 × 手の相性）・構成の特徴、後ろに手のディテール・ターン・読み替えがある。
+- `vreplay scrim` で VLR の無い動画がラウンドに分かれて DB に入り、`vreplay pick` で条件に合うラウンドを抜き出せる。

@@ -359,6 +359,10 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
     aspect = 1.0
     # エージェントのアイコン照合に使う、タイマーの節目のミニマップ（ラウンド・節目ごとに 1 枚）
     keep: dict = {}
+    # 追跡用：開始から track_every 秒ごとに 1 枚（節目の 3 枚もあわせて使う）
+    track_every = float(tcfg.get("track_every", 5) or 0)
+    snap_every = float(tcfg.get("snap_every", 10) or 10)
+    keep_trk: dict = {}
     # アイコンの大きさは放送（レイアウト・解像度）で違うので、最初の何枚かから見積もってから点を数える
     from . import agents as AG
     icons = AG.load_icons(cfg, [a for ags in (agent_teams or {}).values() for a in ags if a], log=log) \
@@ -384,6 +388,14 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
                 if log:
                     log(f"    ミニマップのアイコンの大きさ：高さの {icon_frac:.3f}（{icon_frac * mm.shape[0]:.0f}px）")
                 flush()
+        if agent_teams and track_every > 0:
+            st_ = float(r["start"])
+            e_ = t - st_
+            g_ = round(e_ / track_every) * track_every
+            if 0 <= g_ <= float(r["end"]) - st_ + 0.5 and abs(e_ - g_) <= 1.25:
+                cur = keep_trk.get((int(r["n"]), g_))
+                if cur is None or abs(e_ - g_) < cur[0]:
+                    keep_trk[(int(r["n"]), g_)] = (abs(e_ - g_), t, mm.copy())
         if agent_teams:
             st_ = float(r["start"])
             for label, e in MARKS.items():
@@ -513,6 +525,7 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
     }
     positions = []
     by_sample: dict[tuple[int, float], dict[int, Counter]] = {}
+    by_sample_area: dict[tuple[int, float], dict[int, Counter]] = {}
 
     reg = MM.region_labels(mask, placed) if (mask is not None and T.get("ok")) else None
     ranks = area_ranks(meta)                      # エリア名 → 両スポーンからの距離（前後・陣地の判定）
@@ -555,6 +568,8 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         k = int(d.get("k") or 1)
         callouts_all[callout] += k
         by_sample.setdefault((n, float(d["t"])), {1: Counter(), 2: Counter()})[team][site] += k
+        an = area_name(site, c["name"]) if c else None
+        by_sample_area.setdefault((n, float(d["t"])), {1: Counter(), 2: Counter()})[team][an or site] += k
         rt = round_tac.get(n)
         if rt is None:
             continue
@@ -614,11 +629,22 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
 
     # エージェントごとの位置（アイコン照合）と、Valotactics のような配置図
     agent_info = None
+    mcache: dict = {}                     # 節目の照合結果を追跡でも使い回す（id(ミニマップ) → 照合結果）
     if agent_teams and keep:
         agent_info = _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed, aspect,
                                       T if T.get("ok") else None, background, out_dir, round_tac, log,
-                                      icons=icons, icon_frac=icon_frac, alive_fn=alive_fn, art=art_crop)
+                                      icons=icons, icon_frac=icon_frac, alive_fn=alive_fn, art=art_crop,
+                                      cache=mcache)
         _agent_setups(agent_info, round_tac, ranks)
+    if agent_teams and (keep_trk or keep):
+        try:
+            _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, placed, aspect, background,
+                          round_tac, log, icons=icons, icon_frac=icon_frac, alive_fn=alive_fn,
+                          every=track_every or 5.0, cache=mcache, threads=int(tcfg.get("track_threads") or 4))
+        except Exception as e:                       # 追跡に失敗しても、ほかの結果は出す
+            if log:
+                log(f"    エージェントの追跡はスキップしました（{e}）")
+    _snaps(round_tac, by_sample, by_sample_area, start_by_n, snap_every)
     top_callouts = [{"name": n, "count": c} for n, c in callouts_all.most_common(12)]
     top_sites = [{"site": s, "count": c} for s, c in sites_all.most_common()]
     mean_dots = sum(s["n_dots"] for s in samples) / len(samples)
@@ -1042,7 +1068,7 @@ def board_png(base: np.ndarray, entries: list[dict], icons: dict, path: Path, to
 
 
 def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed, aspect, T, background,
-                     out_dir, round_tac, log, icons=None, icon_frac=None, alive_fn=None, art=None):
+                     out_dir, round_tac, log, icons=None, icon_frac=None, alive_fn=None, art=None, cache=None):
     """節目ごとのミニマップ（前後 1 秒の数枚）でエージェントのアイコンを照合し、位置・ゾーンと配置図を作る。"""
     from . import agents as AG
     from . import minimap as MM
@@ -1073,6 +1099,8 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
                           mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
                           alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None)
             per.append((t_ - frames[0][1] + d_, f_))
+            if cache is not None:
+                cache[id(mm)] = f_
             if f_ and (first is None or len(f_) > len(first[1])):
                 first = (mm, f_)
         found = AG.consensus(per, alive=alive) if len(per) > 1 else per[0][1]
@@ -1111,6 +1139,137 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
         log(f"    エージェントの位置：{n_try} 個の節目（{n_frames} 枚）で平均 {n_found / max(1, n_try):.1f} 人"
             f"（アイコン {len(icons)} 種・前後のフレームで確かめたもの）")
     return out
+
+
+def spawn_scale(placed: list[dict], aspect: float = 1.0) -> float:
+    """両スポーン間の距離（ミニマップの正規化座標）。追跡の「走って届く距離」の物差し。"""
+    sp = {}
+    for c in placed or []:
+        if str(c.get("name") or "").lower() != "spawn":
+            continue
+        low = str(c.get("super") or "").lower()
+        key = "a" if "attacker" in low else "d" if "defender" in low else None
+        if key:
+            sp[key] = (float(c["x"]), float(c["y"]))
+    if len(sp) == 2:
+        d = math.hypot((sp["a"][0] - sp["d"][0]) * aspect, sp["a"][1] - sp["d"][1])
+        if d > 0.15:
+            return d
+    return 0.75
+
+
+def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, placed, aspect, background,
+                  round_tac, log, icons=None, icon_frac=None, alive_fn=None, every: float = 5.0,
+                  cache: dict | None = None, threads: int = 4):
+    """track_every 秒ごと（＋節目の前後）のミニマップでアイコンを照合し、走れる速さの制約で
+    エージェントごとの軌跡にする（vreplay.track）。rt["tracks"] = {"1": {"Jett": [[e, x, y, conf, src, zone, callout]]}}"""
+    from . import agents as AG
+    from . import minimap as MM
+    from . import track as TR
+    if icons is None:
+        icons = AG.load_icons(cfg, [a for ags in agent_teams.values() for a in ags if a], log=log)
+    if not icons:
+        return
+    icon_frac = icon_frac or ICON_FRAC
+    scale = spawn_scale(placed, aspect)
+    frames_by_n: dict[int, list] = {}
+    for (n, _g), (_d, t, mm) in keep_trk.items():
+        frames_by_n.setdefault(n, []).append((t, mm))
+    for (n, _label), lst in keep.items():
+        for item in (lst if isinstance(lst, list) else [lst]):
+            frames_by_n.setdefault(n, []).append((item[1], item[2]))
+    n_pts = n_det = 0
+    cache = cache if cache is not None else {}
+
+    def one(item):
+        t, mm = item
+        if id(mm) in cache:
+            return t, cache[id(mm)]
+        alive = None
+        if alive_fn is not None:
+            try:
+                a1, a2 = alive_fn(t)
+                alive = {1: a1, 2: a2} if a1 is not None and a2 is not None else None
+            except Exception:
+                alive = None
+        return t, AG.match(mm, icons, agent_teams, color_team, icon_frac=icon_frac,
+                           mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
+                           alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None)
+
+    # 照合（1 枚 0.1〜0.2 秒）は OpenCV が GIL を外すので、スレッドで並べる
+    from concurrent.futures import ThreadPoolExecutor
+    todo = [(n, it) for n, frs in sorted(frames_by_n.items()) for it in sorted(frs, key=lambda x: x[0])]
+    with ThreadPoolExecutor(max_workers=max(1, threads), thread_name_prefix="素材-追跡") as ex:
+        res = list(ex.map(lambda x: (x[0], one(x[1])), todo))
+    found_by_n: dict[int, list] = {}
+    for n, tf in res:
+        found_by_n.setdefault(n, []).append(tf)
+    for n, found in sorted(found_by_n.items()):
+        rt = round_tac.get(n)
+        if rt is None:
+            continue
+        n_det += sum(len(f_) for _, f_ in found)
+        trk = TR.build(found, float(rt["start"]), float(rt["end"]), scale, every=every, aspect=aspect)
+        out: dict = {}
+        for (team, agent), pts in trk.items():
+            lst = []
+            for e, x, y, conf, src in pts:
+                c = MM.region_of(reg, placed, x, y) if reg else None
+                if c is None:
+                    c, dist = MM.nearest(placed, x, y, aspect)
+                    if dist > 0.18:
+                        c = None
+                zone = zone_of(c)
+                callout = f"{zone} {c['name']}" if c and zone in SITE_SUPERS else (c["name"] if c else "?")
+                lst.append([e, x, y, conf, src, zone, callout])
+            out.setdefault(str(team), {})[agent] = lst
+            n_pts += len(lst)
+        rt["tracks"] = out
+    if log:
+        n_r = sum(1 for rt in round_tac.values() if rt.get("tracks"))
+        log(f"    エージェントの追跡：{n_r} ラウンド・軌跡の点 {n_pts}（照合で見つかった {n_det} 個から、"
+            f"走って届く距離でつないだもの・{every:.0f} 秒ごと）")
+
+
+def _snaps(round_tac: dict, by_sample: dict, by_sample_area: dict, start_by_n: dict, every: float = 10.0) -> None:
+    """開始（1:40）から every 秒ごとの、チーム別のゾーン・エリアの人数。
+    エージェントの軌跡が 3 人以上あるチームはそれを使い（src=agents）、無ければミニマップの点（src=dots）。"""
+    for n, rt in round_tac.items():
+        st = start_by_n.get(n)
+        if st is None:
+            continue
+        dur = float(rt["end"]) - st
+        mine = sorted((t, cnts) for (nn, t), cnts in by_sample.items() if nn == n)
+        mine_a = {t: cnts for (nn, t), cnts in by_sample_area.items() if nn == n}
+        snaps = {}
+        e = 0.0
+        while e <= dur + 0.5:
+            snap = {}
+            for team in (1, 2):
+                tr = (rt.get("tracks") or {}).get(str(team)) or {}
+                pts = []
+                for agent, lst in tr.items():
+                    p = min(lst, key=lambda q: abs(q[0] - e)) if lst else None
+                    if p is not None and abs(p[0] - e) <= 2.6:
+                        pts.append((agent, p))
+                if len(pts) >= 3:
+                    zs, ar = Counter(), Counter()
+                    for agent, p in pts:
+                        zs[p[5]] += 1
+                        ar[area_name(p[5], p[6]) or p[5]] += 1
+                    snap[str(team)] = {"zones": dict(zs), "areas": dict(ar), "src": "agents",
+                                       "who": {agent: area_name(p[5], p[6]) or p[5] for agent, p in pts}}
+                    continue
+                near = [(abs(t - st - e), t, cnts) for t, cnts in mine if abs(t - st - e) <= 3.0]
+                if near:
+                    _, t, cnts = min(near, key=lambda x: x[0])
+                    if cnts[team]:
+                        snap[str(team)] = {"zones": dict(cnts[team]),
+                                           "areas": dict((mine_a.get(t) or {1: {}, 2: {}})[team]), "src": "dots"}
+            if snap:
+                snaps[str(int(e))] = snap
+            e += every
+        rt["snaps"] = snaps
 
 
 def _fit_overlay(bg: np.ndarray, placed: list[dict], dots: list[dict], path: Path) -> Path:

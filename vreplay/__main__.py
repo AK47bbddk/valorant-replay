@@ -109,6 +109,54 @@ def main():
     st = sub.add_parser("stats", help="DB の中身の件数を表示")
     st.add_argument("--config")
 
+    me = sub.add_parser("meta", help="マップのメタの冊子（全チームの手・相性・読み替え）を作る")
+    me.add_argument("--map", help="このマップだけ")
+    me.add_argument("--source", choices=["vlr", "scrim"], help="大会（vlr）かスクリム（scrim）だけ")
+    me.add_argument("--out", help="出力先（既定 output.dir/playbook）")
+    me.add_argument("--config")
+
+    kbp = sub.add_parser("kb", help="知識ベース（config/kb ＋ Obsidian の Valo-wiki）の確認・取り込み")
+    kbp.add_argument("--pull", action="store_true",
+                     help="Valo-wiki（kb.vault_git）を output.dir/kb/vault に取ってくる（Colab 用）")
+    kbp.add_argument("--map", help="このマップの知識を表示")
+    kbp.add_argument("--config")
+
+    sc = sub.add_parser("scrim", help="スクリムの動画を解析して DB に入れる（VLR なし）")
+    sc.add_argument("--video", required=True, help="動画ファイルのパス（Drive など）か YouTube の URL")
+    sc.add_argument("--map", required=True, help="マップ名（例 Sunset）")
+    sc.add_argument("--team1", required=True, help="画面の左のチーム（--team1-right なら右）")
+    sc.add_argument("--team2", required=True)
+    sc.add_argument("--agents1", required=True, help="チーム1 のエージェント（カンマ区切り）")
+    sc.add_argument("--agents2", required=True, help="チーム2 のエージェント（カンマ区切り）")
+    sc.add_argument("--players1", help="チーム1 の選手名（カンマ区切り・エージェントと同じ順。キルフィードの名前）")
+    sc.add_argument("--players2", help="チーム2 の選手名")
+    sc.add_argument("--start-side", choices=["攻撃", "防衛", "attack", "defense"], help="チーム1 の前半の側")
+    sc.add_argument("--team1-right", action="store_true", help="チーム1 が画面の右")
+    sc.add_argument("--date", help="スクリムの日付（YYYY-MM-DD・既定は今日）")
+    sc.add_argument("--title", default="", help="メモ（例 練習 vs XX）")
+    sc.add_argument("--config")
+
+    pk = sub.add_parser("pick", help="条件に合うラウンドを DB から抜き出す（プレイブック用）")
+    pk.add_argument("--map")
+    pk.add_argument("--team")
+    pk.add_argument("--opp")
+    pk.add_argument("--side", help="攻撃 / 防衛（atk / def）")
+    pk.add_argument("--hand", help="手の名前（一部でよい。例「B スプリット」）")
+    pk.add_argument("--def-hand", "--opp-hand", dest="opp_hand", help="相手の手の名前（一部でよい）")
+    g = pk.add_mutually_exclusive_group()
+    g.add_argument("--win", action="store_true", help="勝ったラウンドだけ")
+    g.add_argument("--loss", action="store_true", help="負けたラウンドだけ")
+    pk.add_argument("--buy", help="購入（フル・ハーフ・エコ…）")
+    pk.add_argument("--site", help="設置サイト")
+    pk.add_argument("--rtype", help="ラウンドの種類（ピストル・ボーナス・フルバイ…）")
+    pk.add_argument("--source", choices=["vlr", "scrim"])
+    pk.add_argument("--from", dest="start")
+    pk.add_argument("--to", dest="end")
+    pk.add_argument("--limit", type=int, help="新しい方から何ラウンド")
+    pk.add_argument("--name", help="出力のファイル名")
+    pk.add_argument("--clips", action="store_true", help="スクリムの動画からラウンドを切り出す（ffmpeg）")
+    pk.add_argument("--config")
+
     a = ap.parse_args()
     cfg = config.load(a.config)
 
@@ -156,6 +204,9 @@ def main():
                 nt = Notion(os.environ["NOTION_TOKEN"])
         deck.build(cfg, out, team=a.team, map_name=a.map, min_maps=a.min_maps, use_llm=not a.no_llm,
                    notion=nt, notion_parent=parent)
+        if not a.team:
+            from . import meta_page                              # マップのメタの冊子（全チームの手・相性）
+            meta_page.build(cfg, out, map_name=a.map)
         if not a.team and not a.map:
             build(cfg, out / "stats", min_maps=a.min_maps)      # 以前の集計ページ（ヒートマップ・型の表）
     elif a.cmd == "tactival":
@@ -211,6 +262,61 @@ def main():
         print(f"DB: {db.warehouse_path(cfg)}")
         for k, v in st.items():
             print(f"  {k}: {v}")
+    elif a.cmd == "meta":
+        from . import meta_page
+        out = Path(a.out) if a.out else Path(cfg["output"]["dir"]) / "playbook"
+        ps = meta_page.build(cfg, out, map_name=a.map, source=a.source)
+        print(f"マップのメタ: {len(ps)} 冊 → {out}")
+    elif a.cmd == "kb":
+        import subprocess
+        from . import kb as K
+        if a.pull:
+            url = (cfg.get("kb") or {}).get("vault_git") or "https://github.com/AK47bbddk/Valo-wiki.git"
+            dst = Path(cfg["output"]["dir"]) / "kb" / "vault_repo"
+            if (dst / ".git").exists():
+                subprocess.run(["git", "-C", str(dst), "pull", "-q"], check=False)
+            else:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                subprocess.run(["git", "clone", "-q", "--depth", "1", url, str(dst)], check=False)
+            link = Path(cfg["output"]["dir"]) / "kb" / "vault"
+            src = dst / "content" if (dst / "content").exists() else dst
+            if not link.exists():
+                try:
+                    link.symlink_to(src, target_is_directory=True)
+                except OSError:
+                    import shutil
+                    shutil.copytree(src, link)
+            print(f"Obsidian のメモ: {src}")
+        kb = K.load(cfg, refresh=True)
+        v = kb.vault or {}
+        print(f"知識ベース：マップ {len(kb.maps)}（YAML）・Obsidian のマップ {len(v.get('maps') or {})}・"
+              f"エージェント {len(kb.agents)}・構成メモ {len(kb.comps)}・Tier {len(v.get('tiers') or {})}")
+        if a.map:
+            m = kb.map(a.map)
+            print(f"\n{a.map}: {m.get('summary') or ''}")
+            for ar in m.get("areas") or []:
+                print(f"  エリア {ar['name']}: {ar.get('eval') or ''} {ar.get('note') or ''}")
+            for side in ("attack", "defense"):
+                for h in (m.get("hands") or {}).get(side) or []:
+                    print(f"  {'攻め' if side == 'attack' else '守り'}の手 {h['name']}: {h.get('when')}")
+            for side, xs in ((m.get("theory") or {}).items()):
+                for x in xs:
+                    print(f"  Obsidian のセオリー（{side}）: {x['name']}")
+    elif a.cmd == "scrim":
+        from . import scrim
+        sp = lambda x: [y.strip() for y in (x or "").split(",") if y.strip()]
+        side = {"attack": "攻撃", "defense": "防衛"}.get(a.start_side or "", a.start_side)
+        scrim.run(cfg, a.video, a.map, a.team1, a.team2, sp(a.agents1), sp(a.agents2), start_side=side,
+                  team1_right=a.team1_right, players1=sp(a.players1) or None, players2=sp(a.players2) or None,
+                  day=parse_day(a.date).isoformat() if a.date else None, title=a.title)
+    elif a.cmd == "pick":
+        from . import pick
+        win = True if a.win else False if a.loss else None
+        side = {"atk": "攻撃", "def": "防衛", "attack": "攻撃", "defense": "防衛"}.get((a.side or "").lower(), a.side)
+        pick.run(cfg, name=a.name, clips=a.clips, limit=a.limit, map_name=a.map, team=a.team, opp=a.opp, side=side,
+                 hand=a.hand, opp_hand=a.opp_hand, win=win, buy=a.buy, site=a.site, source=a.source,
+                 start=parse_day(a.start).isoformat() if a.start else None,
+                 end=parse_day(a.end).isoformat() if a.end else None, rtype=a.rtype)
     else:
         calibrate(cfg, a.match, a.map, a.at, a.span)
 

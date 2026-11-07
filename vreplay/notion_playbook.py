@@ -235,6 +235,50 @@ def _howto_blocks(cfg: dict, key: dict, rows: list[dict], prs: dict) -> list[dic
     return out
 
 
+def _meta_blocks(cfg: dict, key: dict, rows: list[dict], base: list[dict]) -> list[dict]:
+    """マップのメタ（知識ベース）・じゃんけんの相性（同マップの全チーム）・この構成の特徴。"""
+    from . import comp as CP
+    from . import hands as HN
+    from . import kb as K
+    kb = K.load(cfg)
+    m = kb.map(key["map"])
+    if any("hand" not in r for r in base):
+        HN.annotate(base, kb)
+    out = [_h(2, "マップのメタ（どのエリアをどう取るか）")]
+    if m.get("summary"):
+        out.append(_para(_rt(m["summary"])))
+    for a in m.get("areas") or []:
+        ev = a.get("eval") or {}
+        tag = "・".join(v for v in (ev.get("distance") and f"距離{ev['distance']}", ev.get("take") and f"テイク{ev['take']}",
+                                     ev.get("hold") and f"ホールド{ev['hold']}") if v)
+        out.append(_bullet(_rt(f"{a['name']}　", bold=True), _rt((f"［{tag}］" if tag else "") + (a.get("note") or ""))))
+    mx = HN.matrix(base)
+    cells = sorted(mx["cells"].items(), key=lambda kv: -kv[1][1])[:8]
+    if cells:
+        out.append(_h(3, "じゃんけん：攻めの手 × 守りの手（同マップの全チーム・攻めの勝ち/回数）"))
+        for (a, d), (w, n) in cells:
+            edge = HN.kb_edge(m, a, d)
+            out.append(_bullet(_rt(f"{a} × {d}　", bold=True),
+                               _rt(f"{w}/{n}（攻め {round(100 * w / n)}%）" + (f"　見立て：{edge}有利" if edge else ""))))
+    if key.get("comp"):
+        rep = CP.report(key["comp"], rows, kb, key["map"])
+        out.append(_h(3, "この構成の特徴"))
+        for nt_ in rep["notes"]:
+            if nt_.get("plan"):
+                out.append(_para(_rt(nt_["plan"], bold=True)))
+        for sd, lab in (("attack", "攻撃"), ("defense", "防衛")):
+            for kind, ja in (("strong", "強み"), ("weak", "弱み")):
+                xs = [x for nt_ in rep["notes"] for x in ((nt_.get(sd) or {}).get(kind) or [])] + rep["rules"][sd][kind]
+                for x in xs[:4]:
+                    out.append(_bullet(_rt(f"{lab}・{ja}：", bold=True), _rt(x)))
+        for nt_ in rep["notes"]:
+            for a in nt_.get("anti") or []:
+                out.append(_bullet(_rt("アンチピック：", bold=True), _rt(f"{a.get('who')}（{a.get('why') or ''}）")))
+        for x in rep["data"]["anti"] + rep["data"]["anti_agents"]:
+            out.append(_bullet(_rt("データで苦手：", bold=True), _rt(f"{x['name']} {x['w']}/{x['n']}")))
+    return out
+
+
 def export(nt: Notion, cfg: dict, key: dict, rows: list[dict], base: list[dict], parent: str, img_dir: Path,
            log=print, reps: dict | None = None) -> str:
     """1 冊ぶんを Notion に書く。同じ名前のページが親の下にあれば中身を作り直す。返り値はページ URL。"""
@@ -260,6 +304,10 @@ def export(nt: Notion, cfg: dict, key: dict, rows: list[dict], base: list[dict],
     up = _Uploader(nt)
     prs = {sd: D.playbook_rows([r for r in rows if r["side"] == sd], sd) for sd in (ATTACK, DEFENSE)}
     nt.append(pid, _howto_blocks(cfg, key, rows, prs))
+    try:
+        nt.append(pid, _meta_blocks(cfg, key, rows, base))
+    except Exception as e:                      # メタの節が書けなくても、型のデータベースは書く
+        log(f"  Notion：メタの節を書けませんでした（{e}）")
     for side, label in ((ATTACK, "ATK"), (DEFENSE, "DEF")):
         srows = [r for r in rows if r["side"] == side]
         ms = D.evaluate(rows, base, side)

@@ -1,0 +1,98 @@
+# サンセットのメタ（手と相性）。エリア名は valorant-api のコールアウト（「A Main」「Mid Top」「B Market」）。
+# when の書き方は vreplay/hands.py の先頭。detail・how は人が書く説明（プレイブックにそのまま出る）。
+map: Sunset
+summary: >-
+  A・B の 2 サイトに MID（コートヤード・トップ・タイルズ）が絡むマップ。守りは「A にどれだけ寄せるか」と
+  「MID をどうするか」、攻めは「A メインを速く取るか」「MID トップ・マーケットから B を割るか」のじゃんけんになる。
+
+areas:
+  - name: A Main
+    callouts: [A Main, A Lobby, A Elbow]
+    choke: true
+    dry: false
+    note: 攻めの A の入口。守りはここにスキルを返す（壊す・返す・殺す）のが基本。攻めはフラッシュ＋索敵＋デュエリストで抜ける
+  - name: Mid
+    callouts: [Mid Courtyard, Mid Top, Mid Tiles, Mid Bottom]
+    choke: false
+    dry: true
+    note: トップを取るとマーケット（B）と A リンク側の両方に圧をかけられる。守りがここを押すと攻めの B スプリットが止まる
+  - name: B Market
+    callouts: [B Market, B Boba]
+    choke: true
+    dry: false
+    note: トップ壁＋マーケット → タピオカ（Boba）で B を割る入口
+  - name: B Main
+    callouts: [B Main, B Lobby]
+    choke: true
+    dry: true
+    note: B の正面。マーケットと同時に当てるとサイトの守りが割れる
+
+hands:
+  defense:
+    - name: A3 スキル返し
+      style: skill_counter
+      when: {zone_min: {A: 3}}
+      detail: A に 3 人寄せて、A メインに来たスキル・人にスキルを返す配置
+      beats: [A メインラッシュ]
+      loses_to: [B スプリット（トップ・マーケット）]
+    - name: MID プッシュ（MID＋A で挟む）
+      style: skill_counter
+      when: {push: Mid}
+      detail: MID トップ・コートヤードへ前に出て、A に来た攻めを MID と A で挟む
+      beats: [B スプリット（トップ・マーケット）, トップ→A サンドイッチ]
+      loses_to: [A メインラッシュ]
+    - name: B プッシュ
+      style: skill_counter
+      when: {push: B}
+      detail: マーケット・B メインへ前に出て、B を割りに来る攻めを先に止める
+      beats: [B スプリット（トップ・マーケット）]
+      loses_to: [A メインラッシュ, トップ→A サンドイッチ]
+    - name: A1 配置（スキルで人数を減らす）
+      style: offangle
+      when: {zone_max: {A: 1}}
+      detail: A はスキル（罠・壁）と 1 人で遅らせ、人数を B・MID に回す
+      beats: [B スプリット（トップ・マーケット）]
+      loses_to: [A メインラッシュ]
+    - name: 平たく守る
+      style: offangle
+      when: {flat: true}
+      detail: A・MID・B に散って情報を取り、来た方へ寄る
+      beats: []
+      loses_to: []
+
+  attack:
+    - name: トップ→A サンドイッチ
+      style: skill_take
+      when: {site: A, via_all: [[Mid Top, Mid Courtyard, Mid Tiles], [A Main, A Lobby, A Elbow]]}
+      detail: MID トップ（コートヤード）と A メインの 2 方向から A を挟む
+      beats: [A3 スキル返し]
+      loses_to: [MID プッシュ（MID＋A で挟む）]
+    - name: A メインラッシュ
+      style: skill_take
+      when: {site: A, commit_by: 35}
+      detail: A メインに人数とスキルを集めて速く入る（セットのラッシュ）
+      how: [フラッシュ＋索敵で A メインのチョークを抜ける, エントリーが入ったら後衛は 4 秒以内にトレードできる距離を保つ]
+      beats: [A1 配置（スキルで人数を減らす）, MID プッシュ（MID＋A で挟む）]
+      loses_to: [A3 スキル返し]
+    - name: B スプリット（トップ・マーケット）
+      style: skill_take
+      when: {site: B, via_all: [[Mid Top, B Market, B Boba, Mid Courtyard], [B Main, B Lobby]]}
+      detail: MID トップ・マーケットと B メインの 2 方向から B を割る（トップ壁＋マーケット → タピオカ）
+      beats: [A3 スキル返し]
+      loses_to: [MID プッシュ（MID＋A で挟む）, B プッシュ]
+    - name: B セット
+      style: skill_take
+      when: {site: B}
+      detail: B メイン（またはマーケット）から 1 方向で入るセット
+      beats: []
+      loses_to: []
+    - name: A デフォルト→A
+      style: dry
+      when: {site: A, commit_after: 45}
+      detail: 散って情報を取ってから A に寄る
+      beats: []
+      loses_to: []
+
+# じゃんけんの回り方の例（コーチのメモ）。プレイブックに「よくある読み合いの流れ」として出す
+cycles:
+  - [A3 スキル返し, B スプリット（トップ・マーケット）, A1 配置（スキルで人数を減らす）, A メインラッシュ]

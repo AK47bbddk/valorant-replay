@@ -1,0 +1,35 @@
+# エージェントの役割と特徴（構成の特徴・アンチピックの判定に使う）。
+# traits：flash（フラッシュ）／recon（索敵）／smoke（スモーク）／molly（モロトフ・範囲ダメージ）／cc（スタン・スロウ・抑制などの妨害）
+#         wall（壁）／trap（罠・カメラなどの置き情報）／heal・revive／mobility（ダッシュ・テレポート）
+#         op（オペ・スナイパーを持ちやすい）／anti_rush（ラッシュ止め）／postplant（設置後のスキル）／delay（遅延）
+#         suppress（スキル封じ）／lurk（裏取り・1 の側）／dry（ドライに強い＝撃ち合い・ピックが強い）
+agents:
+  Jett:      {role: duelist,    traits: [mobility, smoke, op, dry], note: ダッシュでオペの撃ち逃げ・エントリー}
+  Raze:      {role: duelist,    traits: [molly, mobility, recon], note: ボムボットとグレでエリア制圧}
+  Phoenix:   {role: duelist,    traits: [flash, molly, heal], note: 自分で投げられるフラッシュ}
+  Reyna:     {role: duelist,    traits: [flash, heal], note: キルからの継戦}
+  Yoru:      {role: duelist,    traits: [flash, mobility, lurk], note: テレポートとデコイで裏取り}
+  Neon:      {role: duelist,    traits: [wall, cc, mobility], note: スプリントで速いエントリー}
+  Iso:       {role: duelist,    traits: [wall, dry], note: 1v1 と防弾壁}
+  Waylay:    {role: duelist,    traits: [mobility, cc], aliases: [Wayley], note: 高速移動と妨害}
+  Brimstone: {role: controller, traits: [smoke, molly, postplant, cc], note: 一度に焚けるスモークと設置後のモロ}
+  Omen:      {role: controller, traits: [smoke, flash, mobility, lurk], note: ワンウェイとテレポート}
+  Viper:     {role: controller, traits: [smoke, wall, molly, postplant, anti_rush], note: カーテンで視界を割る・設置後のモロ}
+  Astra:     {role: controller, traits: [smoke, cc, wall], note: マップ全域にスキル}
+  Harbor:    {role: controller, traits: [smoke, wall, cc], note: 曲がる水の壁でエントリー支援}
+  Clove:     {role: controller, traits: [smoke, heal], note: 死んだ後もスモーク}
+  Miks:      {role: controller, traits: [smoke, cc], note: 音波で味方の強化と妨害}
+  Sova:      {role: initiator,  traits: [recon, molly, postplant], note: リコンとドローン}
+  Breach:    {role: initiator,  traits: [flash, cc], note: 壁越しのフラッシュ・スタン}
+  Skye:      {role: initiator,  traits: [flash, recon, heal], note: 犬とフラッシュ}
+  KAY/O:     {role: initiator,  traits: [flash, suppress, molly], aliases: [KAYO], note: ナイフでスキル封じ}
+  Fade:      {role: initiator,  traits: [recon, cc], note: 痕跡とプラウラー}
+  Gekko:     {role: initiator,  traits: [flash, recon, cc, postplant], note: 回収できるクリーチャー・設置代行}
+  Tejo:      {role: initiator,  traits: [recon, molly, cc], note: 砲撃とドローン}
+  Sage:      {role: sentinel,   traits: [wall, cc, heal, revive, anti_rush, postplant], note: 壁とスロウでラッシュ止め・設置後の遅延}
+  Cypher:    {role: sentinel,   traits: [trap, recon, lurk], note: カメラとワイヤーで裏を見る}
+  Killjoy:   {role: sentinel,   traits: [trap, molly, anti_rush, postplant], note: タレットとアラームボット}
+  Chamber:   {role: sentinel,   traits: [op, dry, mobility, trap], note: ヘッドハンター・TP で撃って下がる}
+  Deadlock:  {role: sentinel,   traits: [wall, cc, anti_rush, trap], note: バリアメッシュで進行を止める}
+  Vyse:      {role: sentinel,   traits: [trap, wall, cc, anti_rush], note: 金属の壁と武器封じ}
+  Veto:      {role: sentinel,   traits: [suppress, trap, anti_rush], note: スキル無効化}

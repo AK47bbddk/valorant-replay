@@ -101,6 +101,25 @@ def _inverse(T: dict, x: float, y: float) -> tuple[float, float]:
     return a + 0.5, b + 0.5
 
 
+def _tracks_uv(T: dict | None, tr: dict | None) -> dict:
+    """エージェントの軌跡（放送のミニマップの座標）→ {エージェント: [(開始からの秒, u, v, エリア, det|interp)]}
+    （u, v はマップ画像の 0..1。位置合わせが無ければ放送の座標のまま）。"""
+    from . import tactics as TC
+    out = {}
+    for agent, pts in (tr or {}).items():
+        lst = []
+        for p in pts or []:
+            try:
+                e, x, y, _c, src, zone, call = p[:7]
+            except (TypeError, ValueError):
+                continue
+            u, v = _inverse(T, float(x), float(y)) if T else (float(x), float(y))
+            lst.append((float(e), round(u, 4), round(v, 4), TC.area_name(zone, call) or zone, src))
+        if lst:
+            out[agent] = lst
+    return out
+
+
 def records(rep: dict) -> list[dict]:
     """1 マップぶんの report.json を、チームの視点のラウンド記録（両チームぶん）にする。"""
     out = []
@@ -219,6 +238,8 @@ def records(rep: dict) -> list[dict]:
                 "reason_tags": (reason.get("tags") or []) if won else [],
                 "loss_tags": (reason.get("tags") or []) if not won else [],
                 "yt": rr.get("yt_url"), "uv": uv, "pos": pos, "ranks": ranks,
+                "video_t": rr.get("video_t"), "video_path": rep.get("video_path"), "source": rep.get("source") or "vlr",
+                "t_end_e": dur,
                 "setup": (rt.get("setups") or {}).get(str(no)) if aligned else None,
                 "opp_setup": (rt.get("setups") or {}).get(str(3 - no)) if aligned else None,
                 "first_fight": rt.get("first_fight") if aligned else None,
@@ -230,6 +251,10 @@ def records(rep: dict) -> list[dict]:
                 "agents": agents_uv,            # 節目 → [(エージェント, u, v, エリア)]（マップ画像の 0..1）
                 "rtype": rtypes.get((n, no)), "branch": F.branch(rep, rr, no),
                 "uv_base": tac.get("uv_base") if T else None,
+                # 開始から 10 秒ごとのゾーン・エリアの人数（追跡があればエージェントから）と、エージェントの軌跡
+                "snaps": {float(e_): (v_ or {}).get(str(no)) for e_, v_ in (rt.get("snaps") or {}).items()
+                          if (v_ or {}).get(str(no))} if aligned else {},
+                "tracks": _tracks_uv(T, (rt.get("tracks") or {}).get(str(no))) if aligned else {},
             })
     return out
 
@@ -1899,6 +1924,7 @@ font-size:14px;margin:0 0 6px}
 ol.steps{margin:0;padding-left:1.4em}ol.steps>li{margin:0 0 10px;font-size:15px}
 ol.steps ul{margin:2px 0 0}ol.steps ul li{margin:0 0 3px;font-size:14px;line-height:1.6}
 ul.cols2{columns:2;column-gap:28px}
+.strip{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:8px}.strip img{width:100%;height:auto;border-radius:4px}
 @media (max-width:900px){.slide{aspect-ratio:auto;padding:24px 20px 40px}.cols,.cols3{grid-template-columns:1fr}
 .slide h1{font-size:30px}.slide h2{font-size:22px}.foot{left:20px;right:20px}}
 @media print{body{background:#fff}.toolbar{display:none}.deck{padding:0;max-width:none}
@@ -2571,6 +2597,23 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
     bad = [k for k, v in al.items() if v < 0.7]
     if bad and log:
         log(f"  {title}: ミニマップ合わせがずれているマップ {len(bad)}/{len(al)} の位置は、動き・実例・エリアテイクに使いません")
+    # マップのメタ（どのエリアをどう取るか・チョークの守り方）→ じゃんけん（手の相性）→ この構成の特徴
+    from . import comp as CP
+    from . import deck_meta as DM
+    from . import kb as K
+    kb = K.load(cfg)
+    kbmap = kb.map(map_name)
+    if any("hand" not in r for r in rows + base):
+        from . import hands as HN
+        HN.annotate(list({id(r): r for r in base + rows}.values()), kb)
+    for fn in (lambda: DM.map_meta_slides(cfg, map_name, kbmap, kb, base, foot),
+               lambda: DM.rps_slides(kbmap, kb, base, foot, map_name),
+               lambda: DM.comp_slides(CP.report(key.get("comp") or [], rows, kb, map_name), foot, map_name)
+               if key.get("comp") else []):
+        try:
+            slides += fn()
+        except Exception as e:
+            log(f"  {title}: メタのスライドを作れませんでした（{e}）")
     prs = {sd: playbook_rows([r for r in rows if r["side"] == sd], sd) for sd in (DEFENSE, ATTACK)}
     slides += howto_slides(cfg, key, rows, prs, foot)
     slides += motion_slides(cfg, map_name, prs, rows, calls, foot, walk=walk)
@@ -2710,6 +2753,13 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
                                   note=lambda r: f"設置 残り {_left(r['plant_e'])}" if r.get("plant_e") is not None else ""))
                 slides.append(_slide(en, f"{s_} Site PostPlant", body, foot))
 
+    # 手のディテール（この冊子の側が使った手）・ターンの応酬・負けた次のラウンドの読み替え
+    try:
+        slides += DM.hand_slides(cfg, map_name, kbmap, rows, base, out_dir, foot, slug)
+        slides += DM.turn_slides(rows, foot)
+    except Exception as e:
+        log(f"  {title}: 手・ターンのスライドを作れませんでした（{e}）")
+
     # 12 ラウンドの組み立て（ピストル → アンチエコ → ボーナス → フルバイ…）と、同じ初動の形からの分岐
     slides += plan_slides(rows, foot)
 
@@ -2834,6 +2884,9 @@ def build(cfg: dict, out_dir: Path, team: str | None = None, map_name: str | Non
     conn = db.open_warehouse(cfg)
     reps = load_reports(conn)
     rows = [r for rep in reps for r in records(rep)]
+    from . import hands as HN
+    from . import kb as K
+    HN.annotate(rows, K.load(cfg))                    # 攻め・守りの手（じゃんけんの判定）
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     by_map = defaultdict(list)
