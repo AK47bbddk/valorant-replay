@@ -297,6 +297,11 @@ vreplay playbook --sync --team G2 --map Split
   攻守は `--start-side`（チーム1 の前半）から。matches.source = "scrim"、report.json に video_path・各ラウンドに video_t。
 - **`vreplay pick`**：条件（map・team・opp・side・hand・opp-hand・win/loss・buy・site・rtype・source・期間）に合うラウンドを
   `<output.dir>/picks/<名前>.html/.csv` に（動画リンク・開始時ミニマップ・GIF・手・ターン）。`--clips` でスクリムの動画から ffmpeg で切り出す。
+- **`vreplay quality`**（`vreplay/quality.py`）：report.json の `video_size`（取れた動画の幅・高さ。analysis_note の先頭にも「動画 1080p」）ごとに、
+  タイマー/スコアの読み取り率・ラウンド検出・ミニマップ合わせ（OK・信頼度・点/枚）・追跡が使えた割合（開始 60 秒までの snaps の src=agents）・
+  キルフィードで読めたキルの割合を並べ、`<output.dir>/quality.csv` に 1 マップ 1 行で出す。
+- **守りの配置の代表の時刻**（`hands._rep`）：追跡の snaps（src=agents）がある時刻を、点の多い別の秒より優先する
+  （点は重なり・スモークで増えやすく、冊子の絵＝追跡と手の判定が食い違っていた）。
 
 ```powershell
 vreplay kb --pull

@@ -214,3 +214,14 @@ def test_site_lists_every_deck_and_meta(tmp_path):
     assert h.count("team_LOUD_") >= 4 and "team_G2_Split_A-B.html" in h and "_cheat.html" in h
     assert h.index("team_LOUD_Haven") < h.index("team_LOUD_Sunset")      # マップの並び順
     assert "勝率 62%" in h
+
+
+def test_defense_setup_prefers_agent_snaps_over_dots():
+    """守りの配置は、点の多い別の秒より、追跡（snaps）の 1:30 を使う（冊子の絵と手の判定をそろえる）。
+    LOUD vs VIT Sunset R11：点の 9 秒は MID 3・A 2、追跡の 10 秒は A Main 2・MID 1・B 1。"""
+    r = {"side": "防衛", "ranks": None,
+         "pos": [(9.0, "Mid", "Mid Top")] * 3 + [(9.0, "A", "A Main")] * 2,
+         "snaps": {10.0: {"zones": {"A": 2, "Mid": 1, "B": 1},
+                          "areas": {"A Main": 2, "Mid Top": 1, "B Site": 1}, "src": "agents"}}}
+    f = H.features(r)
+    assert f["areas"] == {"A Main": 2, "Mid Top": 1, "B Site": 1}

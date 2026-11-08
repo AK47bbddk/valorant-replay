@@ -86,11 +86,17 @@ def at(sm: dict, e: float, tol: float = 3.5) -> dict | None:
 
 
 def _rep(sm: dict, lo: float, hi: float, prefer: float) -> dict | None:
-    """lo〜hi 秒で点がいちばん多く見えた時刻（同じなら prefer に近い方）。"""
-    cand = [(min(5, sum(v["zones"].values())), -abs(e - prefer), e) for e, v in sm.items() if lo <= e <= hi]
+    """lo〜hi 秒の代表の時刻。エージェントの追跡（snaps, src=agents）があればそれを優先し、
+    その中で点がいちばん多く見えた時刻（同じなら prefer に近い方）。
+
+    ミニマップの点（pos）は 1 秒ごとにあり、重なり・スモークの誤検出で人数が増えやすい。点の多さだけで選ぶと、
+    冊子の絵（追跡）は A Main 2 人なのに、手の判定は別の秒の点で MID 3 人、のように食い違っていた
+    （LOUD vs VIT Sunset R11 の 1:30）。"""
+    cand = [(v.get("src") == "agents", min(5, sum(v["zones"].values())), -abs(e - prefer), e)
+            for e, v in sm.items() if lo <= e <= hi]
     if not cand:
         return None
-    return sm[max(cand)[2]]
+    return sm[max(cand)[-1]]
 
 
 # ---------------------------------------------------------------- 特徴

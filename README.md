@@ -492,6 +492,14 @@ vreplay pick --map Sunset --def-hand "A3" --source scrim --clips   # スクリ�
 
 `<output.dir>/picks/` に HTML（動画リンク・開始時のミニマップ・GIF・手・ターン）と CSV ができます。DB の `round_hands` テーブルを SQL で引くこともできます。
 
+### 解像度と読み取りの精度を見る
+
+```bash
+vreplay quality
+```
+
+全マップの report.json から、取れた動画の解像度（1080p／720p）ごとに、タイマー・スコアの読み取り率、ラウンドの検出、ミニマップの位置合わせ、エージェントの追跡が使えた割合、キルフィードで読めたキルの割合を並べます。マップごとの表は `<output.dir>/quality.csv`。解像度は 2026-11-09 以降に解析したマップから記録しています（それより前は「不明」）。
+
 ## 試合リストの自動更新（GitHub Actions）
 
 `.github/workflows/daily-notion.yml` が毎朝 5:23（JST）に前日の試合を VLR から取り、Notion の「大会ログくん」「マップ詳細」の**行だけ**を更新します（GPU 不要、本文は書かない）。

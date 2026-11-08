@@ -163,6 +163,10 @@ def main():
     si.add_argument("--out", help="playbook フォルダ（既定 output.dir/playbook）")
     si.add_argument("--config")
 
+    qa = sub.add_parser("quality", help="解析の出来（読み取り率・追跡・キルフィード）を動画の解像度ごとに並べる")
+    qa.add_argument("--root", help="report.json を探すフォルダ（既定 output.dir）")
+    qa.add_argument("--config")
+
     a = ap.parse_args()
     cfg = config.load(a.config)
 
@@ -270,6 +274,9 @@ def main():
         print(f"DB: {db.warehouse_path(cfg)}")
         for k, v in st.items():
             print(f"  {k}: {v}")
+    elif a.cmd == "quality":
+        from . import quality
+        quality.run(cfg, Path(a.root) if a.root else None)
     elif a.cmd == "site":
         from . import site
         site.build(Path(a.out) if a.out else Path(cfg["output"]["dir"]) / "playbook")

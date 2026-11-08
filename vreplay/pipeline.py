@@ -166,7 +166,7 @@ def download(cfg: dict, m: vlr.Match, md: vlr.MapData, log=print) -> Path:
     size = video_size(p)
     mbps = size / 1e6 / st["seconds"] if st["seconds"] > 0.05 else 0
     speed = f", {mbps:.1f} MB/s" if mbps else ""
-    log(f"    動画を取得：{md.name}（{size / 1e6:.0f} MB, {perf.fmt_seconds(st['seconds'])}{speed}）"
+    log(f"    動画を取得：{md.name}（{h}p, {size / 1e6:.0f} MB, {perf.fmt_seconds(st['seconds'])}{speed}）"
         f"｜{perf.fmt_resources(st['resources'])}")
     return p
 
@@ -487,6 +487,7 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
                     m.team2: [p.name for p in md.players if p.team == 2]}
     with perf.stage("calibrate", tag=tag, label="キャリブレーション") as st_cal:
         roi, geo, geo_buy, _, msg, (W, H, dur) = calibrate(cfg, path, md, roster, log=log)
+        rep["video_size"] = [int(W), int(H)]          # 取れた動画の解像度（精度との関係を vreplay quality で見る）
     t_cal = st_cal["seconds"]
     log(f"    {msg}（{perf.fmt_seconds(t_cal)}）｜{perf.fmt_resources(st_cal['resources'])}")
     hw = gpu_decode_ok(str(path))
@@ -934,7 +935,7 @@ def analyze_video(cfg: dict, m: vlr.Match, md: vlr.MapData, rep: dict, out_dir: 
             drop_note += f"／タイマーから補ったラウンド {','.join(map(str, stats['repaired']))}"
         if lost:
             drop_note += f"／見つからないラウンド {','.join(map(str, lost))}"
-        rep["analysis_note"] = (f"{msg}／{linfo}／タイマー読取 {stats['timer_ok']:.0%}・スコア読取 {stats['score_ok']:.0%}"
+        rep["analysis_note"] = (f"動画 {int(H)}p／{msg}／{linfo}／タイマー読取 {stats['timer_ok']:.0%}・スコア読取 {stats['score_ok']:.0%}"
                                 f"／検出ラウンド {len(det)}/{md.total_rounds or '?'}／VLR との勝敗一致 {agree:.0%}"
                                 + (f"／{drop_note}" if drop_note else "")
                                 + (f"／{stats['kills_note']}" if stats.get("kills_note") else "")
