@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.request
 from functools import lru_cache
 from pathlib import Path
 
@@ -20,6 +21,31 @@ COOKIE_HELP = (
     "（または Colab の 🔑 に YT_COOKIES として中身を登録）"
     "② 自宅 PC で `vreplay fetch` を実行して動画を Drive に置いてから Colab で run する。"
     "手順は README の「YouTube に弾かれるとき」")
+
+
+def ensure_pot_server(log=print) -> bool:
+    """PO トークンのサーバー（127.0.0.1:4416）が動いているか確かめ、Colab で止まっていれば起動し直す。"""
+
+    def ping() -> bool:
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:4416/ping", timeout=3):
+                return True
+        except Exception:
+            return False
+
+    if ping():
+        return True
+    path = Path(__file__).resolve().parents[1] / "scripts" / "pot_server.sh"
+    if not path.exists() or not Path("/content").exists():
+        return False
+    try:
+        subprocess.run(["bash", str(path)], timeout=600)
+        if ping():
+            log("  PO トークンのサーバーが止まっていたので起動し直しました")
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _cookie_copy(src: Path, tag: str) -> str:

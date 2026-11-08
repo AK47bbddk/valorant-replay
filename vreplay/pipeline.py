@@ -126,7 +126,8 @@ class LowResolution(RuntimeError):
 
 
 def download(cfg: dict, m: vlr.Match, md: vlr.MapData, log=print) -> Path:
-    from .video import download_segment, probe, remove_video, resolve_cookies, video_size
+    from .video import (download_segment, ensure_pot_server, probe, remove_video, resolve_cookies,
+                        video_size)
     start, end = _segment_bounds(m, md, cfg)
     tag = f"{m.id}:{md.order}"
     method = str(cfg["video"].get("download_method") or "range")
@@ -152,8 +153,15 @@ def download(cfg: dict, m: vlr.Match, md: vlr.MapData, log=print) -> Path:
             h = probe(p)[1]
             if h < min_h:
                 remove_video(p)
-                raise LowResolution(f"{h}p の動画しか取れませんでした（{min_h}p 以上が必要）。"
-                                    "YouTube に高画質の形式を断られています。しばらく待つか、cookies を更新してから取り直してください")
+                # PO トークンのサーバーが止まっていると 360p しか返らない。起動し直せたら 1 回だけ取り直す
+                if ensure_pot_server(log):
+                    log("    PO トークンのサーバーを起動し直したので、もう一度取得します")
+                    p = get(method)
+                    h = probe(p)[1]
+                if h < min_h:
+                    remove_video(p)
+                    raise LowResolution(f"{h}p の動画しか取れませんでした（{min_h}p 以上が必要）。"
+                                        "YouTube に高画質の形式を断られています。しばらく待つか、cookies を更新してから取り直してください")
         st["bytes"] = video_size(p)
     size = video_size(p)
     mbps = size / 1e6 / st["seconds"] if st["seconds"] > 0.05 else 0

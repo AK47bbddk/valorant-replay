@@ -19,7 +19,7 @@ from pathlib import Path
 
 from . import db, perf, report, vlr
 from .pipeline import _slug, _work_root, analyze_video, base_report, download
-from .video import remove_video
+from .video import ensure_pot_server, remove_video
 
 
 def _status_sql(retry_failed: bool, force: bool = False) -> str:
@@ -124,6 +124,7 @@ def run(cfg: dict, start: str | None = None, end: str | None = None, limit: int 
         try:
             for r in target:
                 md = md_by_order[r["map_order"]]
+                ensure_pot_server(log)
                 map_dir = out_dir_day / f"{m.id}_{md.order}_{_slug(md.name)}"
                 if not (force or redo_before) and (map_dir / "report.json").exists():
                     try:
