@@ -40,6 +40,46 @@ def nearest_area(xy: dict, u: float, v: float) -> str | None:
     return best
 
 
+def _lab(e: float) -> str:
+    left = max(0, int(round(100 - e)))
+    return f"{left // 60}:{left % 60:02d}"
+
+
+def from_tracks(r: dict, k: int = 4, start: float = 10.0) -> dict | None:
+    """1 ラウンドのエージェントの軌跡（5 秒ごとの追跡）→ 開始 10 秒から設置まで（設置が無ければ 60 秒まで）を
+    k 枚に等分した節目の駒。最後の節目は設置の瞬間（「設置 0:47」）。"""
+    tr = r.get("tracks") or {}
+    if len(tr) < 3:
+        return None
+    pe = r.get("plant_e")
+    end = float(pe) if pe is not None else 60.0
+    if end - start < 8:
+        start = max(0.0, end - 15)
+    ts = [start + (end - start) * j / (k - 1) for j in range(k)]
+    ts = sorted({round(t / 5) * 5 if j < k - 1 else round(t) for j, t in enumerate(ts)})
+    dots = []
+    for a, pts in tr.items():
+        seq = []
+        for t in ts:
+            p = min(pts, key=lambda q: abs(q[0] - t)) if pts else None
+            seq.append((p[1], p[2]) if p is not None and abs(p[0] - t) <= 4 and 0 <= p[1] <= 1 and 0 <= p[2] <= 1 else None)
+        if sum(1 for q in seq if q) < 2:
+            continue
+        last = next(q for q in seq if q)
+        for i, q in enumerate(seq):
+            if q is None:
+                seq[i] = last
+            else:
+                last = q
+        dots.append({"label": a, "xy": [[round(u, 4), round(v, 4)] for u, v in seq]})
+    if len(dots) < 3 or len(ts) < 2:
+        return None
+    marks = [_lab(t) for t in ts]
+    if pe is not None:
+        marks[-1] = f"設置 {marks[-1]}"
+    return {"marks": marks, "dots": dots}
+
+
 def from_round(r: dict, marks=MARKS) -> dict | None:
     """1 ラウンドのエージェントの位置（アイコン照合）→ 節目ごとの駒。設置より後の節目は使わない。"""
     ag = r.get("agents") or {}
@@ -116,7 +156,7 @@ def motion(rows: list[dict], side: str, calls, walk=None) -> dict | None:
     if len(comps) == 1 and len(rows) >= 3:
         med = D.agent_tracks({"rows": rows})
     r = pick_round(rows, med)
-    fr = from_round(r) if r else None
+    fr = (from_tracks(r) or from_round(r)) if r else None
     if not fr:
         return None
     for d in fr["dots"]:
@@ -124,7 +164,8 @@ def motion(rows: list[dict], side: str, calls, walk=None) -> dict | None:
     who = f"{r.get('tag') or r.get('team') or ''} vs {r.get('opp_tag') or r.get('opp') or ''} R{r.get('n')}"
     how = (f"代表のラウンド：{who}（{'勝ち' if r.get('win') else '負け'}）"
            + (f"・{len(rows)} ラウンドの典型の立ち位置にいちばん近いラウンド" if med else ""))
-    return pick_marks({**fr, "row": r, "how": how}, walk)
+    fr = {**fr, "row": r, "how": how}
+    return fr if any(m.startswith("設置") or m not in dict(MARKS) for m in fr["marks"]) else pick_marks(fr, walk)
 
 
 def pick_marks(fr: dict, walk=None, want=("1:30", "1:15", "1:00", "0:40"), k: int = 4) -> dict:

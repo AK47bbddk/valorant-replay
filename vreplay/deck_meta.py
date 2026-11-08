@@ -472,7 +472,7 @@ def _wl(d: dict) -> str:
 
 
 def comp_types_slides(cfg: dict, map_name: str, rows: list[dict], kb, out_dir: Path, foot: str, slug: str,
-                      current=None, title: str | None = None, k: int = 10, k_motion: int = 3) -> list[str]:
+                      current=None, title: str | None = None, k: int = 5, k_motion: int = 3) -> list[str]:
     """構成の種類：型（2 コン・2 デュエ…）ごとと、具体的な 5 人ごとの表。meta では上位の構成の動きの絵も。
 
     current を渡すと（チームの冊子）その構成の行に印を付け、動きの絵は作らない（手のスライドにあるので）。"""

@@ -53,3 +53,11 @@ def test_pick_round_prefers_typical_win():
     med = {"marks": ["1:30", "1:15", "1:00"], "agents": {a: [(.3 + j * .01, .5)] * 3 for j, a in enumerate("ABCDE")}}
     near_loss, far_win, near_win = mk(False, .3), mk(True, .8), mk(True, .35)
     assert BI.pick_round([near_loss, far_win, near_win], med) is near_win
+
+
+def test_from_tracks_ends_at_plant():
+    tr = {a: [(e, .5 + j * .02, 1 - e / 100, "x", "det") for e in range(0, 60, 5)] for j, a in enumerate("ABCD")}
+    fr = BI.from_tracks({"tracks": tr, "plant_e": 47})
+    assert fr["marks"][0] == "1:30" and fr["marks"][-1] == "設置 0:53" and len(fr["marks"]) == 4
+    assert fr["dots"][0]["xy"][-1][1] < fr["dots"][0]["xy"][0][1]
+    assert BI.from_tracks({"tracks": tr})["marks"][-1] == "0:40"
