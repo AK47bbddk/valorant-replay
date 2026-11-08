@@ -142,6 +142,14 @@ def features(r: dict) -> dict:
         v = _rep(sm, 5, 15, 10) or _rep(sm, 5, 25, 20)
         f["zones"] = dict(v["zones"]) if v else {}
         f["areas"] = dict(v["areas"]) if v else {}
+        # ゾーンはエリア名の頭（「A Main」→ A）で数え直す。valorant-api では A Main などが
+        # サイトのゾーンに入っていないマップがあり、A を 3 人で守っていても A1 に見えてしまうため
+        if f["areas"] and sum(f["areas"].values()) >= sum(f["zones"].values()):
+            zz = Counter()
+            for a, c in f["areas"].items():
+                t = a.split(" ")[0]
+                zz[t if t in ZONES else ("Mid" if t.lower() == "mid" else t)] += c
+            f["zones"] = dict(zz)
         push = Counter()
         from . import tactics as TC
         for e, v2 in sm.items():

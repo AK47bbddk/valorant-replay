@@ -249,7 +249,7 @@ def hand_slides(cfg: dict, map_name: str, kbmap: dict, rows: list[dict], base: l
                     continue
                 if best is None or sc > best[0]:
                     best = (sc, cand, nn)
-            img = strip_png(cfg, map_name, hr, out_dir / "img" / slug / f"hand_{_slug(name)}.jpg")
+            img = strip_png(cfg, map_name, hr, out_dir / "img" / slug / f"hand_{_slug(name)}_{__import__('hashlib').sha1(name.encode()).hexdigest()[:6]}.jpg")
             how = "".join(f"<li>{_e(x)}</li>" for x in h.get("how") or [])
             kb_rel = ""
             if h.get("beats") or h.get("loses_to"):
@@ -300,7 +300,8 @@ def motion_html(cfg: dict, map_name: str, name: str, side: str, rows: list[dict]
     """節目ごとの作戦ボード（TactiVal）の絵＋その節目の動きの一文。fr を渡せばその駒、無ければ rows から作る。"""
     from . import board_img as BI
     calls, xy, walk = _calls_walk(cfg, map_name)
-    bname = f"{slug}_{_slug(name)}.tactival.json"
+    import hashlib
+    bname = f"{slug}_{_slug(name)}-{hashlib.sha1(name.encode()).hexdigest()[:6]}.tactival.json"   # 日本語の手の名前が同じ slug にならないように
     # コーチが TactiVal で直したボード（playbook/tactival_fix/ に同じ名前で置く）があれば、そちらを描く
     fix = out_dir / "tactival_fix" / bname
     if fix.exists():
