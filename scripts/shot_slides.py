@@ -16,11 +16,14 @@ def main(deck, out, words):
         pg = b.new_page(viewport={"width": 1400, "height": 900})
         pg.goto(Path(deck).resolve().as_uri())
         pg.wait_for_timeout(1500)
+        pg.evaluate("document.querySelectorAll('img[loading]').forEach(i=>i.loading='eager')")
         for i, s in enumerate(pg.query_selector_all(".slide")):
             t = s.inner_text()
             head = " ".join(t.split())[:90]
             if not words or any(w in head for w in words):
                 f = out / f"slide_{i:03d}.png"
+                s.scroll_into_view_if_needed()
+                pg.wait_for_timeout(400)
                 s.screenshot(path=str(f))
                 print(f, head)
         b.close()
