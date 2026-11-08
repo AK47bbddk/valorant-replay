@@ -23,8 +23,10 @@ COOKIE_HELP = (
     "手順は README の「YouTube に弾かれるとき」")
 
 
-def ensure_pot_server(log=print) -> bool:
-    """PO トークンのサーバー（127.0.0.1:4416）が動いているか確かめ、Colab で止まっていれば起動し直す。"""
+def ensure_pot_server(log=print) -> str:
+    """PO トークンのサーバー（127.0.0.1:4416）が動いているか確かめ、Colab で止まっていれば起動し直す。
+
+    戻り値：動いていた＝"up"、起動し直した＝"restarted"、動いていない（起動できない）＝""。"""
 
     def ping() -> bool:
         try:
@@ -34,18 +36,18 @@ def ensure_pot_server(log=print) -> bool:
             return False
 
     if ping():
-        return True
+        return "up"
     path = Path(__file__).resolve().parents[1] / "scripts" / "pot_server.sh"
     if not path.exists() or not Path("/content").exists():
-        return False
+        return ""
     try:
         subprocess.run(["bash", str(path)], timeout=600)
         if ping():
             log("  PO トークンのサーバーが止まっていたので起動し直しました")
-            return True
+            return "restarted"
     except Exception:
         pass
-    return False
+    return ""
 
 
 def _cookie_copy(src: Path, tag: str) -> str:

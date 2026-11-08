@@ -15,5 +15,19 @@ def test_ensure_pot_server_without_colab_does_not_run_subprocess(monkeypatch):
     def fake_exists(self):
         return False if str(self).replace("\\", "/").rstrip("/").endswith("/content") else real_exists(self)
     monkeypatch.setattr(video.Path, "exists", fake_exists)
-    assert video.ensure_pot_server(log=lambda *a: None) is False
+    assert video.ensure_pot_server(log=lambda *a: None) == ""
     assert calls == []
+
+
+def test_ensure_pot_server_reports_up_when_running(monkeypatch):
+    """動いていれば "up"（取り直しの合図の "restarted" ではない）。"""
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(video.urllib.request, "urlopen", lambda *a, **k: Resp())
+    assert video.ensure_pot_server(log=lambda *a: None) == "up"

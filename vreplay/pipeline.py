@@ -153,8 +153,8 @@ def download(cfg: dict, m: vlr.Match, md: vlr.MapData, log=print) -> Path:
             h = probe(p)[1]
             if h < min_h:
                 remove_video(p)
-                # PO トークンのサーバーが止まっていると 360p しか返らない。起動し直せたら 1 回だけ取り直す
-                if ensure_pot_server(log):
+                # PO トークンのサーバーが止まっていると 360p しか返らない。起動し直せたときだけ 1 回取り直す
+                if ensure_pot_server(log) == "restarted":
                     log("    PO トークンのサーバーを起動し直したので、もう一度取得します")
                     p = get(method)
                     h = probe(p)[1]
