@@ -1931,7 +1931,7 @@ font-size:14px;margin:0 0 6px}
 ol.steps{margin:0;padding-left:1.4em}ol.steps>li{margin:0 0 10px;font-size:15px}
 ol.steps ul{margin:2px 0 0}ol.steps ul li{margin:0 0 3px;font-size:14px;line-height:1.6}
 ul.cols2{columns:2;column-gap:28px}
-.strip{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:8px}.strip img{width:100%;height:auto;border-radius:4px}
+.tv{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:6px}.tv figure img{max-height:none;aspect-ratio:1/1;object-fit:cover;background:#0b0d12}.tv figcaption{font-size:12px;line-height:1.5;margin-top:4px}.ctable td,.ctable th{font-size:13px;padding:4px 6px}.strip{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:8px}.strip img{width:100%;height:auto;border-radius:4px}
 @media (max-width:900px){.slide{aspect-ratio:auto;padding:24px 20px 40px}.cols,.cols3{grid-template-columns:1fr}
 .slide h1{font-size:30px}.slide h2{font-size:22px}.foot{left:20px;right:20px}}
 @media print{body{background:#fff}.toolbar{display:none}.deck{padding:0;max-width:none}
@@ -2616,7 +2616,11 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
     for fn in (lambda: DM.map_meta_slides(cfg, map_name, kbmap, kb, base, foot),
                lambda: DM.rps_slides(kbmap, kb, base, foot, map_name),
                lambda: DM.comp_slides(CP.report(key.get("comp") or [], rows, kb, map_name), foot, map_name)
-               if key.get("comp") else []):
+               if key.get("comp") else [],
+               lambda: DM.comp_types_slides(cfg, map_name, [r for r in base if r["team"] == key.get("team")], kb,
+                                            out_dir, foot, slug, current=key.get("comp"),
+                                            title=f"{map_name}：{rows[0].get('tag') or key.get('team')} の構成の種類")
+               if key.get("kind") == "team" else []):
         try:
             slides += fn()
         except Exception as e:
@@ -2951,6 +2955,8 @@ def build(cfg: dict, out_dir: Path, team: str | None = None, map_name: str | Non
                 log(f"  Notion への書き込みに失敗（{title}）：{e}")
         wins = sum(r["win"] for r in rs)
         index[(kind, tname or "構成別")].append((mp, cl, p.name, n_maps, wins, len(rs)))
+    from . import board_img
+    board_img.close()
     from . import site
     site.build(out_dir, log=log)                       # すべての冊子に飛べる一覧ページ（index.html）
     log(f"プレイブック（スライド）: {out_dir / 'index.html'}（{len(decks)} 冊）")

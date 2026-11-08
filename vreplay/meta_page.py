@@ -44,6 +44,10 @@ def build_map(cfg: dict, map_name: str, rows: list[dict], out_dir: Path, log=pri
                        'チームのプレイブックはこの上に「その構成でどの手を使うか」を足したものです。</p>', foot, h1=True)]
     slides += DM.map_meta_slides(cfg, map_name, kbmap, kb, rows, foot)
     slides += DM.rps_slides(kbmap, kb, rows, foot, map_name)
+    try:
+        slides += DM.comp_types_slides(cfg, map_name, rows, kb, out_dir, foot, f"meta_{D._slug(map_name)}")
+    except Exception as e:
+        log(f"  {map_name}：構成の種類のスライドを作れませんでした（{e}）")
     tt = "".join(f"<div><h3>{s}</h3>{team_table(rows, s)}</div>" for s in (H.ATTACK, H.DEFENSE))
     slides.append(D._slide("Teams", "チームごとのよく出す手", f'<div class="cols">{tt}</div>', foot))
     slides += DM.hand_slides(cfg, map_name, kbmap, rows, rows, out_dir, foot, f"meta_{D._slug(map_name)}", k=8)
@@ -89,6 +93,8 @@ def build(cfg: dict, out_dir: Path, map_name: str | None = None, source: str | N
             out.append(build_map(cfg, mp, rs, out_dir, log=log))
         except Exception as e:
             log(f"  {mp} のメタを作れませんでした（{e}）")
+    from . import board_img
+    board_img.close()
     from . import site
     site.build(out_dir, log=log)
     return out

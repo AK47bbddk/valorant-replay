@@ -272,7 +272,67 @@ def hand_slides(cfg: dict, map_name: str, kbmap: dict, rows: list[dict], base: l
                        '<p class="sub">左から 1:40・1:30・1:20・1:10・1:00・0:50 の位置（この手のラウンドの重ね合わせ。'
                        '追跡できたラウンドはエージェントの軌跡、それ以外はミニマップの点）</p>' if img else ""))
             slides.append(_slide(f"{'Attack' if side == ATTACK else 'Defense'} Hand", name, body, foot))
+            try:
+                s2 = motion_slide(cfg, map_name, name, side, hr, out_dir, foot, slug, h)
+                if s2:
+                    slides.append(s2)
+            except Exception as e:
+                print(f"  {name} の動きの絵を作れませんでした（{e}）")
     return slides
+
+
+def _calls_walk(cfg: dict, map_name: str):
+    from . import deck as D
+    from . import tactics as TC
+    key = ("cw", map_name)
+    if key not in _CW:
+        meta = TC.load_map(map_name, cfg, log=None) or {}
+        calls = meta.get("callouts") or []
+        _CW[key] = (calls, D._area_xy(calls), D.walk_grid(cfg, map_name))
+    return _CW[key]
+
+
+_CW: dict = {}
+
+
+def motion_html(cfg: dict, map_name: str, name: str, side: str, rows: list[dict], out_dir: Path, slug: str,
+                fr: dict | None = None) -> tuple[str, dict | None]:
+    """節目ごとの作戦ボード（TactiVal）の絵＋その節目の動きの一文。fr を渡せばその駒、無ければ rows から作る。"""
+    from . import board_img as BI
+    calls, xy, walk = _calls_walk(cfg, map_name)
+    fr = fr or BI.motion(rows, side, calls, walk)
+    if not fr:
+        return "", None
+    imgs = BI.images(cfg, map_name, name, fr, side)
+    if not imgs:
+        return "", None
+    txt = BI.summary_text(fr, xy)
+    bpath = BI.write_board(cfg, map_name, name, fr, side, out_dir / "tactival" / f"{slug}_{_slug(name)}.tactival.json")
+    figs = "".join(f'<figure>{media_img(p, "jpg", f"{name} {m}")}<figcaption><b>{_e(m)}</b>　{_e(t)}</figcaption></figure>'
+                   for (m, p, _), t in zip(imgs, txt))
+    src = "TactiVal" if any(k == "tactival" for _, _, k in imgs) else "公式のマップ画像（TactiVal に届かなかったので代わり）"
+    html = (f'<div class="tv">{figs}</div>'
+            f'<p class="sub">{_e(fr.get("how") or "")}・絵：{_e(src)}'
+            + (f'・TactiVal で開いて直せるボード：<a href="tactival/{_e(bpath.name)}" download>{_e(bpath.name)}</a>'
+               '（TactiVal の ≡ → File → Load from File）' if bpath else "") + "</p>")
+    return html, fr
+
+
+def motion_slide(cfg: dict, map_name: str, name: str, side: str, hr: list[dict], out_dir: Path, foot: str,
+                 slug: str, h: dict | None = None) -> str | None:
+    html, fr = motion_html(cfg, map_name, name, side, hr, out_dir, slug)
+    if not html:
+        return None
+    r = (fr or {}).get("row")
+    link = ""
+    if r and r.get("yt"):
+        u = yt_plus(r.get("yt"), -5)
+        link = f'　<a href="{_e(u)}">このラウンドの動画 ▶</a>' if u else ""
+    how = "".join(f"<li>{_e(x)}</li>" for x in (h or {}).get("how") or [])
+    lead = (f'<p class="sub">{_e((h or {}).get("detail") or "")}{link}</p>'
+            + (f'<ol class="steps sub" style="margin:0 0 6px">{how}</ol>' if how else ""))
+    return _slide(f"{'Attack' if side == ATTACK else 'Defense'} Hand", f"{name}：動き（作戦ボード）",
+                  lead + html, foot)
 
 
 def r_detail(r: dict) -> str:
@@ -381,4 +441,100 @@ def comp_slides(rep: dict, foot: str, map_name: str) -> list[str]:
              f'<p class="sub">データで勝率が低い相手：</p><ul class="plain sub">{anti_dt or "<li class=empty>（まだはっきりした差はありません）</li>"}</ul>'
              f'<p class="sub">データで勝率が高い相手：</p><ul class="plain sub">{good or "<li class=empty>-</li>"}</ul></div></div>')
     slides.append(_slide("Composition", f"{map_name}：今のメタとアンチピック", body2, foot))
+    return slides
+
+
+# ---------------------------------------------------------------- 構成の種類
+def comp_table(rows: list[dict], kb) -> list[dict]:
+    """構成ごとの集計（ピストルを除く）。多く使われた順。"""
+    from .comp import archetypes
+    by = defaultdict(list)
+    for r in rows:
+        if r.get("comp") and not r.get("pistol"):
+            by[tuple(r["comp"])].append(r)
+    out = []
+    for comp, rs in by.items():
+        sd = {}
+        for side in (ATTACK, DEFENSE):
+            s = [r for r in rs if r["side"] == side]
+            hc = Counter((r.get("hand") or {}).get("name") for r in s
+                         if (r.get("hand") or {}).get("name") not in (None, "不明"))
+            sd[side] = {"w": sum(r["win"] for r in s), "n": len(s), "hands": hc.most_common(3)}
+        out.append({"comp": comp, "rows": rs, "maps": len({(r["match_id"], r["order"]) for r in rs}),
+                    "teams": sorted({r.get("tag") or r.get("team") or "?" for r in rs}),
+                    "arch": archetypes(comp, kb), "side": sd})
+    out.sort(key=lambda c: (-c["maps"], -len(c["rows"])))
+    return out
+
+
+def _wl(d: dict) -> str:
+    return f"{d['w']}/{d['n']}（{_pct(_rate(d['w'], d['n']))}）" if d["n"] else "-"
+
+
+def comp_types_slides(cfg: dict, map_name: str, rows: list[dict], kb, out_dir: Path, foot: str, slug: str,
+                      current=None, title: str | None = None, k: int = 10, k_motion: int = 3) -> list[str]:
+    """構成の種類：型（2 コン・2 デュエ…）ごとと、具体的な 5 人ごとの表。meta では上位の構成の動きの絵も。
+
+    current を渡すと（チームの冊子）その構成の行に印を付け、動きの絵は作らない（手のスライドにあるので）。"""
+    cs = comp_table(rows, kb)
+    if not cs:
+        return []
+    arch = defaultdict(lambda: {"maps": set(), ATTACK: [0, 0], DEFENSE: [0, 0], "comps": 0})
+    for c in cs:
+        for a in c["arch"]:
+            arch[a]["comps"] += 1
+            arch[a]["maps"] |= {(r["match_id"], r["order"], r["team"]) for r in c["rows"]}
+            for side in (ATTACK, DEFENSE):
+                arch[a][side][0] += c["side"][side]["w"]
+                arch[a][side][1] += c["side"][side]["n"]
+    atr = "".join(f"<tr><td><b>{_e(a)}</b></td><td class='num'>{v['comps']}</td><td class='num'>{len(v['maps'])}</td>"
+                  f"<td class='num'>{_wl({'w': v[ATTACK][0], 'n': v[ATTACK][1]})}</td>"
+                  f"<td class='num'>{_wl({'w': v[DEFENSE][0], 'n': v[DEFENSE][1]})}</td></tr>"
+                  for a, v in sorted(arch.items(), key=lambda kv: -len(kv[1]["maps"])))
+    cur = tuple(current) if current else None
+    trs = []
+    for c in cs[:k]:
+        mark = " style='background:#e8f1fe'" if cur and c["comp"] == cur else ""
+        fn = f"comp_{_slug(map_name)}_{_slug('-'.join(c['comp']))}.html"
+        name = " / ".join(c["comp"])
+        name_html = f'<a href="{_e(fn)}">{_e(name)}</a>' if (out_dir / fn).exists() else _e(name)
+        hands = lambda sd: "・".join(f"{h} {n}" for h, n in c["side"][sd]["hands"][:2]) or "-"
+        trs.append(f"<tr{mark}><td>{name_html}<br><span class='sub'>{_e('・'.join(c['arch']))}</span></td>"
+                   f"<td class='num'>{c['maps']}</td><td class='sub'>{_e('・'.join(c['teams'][:4]))}"
+                   f"{'…' if len(c['teams']) > 4 else ''}</td>"
+                   f"<td class='num'>{_wl(c['side'][ATTACK])}</td><td class='sub'>{_e(hands(ATTACK))}</td>"
+                   f"<td class='num'>{_wl(c['side'][DEFENSE])}</td><td class='sub'>{_e(hands(DEFENSE))}</td></tr>")
+    body = (f'<div class="cols" style="grid-template-columns:1fr 2.3fr"><div><h3>型ごと</h3>'
+            f'<table class="ctable"><thead><tr><th>型</th><th class="num">構成</th><th class="num">マップ</th>'
+            f'<th class="num">攻め</th><th class="num">守り</th></tr></thead><tbody>{atr}</tbody></table>'
+            '<p class="sub">型は役割の数・KAY/O・オペ・フラッシュの有無から自動で付けています（1 つの構成が複数の型に入ります）。</p></div>'
+            f'<div><h3>構成ごと（多い順）</h3><table class="ctable"><thead><tr><th>構成</th><th class="num">マップ</th>'
+            f'<th>チーム</th><th class="num">攻め</th><th>よく出す攻めの手</th><th class="num">守り</th>'
+            f'<th>よく出す守りの手</th></tr></thead><tbody>{"".join(trs)}</tbody></table>'
+            + ('<p class="sub">青い行がこの冊子の構成。</p>' if cur else
+               '<p class="sub">攻め・守りはラウンドの勝ち/回数（ピストル除く）。リンクは構成別の冊子。</p>')
+            + '</div></div>')
+    slides = [_slide("Compositions", title or f"{map_name} の構成の種類", body, foot)]
+    if cur:
+        return slides
+    # 上位の構成：攻め・守りでいちばん使った手の動き（同じ構成なのでエージェントごとの典型の立ち位置）
+    for c in cs[:k_motion]:
+        for side in (ATTACK, DEFENSE):
+            hs = c["side"][side]["hands"]
+            if not hs or hs[0][1] < 2:
+                continue
+            hand = hs[0][0]
+            hr = [r for r in c["rows"] if r["side"] == side and (r.get("hand") or {}).get("name") == hand]
+            try:
+                html, _fr = motion_html(cfg, map_name, f"{hand}（{'・'.join(c['comp'])}）", side, hr, out_dir,
+                                        f"{slug}_c")
+            except Exception as e:
+                print(f"  構成の動きの絵を作れませんでした（{e}）")
+                html = ""
+            if not html:
+                continue
+            w = sum(r["win"] for r in hr)
+            slides.append(_slide("Compositions", f"{' / '.join(c['comp'])}：{side}の {hand}",
+                                 f'<p class="sub">{_e("・".join(c["arch"]))}・{_e("・".join(c["teams"][:5]))}・'
+                                 f'この手 {len(hr)} 回・勝ち {w}（{_pct(_rate(w, len(hr)))}）</p>' + html, foot))
     return slides
