@@ -228,7 +228,7 @@ def generic(f: dict, r: dict) -> str:
             return f"{'MID' if f['shown'] == 'Mid' else f['shown']} 見せ → {site}"
         if ce is not None and ce >= 60:
             return f"{site} レイト"
-        return f"{site} execute"
+        return f"{site} 正面から入る"
     push = {z: c for z, c in (f.get("push") or {}).items() if c}
     if push:
         z = max(push, key=push.get)
@@ -240,7 +240,7 @@ def generic(f: dict, r: dict) -> str:
     if top[0] in SITES and top[1] >= 3:
         return f"{top[0]}{top[1]}"
     if zs.get("Mid", 0) >= 2:
-        return "mid focus"
+        return "MID 寄せ"
     if all(zs.get(z, 0) >= 1 for z in ("A", "B")) and top[1] <= 2:
         return "平たく守る"
     return "守りデフォ"
