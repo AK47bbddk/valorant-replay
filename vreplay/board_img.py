@@ -25,6 +25,7 @@ from pathlib import Path
 URL = "https://tactival.app/board"
 COL = {"attack": "#ff4655", "defense": "#2ec4b6"}
 MARKS = [("1:30", 10), ("1:15", 25), ("1:00", 40), ("0:40", 60)]
+AGENT = 64             # 駒の大きさ（ボードの px。アプリの既定 48 より大きめにして、縮めた絵でも顔が見えるように）
 _R = None              # 立ち上げた描き手（1 回の実行で使い回す）
 _R_FAILED = False
 
@@ -100,8 +101,8 @@ def motion(rows: list[dict], side: str, calls, walk=None) -> dict | None:
             dots = [{"label": a, "xy": [[round(u, 4), round(v, 4)] for u, v in seq],
                      "route": [D.route(walk, seq[i], seq[i + 1]) for i in range(len(seq) - 1)]}
                     for a, seq in fr["agents"].items()]
-            return {"marks": fr["marks"], "dots": dots, "row": None,
-                    "how": f"{fr['n']} ラウンドのエージェントごとのいちばん典型的な立ち位置（medoid）"}
+            return pick_marks({"marks": fr["marks"], "dots": dots, "row": None,
+                               "how": f"{fr['n']} ラウンドのエージェントごとのいちばん典型的な立ち位置（medoid）"}, walk)
     r = pick_round(rows)
     fr = from_round(r) if r else None
     if not fr:
@@ -109,7 +110,23 @@ def motion(rows: list[dict], side: str, calls, walk=None) -> dict | None:
     for d in fr["dots"]:
         d["route"] = [D.route(walk, d["xy"][i], d["xy"][i + 1]) for i in range(len(d["xy"]) - 1)]
     who = f"{r.get('tag') or r.get('team') or ''} vs {r.get('opp_tag') or r.get('opp') or ''} R{r.get('n')}"
-    return {**fr, "row": r, "how": f"代表のラウンド：{who}（{'勝ち' if r.get('win') else '負け'}）"}
+    return pick_marks({**fr, "row": r, "how": f"代表のラウンド：{who}（{'勝ち' if r.get('win') else '負け'}）"}, walk)
+
+
+def pick_marks(fr: dict, walk=None, want=("1:30", "1:15", "1:00", "0:40"), k: int = 4) -> dict:
+    """スライドに並べる節目を k 個まで（1:30 → 1:15 → 1:00 → 0:40 を優先）。道は選んだ節目の間で引き直す。"""
+    from . import deck as D
+    idx = [i for i, m in enumerate(fr["marks"]) if m in want]
+    if len(idx) < 2:
+        idx = list(range(len(fr["marks"])))
+    idx = idx[:k]
+    if idx == list(range(len(fr["marks"]))):
+        return fr
+    dots = []
+    for d in fr["dots"]:
+        xy = [d["xy"][i] for i in idx]
+        dots.append({**d, "xy": xy, "route": [D.route(walk, xy[j], xy[j + 1]) for j in range(len(xy) - 1)]})
+    return {**fr, "marks": [fr["marks"][i] for i in idx], "dots": dots}
 
 
 def moves(fr: dict, i: int, xy: dict) -> tuple[list[str], list[str]]:
@@ -169,8 +186,9 @@ def boards(map_name: str, name: str, fr: dict, side: str, cfg: dict | None = Non
                         order += 1
         for d in fr["dots"]:
             x, y = TV.to_px(d["xy"][i][0], d["xy"][i][1], calib)
-            els.append(TV.agent_element(ids.get(str(d["label"]).lower()), x - TV.AGENT_SIZE / 2,
-                                        y - TV.AGENT_SIZE / 2, 100 + order, team))
+            el = TV.agent_element(ids.get(str(d["label"]).lower()), x - AGENT / 2, y - AGENT / 2, 100 + order, team)
+            el["width"] = el["height"] = AGENT
+            els.append(el)
             order += 1
         b = dict(base)
         b["steps"] = [{"id": TV._eid(), "label": f"{name}　{mark}", "transition": 1.0, "hold": 1.0,
@@ -193,6 +211,29 @@ def full_board(map_name: str, name: str, fr: dict, side: str, cfg: dict | None =
 
 
 # ---------------------------------------------------------------- 描く（TactiVal）
+def tight(src: Path, out: Path, margin: float = 0.03, thr: int = 45) -> Path:
+    """マップ（床）のある所だけを正方形で切り抜く（ボードの余白を落として、縮めても見えるように）。"""
+    from PIL import Image
+    import numpy as np
+    im = Image.open(src).convert("RGB")
+    a = np.asarray(im)
+    ys, xs = np.where(a.max(axis=2) > thr)
+    if len(xs) > 100:
+        x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
+        side = max(x1 - x0, y1 - y0) * (1 + 2 * margin)
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        W, H = im.size
+        side = min(side, W, H)
+        L = int(min(max(0, cx - side / 2), W - side))
+        T = int(min(max(0, cy - side / 2), H - side))
+        im = im.crop((L, T, L + int(side), T + int(side)))
+    if im.size[0] > 900:
+        im = im.resize((900, 900), Image.LANCZOS)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    im.save(out, "JPEG", quality=88)
+    return out
+
+
 class Renderer:
     """ヘッドレスの Chromium で TactiVal を開き、ボードを読み込ませてマップの部分を撮る。"""
 
@@ -227,7 +268,10 @@ class Renderer:
         ox, oy = box["x"] + (box["w"] - 1920 * s) / 2, box["y"] + (box["h"] - 1080 * s) / 2
         clip = {"x": ox + 448 * s, "y": oy + 28 * s, "width": 1024 * s, "height": 1024 * s}
         out.parent.mkdir(parents=True, exist_ok=True)
-        pg.screenshot(path=str(out), clip=clip, type="jpeg", quality=90)
+        tmp = out.with_suffix(".png")
+        pg.screenshot(path=str(tmp), clip=clip)
+        tight(tmp, out)
+        tmp.unlink(missing_ok=True)
         return out
 
     def close(self):
@@ -309,7 +353,7 @@ def _fallback(cfg: dict, map_name: str, fr: dict, i: int, side: str, out: Path, 
             cv2.putText(bg, str(d["label"])[:2], (x - R + 2, y + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
     out.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out), bg, [cv2.IMWRITE_JPEG_QUALITY, 88])
-    return out
+    return tight(out, out)
 
 
 # ---------------------------------------------------------------- まとめ
