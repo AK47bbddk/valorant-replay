@@ -300,6 +300,19 @@ def motion_html(cfg: dict, map_name: str, name: str, side: str, rows: list[dict]
     """節目ごとの作戦ボード（TactiVal）の絵＋その節目の動きの一文。fr を渡せばその駒、無ければ rows から作る。"""
     from . import board_img as BI
     calls, xy, walk = _calls_walk(cfg, map_name)
+    bname = f"{slug}_{_slug(name)}.tactival.json"
+    # コーチが TactiVal で直したボード（playbook/tactival_fix/ に同じ名前で置く）があれば、そちらを描く
+    fix = out_dir / "tactival_fix" / bname
+    if fix.exists():
+        got = BI.fixed_boards(fix)
+        if got:
+            bs, labels = got
+            imgs = BI.images(cfg, map_name, name, None, side, bs=bs, marks=labels)
+            if imgs:
+                figs = "".join(f'<figure>{media_img(p, "jpg", f"{name} {m}")}<figcaption><b>{_e(m)}</b></figcaption></figure>'
+                               for m, p, _ in imgs[:4])
+                return (f'<div class="tv">{figs}</div><p class="sub">コーチが直したボード（tactival_fix/{_e(bname)}）を'
+                        f'描いています。ステップの名前がそのまま説明になります。</p>', None)
     fr = fr or BI.motion(rows, side, calls, walk)
     if not fr:
         return "", None
@@ -307,14 +320,15 @@ def motion_html(cfg: dict, map_name: str, name: str, side: str, rows: list[dict]
     if not imgs:
         return "", None
     txt = BI.summary_text(fr, xy)
-    bpath = BI.write_board(cfg, map_name, name, fr, side, out_dir / "tactival" / f"{slug}_{_slug(name)}.tactival.json")
+    bpath = BI.write_board(cfg, map_name, name, fr, side, out_dir / "tactival" / bname)
     figs = "".join(f'<figure>{media_img(p, "jpg", f"{name} {m}")}<figcaption><b>{_e(m)}</b>　{_e(t)}</figcaption></figure>'
                    for (m, p, _), t in zip(imgs, txt))
     src = "TactiVal" if any(k == "tactival" for _, _, k in imgs) else "公式のマップ画像（TactiVal に届かなかったので代わり）"
     html = (f'<div class="tv">{figs}</div>'
             f'<p class="sub">{_e(fr.get("how") or "")}・絵：{_e(src)}'
             + (f'・TactiVal で開いて直せるボード：<a href="tactival/{_e(bpath.name)}" download>{_e(bpath.name)}</a>'
-               '（TactiVal の ≡ → File → Load from File）' if bpath else "") + "</p>")
+               '（TactiVal の ≡ → File → Load from File。直したら Save to File で playbook/tactival_fix/ に同じ名前で置くと、次からその絵になります）'
+               if bpath else "") + "</p>")
     return html, fr
 
 

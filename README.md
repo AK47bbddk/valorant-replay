@@ -290,6 +290,13 @@ Notion にも書きます（親ページをインテグレーションに共有�
   7 割を切るマップ（合わせがずれているもの）の位置は、動き・実例の読み取り・エリアテイクに使いません（`deck.mark_alignment`）。
 - **位置データの書き出し**：`<冊子名>_positions.json` に、型ごとの立ち位置・矢印・節目ごとの駒の道を
   valorant-api のマップ画像の 0..1 座標で出します（このリポジトリ独自の形式。中身は JSON の `note` に）。
+- **動きの絵（作戦ボード）**（`vreplay/board_img.py`）：手（B スプリットなど）ごとに、代表のラウンド
+  （勝ったラウンドのうち、その手の典型の立ち位置にいちばん近いもの）の 5 秒ごとの軌跡から、開始 10 秒〜設置の瞬間を
+  4 枚の TactiVal のボードにし、ヘッドレス Chromium（playwright）で https://tactival.app/board に描かせて
+  スライドに貼る。絵の下に節目ごとの動き（「Sage：B Main → B Site」）。同じボードを `playbook/tactival/` に
+  書き出すので TactiVal で開いて直せる。直したボードを `playbook/tactival_fix/` に同じ名前で置くと、次から
+  その絵になる（添削 → 修正）。TactiVal に届かないときは公式のマップ画像に描いた代わりの絵。
+  マップのメタ・チームの冊子には「構成の種類」（型ごと・5 人ごとの勝率とよく出す手）も入る。
 - **TactiVal のボード**（`vreplay/tactival.py`）：作戦ボードアプリ [TactiVal](https://tactival.app/) に
   読み込ませる JSON（`schemaVersion: 3`）を、型ごとに 1 ファイル出します（`playbook/tactival/`）。
   節目（1:30 → 1:15 → 1:00 → 0:40 → 設置後）がそのまま TactiVal の **step** になるので、

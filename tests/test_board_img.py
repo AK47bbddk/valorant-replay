@@ -61,3 +61,13 @@ def test_from_tracks_ends_at_plant():
     assert fr["marks"][0] == "1:30" and fr["marks"][-1] == "設置 0:53" and len(fr["marks"]) == 4
     assert fr["dots"][0]["xy"][-1][1] < fr["dots"][0]["xy"][0][1]
     assert BI.from_tracks({"tracks": tr})["marks"][-1] == "0:40"
+
+
+def test_fixed_boards_split_steps(tmp_path):
+    import json
+    b = BI.full_board("Sunset", "x", _fr(), "攻撃")
+    b["steps"][1]["label"] = "Omen スモーク → B へ"
+    p = tmp_path / "f.tactival.json"
+    p.write_text(json.dumps(b), encoding="utf-8")
+    bs, labels = BI.fixed_boards(p)
+    assert len(bs) == 3 and all(len(x["steps"]) == 1 for x in bs) and labels[1] == "Omen スモーク → B へ"

@@ -412,12 +412,32 @@ def _fallback(cfg: dict, map_name: str, fr: dict, i: int, side: str, out: Path, 
 
 
 # ---------------------------------------------------------------- まとめ
-def images(cfg: dict, map_name: str, name: str, fr: dict, side: str, log=print) -> list[tuple[str, Path, str]]:
-    """節目ごとの絵 [(節目, 画像, "tactival"|"fallback")]。"""
+def fixed_boards(path: Path) -> tuple[list[dict], list[str]] | None:
+    """コーチが TactiVal で直して書き出したボード → 1 ステップずつのボードと各ステップの名前。"""
+    try:
+        b = json.loads(Path(path).read_text("utf-8"))
+    except Exception:
+        return None
+    steps = b.get("steps") or []
+    if not steps:
+        return None
+    base = {k: v for k, v in b.items() if k not in ("steps", "patchSnapshot")}
+    base["activeStepIndex"] = 0
+    return [dict(base, steps=[st]) for st in steps], [str(st.get("label") or f"{i + 1}") for i, st in enumerate(steps)]
+
+
+def images(cfg: dict, map_name: str, name: str, fr: dict | None, side: str, log=print,
+           bs: list[dict] | None = None, marks: list[str] | None = None) -> list[tuple[str, Path, str]]:
+    """節目ごとの絵 [(節目, 画像, "tactival"|"fallback")]。bs（直したボード）を渡せばそれをそのまま描く。"""
     cache = Path((cfg.get("output") or {}).get("dir") or ".") / "_cache" / "tactival_png"
-    bs = boards(map_name, name, fr, side, cfg)
+    if bs is None:
+        bs = boards(map_name, name, fr, side, cfg)
+        marks = fr["marks"]
+    elif not marks:
+        marks = [str(i + 1) for i in range(len(bs))]
+    fr = fr or {"marks": marks, "dots": []}
     out = []
-    for i, mark in enumerate(fr["marks"]):
+    for i, mark in enumerate(marks):
         b = bs[i] if bs else None
         if b is not None:
             key = json.dumps({**b, "steps": [{**b["steps"][0], "id": "", "label": "",
@@ -436,6 +456,8 @@ def images(cfg: dict, map_name: str, name: str, fr: dict, side: str, log=print) 
                     continue
                 except Exception as e:
                     log(f"  TactiVal で描けませんでした（{name} {mark}：{str(e).splitlines()[0][:100]}）")
+        if not fr["dots"]:
+            continue
         h = hashlib.sha1(json.dumps([map_name, side, fr["dots"], i], sort_keys=True).encode()).hexdigest()[:16]
         p = cache / f"fb_{h}.jpg"
         if p.exists() or _fallback(cfg, map_name, fr, i, side, p):
