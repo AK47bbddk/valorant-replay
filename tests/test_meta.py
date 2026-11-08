@@ -191,3 +191,26 @@ def test_store_hands_and_meta_page(tmp_path):
     conn = db.open_warehouse(cfg)
     n = conn.execute("SELECT COUNT(*) FROM round_hands WHERE hand IS NOT NULL").fetchone()[0]
     assert n > 0
+
+
+def test_site_lists_every_deck_and_meta(tmp_path):
+    from vreplay import site
+    pb = tmp_path / "playbook"
+    pb.mkdir()
+    (pb / "meta_Sunset.html").write_text("<html></html>", encoding="utf-8")
+    (pb / "meta_Sunset.json").write_text(json.dumps({"map": "Sunset", "maps": 12, "teams": 9, "summary": {
+        "攻撃": [{"name": "B スプリット（トップ・マーケット）", "n": 20, "w": 11}], "防衛": []}}), encoding="utf-8")
+    for team, mp in (("LOUD", "Sunset"), ("LOUD", "Haven"), ("G2", "Split")):
+        stem = f"team_{team}_{mp}_A-B"
+        (pb / f"{stem}.html").write_text("<html></html>", encoding="utf-8")
+        (pb / f"{stem}_cheat.html").write_text("<html></html>", encoding="utf-8")
+        (pb / f"{stem}.json").write_text(json.dumps({"key": {"team": team, "map": mp, "comp": ["Sage", "Chamber"]},
+                                                     "rounds": 40, "wins": 25, "maps": 2, "tag": team,
+                                                     "cheat": f"{stem}_cheat.html",
+                                                     "hands": {"攻撃": ["B セット"], "防衛": []}}), encoding="utf-8")
+    p = site.build(pb, log=lambda *a: None)
+    h = p.read_text(encoding="utf-8")
+    assert "meta_Sunset.html" in h and "B スプリット（トップ・マーケット）" in h
+    assert h.count("team_LOUD_") >= 4 and "team_G2_Split_A-B.html" in h and "_cheat.html" in h
+    assert h.index("team_LOUD_Haven") < h.index("team_LOUD_Sunset")      # マップの並び順
+    assert "勝率 62%" in h

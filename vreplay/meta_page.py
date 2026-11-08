@@ -58,7 +58,8 @@ def build_map(cfg: dict, map_name: str, rows: list[dict], out_dir: Path, log=pri
     p.write_text(page, encoding="utf-8")
     m = H.matrix(rows)
     (out_dir / f"meta_{D._slug(map_name)}.json").write_text(json.dumps({
-        "map": map_name, "maps": n_maps, "summary": H.summary(rows),
+        "map": map_name, "maps": n_maps, "teams": len({r["team"] for r in rows}), "summary": H.summary(rows),
+        "generated_at": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M"),
         "matrix": [{"atk": a, "def": d, "atk_win": w, "n": n} for (a, d), (w, n) in m["cells"].items()],
         "reads": H.reads(rows)[:30]}, ensure_ascii=False, indent=1), encoding="utf-8")
     log(f"  {map_name} のメタ: {p}")
@@ -88,4 +89,6 @@ def build(cfg: dict, out_dir: Path, map_name: str | None = None, source: str | N
             out.append(build_map(cfg, mp, rs, out_dir, log=log))
         except Exception as e:
             log(f"  {mp} のメタを作れませんでした（{e}）")
+    from . import site
+    site.build(out_dir, log=log)
     return out

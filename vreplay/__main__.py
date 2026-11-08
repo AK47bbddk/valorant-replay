@@ -159,6 +159,10 @@ def main():
     pk.add_argument("--clips", action="store_true", help="スクリムの動画からラウンドを切り出す（ffmpeg）")
     pk.add_argument("--config")
 
+    si = sub.add_parser("site", help="すべてのプレイブックに飛べる一覧ページ（playbook/index.html）を作り直す")
+    si.add_argument("--out", help="playbook フォルダ（既定 output.dir/playbook）")
+    si.add_argument("--config")
+
     a = ap.parse_args()
     cfg = config.load(a.config)
 
@@ -266,6 +270,9 @@ def main():
         print(f"DB: {db.warehouse_path(cfg)}")
         for k, v in st.items():
             print(f"  {k}: {v}")
+    elif a.cmd == "site":
+        from . import site
+        site.build(Path(a.out) if a.out else Path(cfg["output"]["dir"]) / "playbook")
     elif a.cmd == "meta":
         from . import meta_page
         out = Path(a.out) if a.out else Path(cfg["output"]["dir"]) / "playbook"

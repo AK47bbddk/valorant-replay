@@ -2873,7 +2873,13 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
             f'{MOTION_JS}{media_js()}</body></html>')
     f = out_dir / f"{slug}.html"
     f.write_text(page, encoding="utf-8")
-    data = {"key": {k: v for k, v in key.items() if k != "rows"}, "rounds": len(rows),
+    hs = {sd: Counter((r.get("hand") or {}).get("name") for r in rows if r["side"] == sd and r.get("hand")
+                      and not r.get("pistol")) for sd in (ATTACK, DEFENSE)}
+    data = {"key": {k: v for k, v in key.items() if k not in ("rows", "llm")}, "rounds": len(rows),
+            "maps": len(maps), "wins": sum(1 for r in rows if r["win"]), "tag": rows[0].get("tag") if rows else None,
+            "last_date": str(maps[-1][2]) if maps else None, "cheat": cheat.name,
+            "hands": {sd: [h for h, _ in c.most_common(3) if h and h != "不明"] for sd, c in hs.items()},
+            "generated_at": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M"),
             "strategy": {side: {"strong": points(evaluate(rows, base, side), True),
                                 "weak": points(evaluate(rows, base, side), False, k=2)} for side in (DEFENSE, ATTACK)}}
     (out_dir / f"{slug}.json").write_text(json.dumps(data, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
@@ -2945,7 +2951,8 @@ def build(cfg: dict, out_dir: Path, team: str | None = None, map_name: str | Non
                 log(f"  Notion への書き込みに失敗（{title}）：{e}")
         wins = sum(r["win"] for r in rs)
         index[(kind, tname or "構成別")].append((mp, cl, p.name, n_maps, wins, len(rs)))
-    _write_index(out_dir, index)
+    from . import site
+    site.build(out_dir, log=log)                       # すべての冊子に飛べる一覧ページ（index.html）
     log(f"プレイブック（スライド）: {out_dir / 'index.html'}（{len(decks)} 冊）")
     return decks
 
