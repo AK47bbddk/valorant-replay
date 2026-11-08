@@ -534,7 +534,7 @@ def comp_types_slides(cfg: dict, map_name: str, rows: list[dict], kb, out_dir: P
             if not html:
                 continue
             w = sum(r["win"] for r in hr)
-            slides.append(_slide("Compositions", f"{' / '.join(c['comp'])}：{side}の {hand}",
+            slides.append(_slide("Compositions", f"{' / '.join(c['comp'])}：{side}の {hand}（動き・作戦ボード）",
                                  f'<p class="sub">{_e("・".join(c["arch"]))}・{_e("・".join(c["teams"][:5]))}・'
                                  f'この手 {len(hr)} 回・勝ち {w}（{_pct(_rate(w, len(hr)))}）</p>' + html, foot))
     return slides

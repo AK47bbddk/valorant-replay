@@ -44,3 +44,12 @@ def test_from_round_and_pick():
     sova = next(d for d in fr["dots"] if d["label"] == "Sova")
     assert sova["xy"][2] == sova["xy"][1]                         # 見えない節目は前の位置
     assert BI.pick_round([dict(r, win=False), r]) is r
+
+
+def test_pick_round_prefers_typical_win():
+    def mk(win, u):
+        return {"win": win, "agents": {m: [(a, u + j * .01, .5, "x") for j, a in enumerate("ABCDE")]
+                                        for m in ("1:30", "1:15", "1:00")}}
+    med = {"marks": ["1:30", "1:15", "1:00"], "agents": {a: [(.3 + j * .01, .5)] * 3 for j, a in enumerate("ABCDE")}}
+    near_loss, far_win, near_win = mk(False, .3), mk(True, .8), mk(True, .35)
+    assert BI.pick_round([near_loss, far_win, near_win], med) is near_win

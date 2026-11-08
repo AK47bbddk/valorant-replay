@@ -72,9 +72,12 @@ def from_round(r: dict, marks=MARKS) -> dict | None:
     return {"marks": [m for m, _ in use], "dots": dots}
 
 
-def pick_round(rows: list[dict]) -> dict | None:
-    """代表のラウンド：勝ったラウンドを先に、エージェントが多く見えているもの、新しいもの。"""
-    best, bk = None, None
+def pick_round(rows: list[dict], med: dict | None = None) -> dict | None:
+    """代表のラウンド。勝ったラウンドを先に、その中で「いちばん典型的」なもの。
+
+    med（エージェントごとの medoid の立ち位置 {"marks", "agents"}）があれば、それに近いラウンド。
+    無ければ、エージェントが多く見えているもの・新しいもの。"""
+    cands = []
     for r in rows:
         ag = r.get("agents") or {}
         if not ag or not r.get("align_ok", True):
@@ -82,35 +85,46 @@ def pick_round(rows: list[dict]) -> dict | None:
         seen = sum(len(ag.get(m) or []) for m, _ in MARKS)
         if seen < 8:
             continue
-        k = (bool(r.get("win")), min(seen, 20), str(r.get("date") or ""), r.get("n") or 0)
-        if bk is None or k > bk:
-            best, bk = r, k
-    return best
+        d = None
+        if med:
+            ds = []
+            for i, m in enumerate(med["marks"]):
+                for a, u, v, *_ in ag.get(m) or []:
+                    p = (med["agents"].get(a) or [None] * 9)[i]
+                    if p:
+                        ds.append(math.dist((u, v), p))
+            d = sum(ds) / len(ds) if len(ds) >= 6 else None
+        cands.append((r, seen, d))
+    if not cands:
+        return None
+    wins = [c for c in cands if c[0].get("win")] or cands
+    if any(c[2] is not None for c in wins):
+        return min((c for c in wins if c[2] is not None), key=lambda c: c[2])[0]
+    return max(wins, key=lambda c: (min(c[1], 20), str(c[0].get("date") or ""), c[0].get("n") or 0))[0]
 
 
 def motion(rows: list[dict], side: str, calls, walk=None) -> dict | None:
-    """手のラウンド → 描く駒。同じ構成なら全ラウンドの立ち位置の medoid、混ざっていれば代表の 1 ラウンド。
+    """手のラウンド → 描く駒。実際の 1 ラウンド（勝ったラウンドのうち、いちばん典型的なもの）を描く。
 
-    返り値 {"marks", "dots": [{"label", "xy", "route"?}], "how": 説明, "row": 代表のラウンド or None}
+    同じ構成のラウンドなら、エージェントごとの典型の立ち位置（medoid）にいちばん近いラウンドを選ぶ。
+    平均の位置をそのまま描くと、ラウンドごとの速さの違いで「戻っている」ように見えるので使わない。
+    返り値 {"marks", "dots": [{"label", "xy", "route"}], "how": 説明, "row": 代表のラウンド}
     """
     from . import deck as D
+    med = None
     comps = {tuple(r.get("comp") or ()) for r in rows}
-    if len(comps) == 1 and len(rows) >= 2:
-        fr = D.agent_tracks({"rows": rows})
-        if fr and len(fr["agents"]) >= 4:
-            dots = [{"label": a, "xy": [[round(u, 4), round(v, 4)] for u, v in seq],
-                     "route": [D.route(walk, seq[i], seq[i + 1]) for i in range(len(seq) - 1)]}
-                    for a, seq in fr["agents"].items()]
-            return pick_marks({"marks": fr["marks"], "dots": dots, "row": None,
-                               "how": f"{fr['n']} ラウンドのエージェントごとのいちばん典型的な立ち位置（medoid）"}, walk)
-    r = pick_round(rows)
+    if len(comps) == 1 and len(rows) >= 3:
+        med = D.agent_tracks({"rows": rows})
+    r = pick_round(rows, med)
     fr = from_round(r) if r else None
     if not fr:
         return None
     for d in fr["dots"]:
         d["route"] = [D.route(walk, d["xy"][i], d["xy"][i + 1]) for i in range(len(d["xy"]) - 1)]
     who = f"{r.get('tag') or r.get('team') or ''} vs {r.get('opp_tag') or r.get('opp') or ''} R{r.get('n')}"
-    return pick_marks({**fr, "row": r, "how": f"代表のラウンド：{who}（{'勝ち' if r.get('win') else '負け'}）"}, walk)
+    how = (f"代表のラウンド：{who}（{'勝ち' if r.get('win') else '負け'}）"
+           + (f"・{len(rows)} ラウンドの典型の立ち位置にいちばん近いラウンド" if med else ""))
+    return pick_marks({**fr, "row": r, "how": how}, walk)
 
 
 def pick_marks(fr: dict, walk=None, want=("1:30", "1:15", "1:00", "0:40"), k: int = 4) -> dict:
