@@ -9,7 +9,7 @@
   commit_after: 50             50 秒以降に入った
   via_any: [Mid Top, B Market] 入る前 25 秒（入らなければ 0〜60 秒）に、どれかに 1 人以上いた
   via_all: [[..], [..]]        グループごとに 1 人以上（2 方向から割る＝スプリット）
-  via_min: {areas: [..], n: 3} その場所の合計が n 人以上
+  via_min: {areas: [..], n: 3} 入る前の同じ時刻に、その場所の合計が n 人以上（スプリットの 2 方向目に 2 人以上など）
   shown: Mid                   1:15 の初動で人数が多かったゾーン（見せた場所）。site と違えばフェイク
   no_plant: true               設置していない
 守り（defense）。既定は開始 5〜25 秒の、点がいちばん多く見えた時刻で判定（window: [5, 25] で変えられる）
@@ -120,11 +120,14 @@ def features(r: dict) -> dict:
         f.update(site=site, commit_e=commit_e, planted=bool(r.get("planted")))
         lo, hi = ((commit_e - 25, commit_e) if commit_e is not None else (0, 60))
         via = Counter()
+        frames = []
         for e, v in sm.items():
             if lo <= e <= hi:
+                frames.append(dict(v["areas"]))
                 for a, c in v["areas"].items():
                     via[a] = max(via[a], c)
         f["via"] = dict(via)
+        f["via_frames"] = frames                  # 同じ時刻の人数（via_min は同時に何人いたかで見る）
         su = r.get("setup") or {}
         shown = su.get("area_zone")
         if not shown:
@@ -134,7 +137,9 @@ def features(r: dict) -> dict:
         f["shown"] = shown
         f["key_area"] = su.get("area")
     else:
-        v = _rep(sm, 5, 25, 20)
+        # 守りの配置は 1:30 ごろ（開始 5〜15 秒で点がいちばん多く見えた時刻）で見る。
+        # 遅い時刻だと、A に 3 人寄せてスキルを返したあとの寄り（ローテ）を拾って A1 などに見えてしまう
+        v = _rep(sm, 5, 15, 10) or _rep(sm, 5, 25, 20)
         f["zones"] = dict(v["zones"]) if v else {}
         f["areas"] = dict(v["areas"]) if v else {}
         push = Counter()
@@ -184,8 +189,12 @@ def matches(when: dict, f: dict, r: dict) -> bool:
             if not any(_area_in(a, grp) for a in via):
                 return False
         vm = when.get("via_min")
-        if vm and sum(c for a, c in via.items() if _area_in(a, vm.get("areas"))) < int(vm.get("n", 1)):
-            return False
+        if vm:
+            fr = f.get("via_frames")
+            got = (max((sum(c for a, c in x.items() if _area_in(a, vm.get("areas"))) for x in fr), default=0)
+                   if fr is not None else sum(c for a, c in via.items() if _area_in(a, vm.get("areas"))))
+            if got < int(vm.get("n", 1)):
+                return False
         if "shown" in when and _low(f.get("shown")) != _low(when["shown"]):
             return False
         if when.get("no_plant") and f.get("planted"):

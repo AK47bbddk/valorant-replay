@@ -76,14 +76,14 @@ hands:
       loses_to: [A3 スキル返し]
     - name: B スプリット（トップ・マーケット）
       style: skill_take
-      when: {site: B, via_all: [[Mid Top, B Market, B Boba, Mid Courtyard], [B Main, B Lobby]]}
-      detail: MID トップ・マーケットと B メインの 2 方向から B を割る（トップ壁＋マーケット → タピオカ）
+      when: {site: B, via_all: [[B Main, B Lobby]], via_min: {areas: [Mid Top, B Market, B Boba, Mid Courtyard], n: 2}}
+      detail: MID トップ・マーケットと B メインの 2 方向から B を割る（トップ壁＋マーケット → タピオカ）。マーケット側に 2 人以上
       beats: [A3 スキル返し]
       loses_to: [MID プッシュ（MID＋A で挟む）, B プッシュ]
-    - name: B セット
+    - name: B メインセット
       style: skill_take
       when: {site: B}
-      detail: B メイン（またはマーケット）から 1 方向で入るセット
+      detail: B メインから人数をそろえて 1 方向で入るセット（5-0。マーケット側は 1 人まで）
       beats: []
       loses_to: []
     - name: A デフォルト→A
