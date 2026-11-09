@@ -57,6 +57,10 @@ def _run_notified(cfg: dict, cmd: str, no_notify: bool, fn):
     t0 = time.time()
     try:
         result = fn()
+    except SystemExit as e:
+        if not no_notify and e.code not in (0, None):
+            send(cfg, f"vreplay {cmd} 失敗", f"SystemExit: {e}"[-300:], level="error")
+        raise
     except Exception as e:
         if not no_notify:
             send(cfg, f"vreplay {cmd} 失敗", f"{type(e).__name__}: {e}"[-300:], level="error")
@@ -232,7 +236,8 @@ def main():
                                     end=parse_day(a.end).isoformat() if a.end else None, limit=a.limit,
                                     retry_failed=not a.no_retry, shard=a.shard, force=a.force,
                                     out_root=Path(a.out) if a.out else None,
-                                    redo_before=a.redo_before, maps=a.maps))
+                                    redo_before=a.redo_before, maps=a.maps,
+                                    notify_enabled=not a.no_notify))
     elif a.cmd == "playbook":
         def _playbook():
             from . import db, deck

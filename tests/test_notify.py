@@ -53,6 +53,17 @@ def test_send_ntfy(monkeypatch):
     assert calls[1][0].get_header("Priority") == "3"
 
 
+def test_long_japanese_title_has_no_newline(monkeypatch):
+    monkeypatch.delenv("VREPLAY_NOTIFY_URL", raising=False)
+    calls = _capture(monkeypatch)
+    title = "vreplay batch 完了 " + "あ" * 300
+    assert notify.send(_cfg("https://ntfy.sh/mytopic"), title, "本文") is True
+    header = calls[0][0].get_header("Title")
+    assert "\n" not in header
+    assert "\r" not in header
+    assert str(make_header(decode_header(header))) == title
+
+
 def test_send_discord(monkeypatch):
     monkeypatch.delenv("VREPLAY_NOTIFY_URL", raising=False)
     calls = _capture(monkeypatch)
@@ -131,7 +142,37 @@ def test_main_sends_completion_and_error(monkeypatch, tmp_path):
     assert calls[0][1]["level"] == "error"
 
 
-def test_batch_alerts_once_when_low_resolution_repeats(monkeypatch, tmp_path):
+def test_main_sends_error_on_nonzero_system_exit(monkeypatch, tmp_path):
+    from vreplay import __main__ as M
+    from vreplay import batch
+
+    calls = []
+    monkeypatch.setenv("VREPLAY_OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setattr(notify, "send", lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr(sys, "argv", ["vreplay", "batch"])
+
+    def exit1(*a, **k):
+        raise SystemExit(1)
+
+    monkeypatch.setattr(batch, "run", exit1)
+    with pytest.raises(SystemExit):
+        M.main()
+    assert len(calls) == 1
+    assert calls[0][0][1] == "vreplay batch 失敗"
+    assert calls[0][1]["level"] == "error"
+
+    calls.clear()
+
+    def exit_none(*a, **k):
+        raise SystemExit(None)
+
+    monkeypatch.setattr(batch, "run", exit_none)
+    with pytest.raises(SystemExit):
+        M.main()
+    assert calls == []
+
+
+def _batch_low_res(monkeypatch, tmp_path):
     from vreplay import batch, config, db, vlr
     from vreplay.pipeline import LowResolution
 
@@ -158,10 +199,23 @@ def test_batch_alerts_once_when_low_resolution_repeats(monkeypatch, tmp_path):
         raise LowResolution("360p の動画しか取れませんでした")
 
     monkeypatch.setattr(batch, "download", low)
+    return cfg, batch
+
+
+def test_batch_alerts_once_when_low_resolution_repeats(monkeypatch, tmp_path):
+    cfg, batch = _batch_low_res(monkeypatch, tmp_path)
     calls = []
     monkeypatch.setattr(notify, "send", lambda *a, **k: calls.append((a, k)))
     batch.run(cfg, log=lambda *a: None)
     assert len(calls) == 1
     assert calls[0][1]["level"] == "error"
     assert "低画質" in calls[0][0][1]
+
+
+def test_batch_no_notify_suppresses_mid_run_alert(monkeypatch, tmp_path):
+    cfg, batch = _batch_low_res(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(notify, "send", lambda *a, **k: calls.append((a, k)))
+    batch.run(cfg, log=lambda *a: None, notify_enabled=False)
+    assert calls == []
 

@@ -76,7 +76,7 @@ def _rows(conn, start: str | None, end: str | None, retry_failed: bool,
 def run(cfg: dict, start: str | None = None, end: str | None = None, limit: int | None = None,
         retry_failed: bool = True, shard: str | None = None, force: bool = False,
         out_root: Path | None = None, log=print, redo_before: str | None = None,
-        maps: list[str] | None = None) -> dict:
+        maps: list[str] | None = None, notify_enabled: bool = True) -> dict:
     perf.start()
     t0 = time.time()
     conn = db.open_warehouse(cfg)
@@ -102,7 +102,7 @@ def run(cfg: dict, start: str | None = None, end: str | None = None, limit: int 
     low_res_streak = 0
 
     def alert(reason: str, title: str, body: str):
-        if reason in sent:
+        if not notify_enabled or reason in sent:
             return
         sent.add(reason)
         notify.send(cfg, title, body, level="error")

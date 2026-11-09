@@ -21,7 +21,7 @@ def _title_header(title: str) -> str:
         title.encode("ascii")
         return title
     except UnicodeEncodeError:
-        return Header(title, "utf-8").encode()
+        return Header(title, "utf-8", maxlinelen=10000).encode()
 
 
 def _post(url: str, data: bytes, headers: dict[str, str]) -> bool:
