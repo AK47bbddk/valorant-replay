@@ -219,3 +219,27 @@ def test_batch_no_notify_suppresses_mid_run_alert(monkeypatch, tmp_path):
     batch.run(cfg, log=lambda *a: None, notify_enabled=False)
     assert calls == []
 
+
+
+def test_send_sets_user_agent(monkeypatch):
+    """Discord は Python 既定の User-Agent を 403 で弾くので、必ず付ける。"""
+    from vreplay import notify
+    seen = {}
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b""
+
+    def fake(req, timeout=None):
+        seen["ua"] = req.get_header("User-agent")
+        return Resp()
+
+    monkeypatch.setattr(notify.urllib.request, "urlopen", fake)
+    assert notify.send({"notify": {"url": "https://discord.com/api/webhooks/1/x"}}, "t", "b") is True
+    assert seen["ua"] and "Python-urllib" not in seen["ua"]

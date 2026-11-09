@@ -24,8 +24,12 @@ def _title_header(title: str) -> str:
         return Header(title, "utf-8", maxlinelen=10000).encode()
 
 
+# Python 既定の User-Agent（Python-urllib）は Discord に 403 で弾かれる
+USER_AGENT = "DiscordBot (https://github.com/AK47bbddk/valorant-replay, 1.0)"
+
+
 def _post(url: str, data: bytes, headers: dict[str, str]) -> bool:
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    req = urllib.request.Request(url, data=data, headers={"User-Agent": USER_AGENT, **headers}, method="POST")
     with urllib.request.urlopen(req, timeout=10) as resp:
         resp.read()
     return True
