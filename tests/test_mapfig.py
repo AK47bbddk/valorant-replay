@@ -97,43 +97,10 @@ def test_figure_svg_uses_one_data_uri(tmp_path, monkeypatch):
     assert 'role="img"' in a and 'aria-label="a"' in a and "GREEN" in a
 
 
-def test_alignment_switches_when_tracks_off_floor():
-    base = FX.syn_base(1024)
-    cal = FX.syn_meta()["callouts"]
-    on = [{"uv": [(0, 0.5, 0.4, "Mid"), (0, 0.18, 0.5, "A")]}]
-    assert MF.check_alignment(base, cal, on)["switch"] is False
-    half_off = [{"uv": [(0, 0.5, 0.4, "Mid")] * 5 + [(0, 0.02, 0.5, "x")] * 5}]
-    assert MF.check_alignment(base, cal, half_off)["switch"] is True
-
-
 def test_pieces_spread_apart():
     out = MF.spread([(100, 100), (101, 100)], 30, 20)
     import math
     assert math.dist(out[0], out[1]) >= 29 or max(math.dist(o, p) for o, p in zip(out, [(100, 100), (101, 100)])) >= 19.9
-
-
-def test_callout_fix_warps_the_image_too():
-    import cv2
-    fix = (1.0029, -0.0801, 0.1319, 0.1005, 1.0385, -0.1653)     # Sunset の CALLOUT_FIX と同じ形
-    base = FX.syn_base(1024)
-    cs = [c for c in FX.syn_meta()["callouts"] if c["name"] != "Spawn"]
-    fixed = [{**c, "x": fix[0] * c["x"] + fix[1] * c["y"] + fix[2], "y": fix[3] * c["x"] + fix[4] * c["y"] + fix[5]} for c in cs]
-    assert MF.check_alignment(base, fixed, [])["switch"] is True        # 画像をそのままだと外れる
-    warped = MF.apply_fix(base, fix)
-    assert warped.shape == base.shape
-    assert MF.check_alignment(warped, fixed, [])["switch"] is False      # 画像にも掛ければ乗る
-    assert warped[0, 0, 3] == 0 or warped[:, :, 3].min() == 0            # 外は透明
-
-
-def test_official_image_applies_fix_for_sunset(tmp_path, monkeypatch):
-    import cv2
-    d = tmp_path / "_cache" / "map_icons"
-    d.mkdir(parents=True)
-    cv2.imwrite(str(d / "sunset.png"), FX.syn_base(512))
-    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
-    a = MF.official_image(_cfg(tmp_path), "Sunset")
-    b = MF.apply_fix(MF._to_bgra(cv2.imread(str(d / "sunset.png"), cv2.IMREAD_UNCHANGED)), MF.TC.CALLOUT_FIX["sunset"])
-    assert (a == b).all()
 
 
 def test_all_floor_pixels_belong_to_an_area():
@@ -148,8 +115,7 @@ def test_all_floor_pixels_belong_to_an_area():
 def test_uv_base_is_never_filled(tmp_path, monkeypatch):
     import cv2
     FX.syn_patch(monkeypatch, with_base=False)
-    img = np.full((512, 512, 3), 250, np.uint8)
-    img[FX.syn_base(512)[:, :, 3] > 0] = (150, 150, 150)
+    img = _uv_png(FX.syn_base(512)[:, :, 3] > 0)
     cv2.imwrite(str(tmp_path / "uv.jpg"), img)
     rows = [{"uv_base": str(tmp_path / "uv.jpg"), "uv": []}]
     fig = MF.Figure("Split", _cfg(tmp_path), rows=rows)
@@ -159,3 +125,63 @@ def test_uv_base_is_never_filled(tmp_path, monkeypatch):
                  {"mark": "1:30", "pieces": [{"agent": "Jett", "u": .5, "v": .7, "team": "def"}]}],
                 prio={"MID": "GREEN"}, vital={"MID"}, labels=["MID"], alt="x")
     assert "<polygon" not in s and "<path" not in s and "色分けなし" in s and ">MID<" in s
+
+
+def _uv_png(floor):
+    """uv_base の合成：茶色の背景＋灰色の通路。"""
+    img = np.full(floor.shape + (3,), (30, 60, 100), np.uint8)
+    img[floor] = (150, 150, 150)
+    return img
+
+
+def _shifted(base, frac):
+    import cv2
+    n = base.shape[0]
+    m = np.float32([[1, 0, frac * n], [0, 1, frac * n]])
+    return cv2.warpAffine(base, m, (n, n), borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
+
+
+def _uv(floor_img):
+    return np.dstack([floor_img, MF.floor_mask(floor_img)])
+
+
+def test_alignment_same_shape_keeps_official():
+    base = FX.syn_base(1024)
+    uv = _uv(_uv_png(base[:, :, 3] > 0))
+    al = MF.check_alignment(base, uv, FX.syn_meta()["callouts"], [])
+    assert al["use"] == "official" and al["iou"] >= 0.9 and al["ecc_iou"] is None
+
+
+def test_alignment_shifted_official_is_pulled_back_by_ecc():
+    base = FX.syn_base(1024)
+    uv = _uv(_uv_png(base[:, :, 3] > 0))
+    off = _shifted(base, 0.05)
+    assert MF.iou(off[:, :, 3], uv[:, :, 3]) < 0.5                         # ずれたままだと合わない
+    al = MF.check_alignment(off, uv, [], [])
+    assert al["use"] == "ecc" and al["ecc_iou"] >= 0.5
+    assert MF.iou(al["image"][:, :, 3], uv[:, :, 3]) >= 0.5
+
+
+def test_alignment_different_shape_falls_back_to_uv_base():
+    base = FX.syn_base(1024)
+    other = np.zeros_like(base)
+    other[100:900, 600:700] = (200, 200, 200, 255)                         # まったく違う形
+    other[800:900, 100:900] = (200, 200, 200, 255)
+    uv = _uv(_uv_png(other[:, :, 3] > 0))
+    al = MF.check_alignment(base, uv, [], [])
+    assert al["use"] == "uv_base" and al["image"] is uv
+
+
+def test_alignment_without_uv_base_keeps_official(tmp_path, monkeypatch):
+    FX.syn_patch(monkeypatch)
+    fig = MF.Figure("Split", _cfg(tmp_path), rows=[])
+    assert fig.info["source"] == "official" and fig.fillable and fig.info["iou"] is None
+
+
+def test_figure_switches_to_ecc_official_and_stays_filled(tmp_path, monkeypatch):
+    import cv2
+    FX.syn_patch(monkeypatch)
+    monkeypatch.setattr(MF, "official_image", lambda *a, **k: _shifted(FX.syn_base(1024), 0.05))
+    cv2.imwrite(str(tmp_path / "uv.png"), _uv_png(FX.syn_base(512)[:, :, 3] > 0))
+    fig = MF.Figure("Split", _cfg(tmp_path), rows=[{"uv_base": str(tmp_path / "uv.png"), "uv": []}])
+    assert fig.info["source"] == "official" and fig.info["use"] == "ecc" and fig.fillable and fig.regions

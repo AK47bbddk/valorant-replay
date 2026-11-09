@@ -730,11 +730,13 @@ def model_summary(d: dict) -> str:
 
 def appendix(d: dict, rest: list[dict]) -> str:
     al = d["fig"].info or {}
-    pct = al.get("pct")
     lis = [f"1:40 のアイコンが 3 人未満で型の集計から外したラウンド：{d['excluded']}。"]
     if al.get("source"):
-        lis.append(f"マップ画像：{'公式（valorant-api）' if al['source'] == 'official' else 'ミニマップを写した uv_base'}"
-                   + (f"。マップ画像との整合 {pct}%。" if pct is not None else "。"))
+        pct = al.get("pct")
+        how = {"official": "公式（valorant-api）", "ecc": "公式（uv_base に ECC で重ねた）"}.get(al.get("use"), "ミニマップを写した uv_base（色分けなし）")
+        lis.append(f"マップ画像：{how}" + (f"。マップ画像との整合（IoU）{pct}%" if pct is not None else "")
+                   + (f"、コールアウト {al['callout']:.0%}" if al.get("callout") is not None else "")
+                   + (f"・追跡点 {al['track']:.0%}（参考。判定には使わない）。" if al.get("track") is not None else "。"))
     else:
         lis.append(MF.NO_MAP + "。")
     if rest:

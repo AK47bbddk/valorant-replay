@@ -35,7 +35,7 @@ NO_FILL = "公式のマップ画像と合わないため、放送のミニマッ
 MIN_AREA_PX = 40
 EPS_PX = 1.5
 NEAR_PX = 6                # 整合チェックで通路の画素に乗っているとみなす距離
-CALLOUT_OK, TRACK_OK = 0.90, 0.80
+IOU_OK = 0.5
 
 
 # ============================================================== 向き
@@ -85,15 +85,6 @@ def _to_bgra(img: np.ndarray | None) -> np.ndarray | None:
     return np.ascontiguousarray(out)
 
 
-def apply_fix(img: np.ndarray, fix) -> np.ndarray:
-    """tactics.CALLOUT_FIX（0..1 の (u, v) → (a·u + b·v + c, d·u + e·v + f)）を画像にも掛ける。外は透明。"""
-    a, b, c, d, e, f = fix
-    n = img.shape[1]
-    m = np.float32([[a, b, c * n], [d, e, f * n]])
-    return np.ascontiguousarray(cv2.warpAffine(img, m, (n, img.shape[0]), flags=cv2.INTER_LINEAR,
-                                               borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0)))
-
-
 def official_image(cfg: dict, map_name: str, log=print) -> np.ndarray | None:
     """valorant-api の displayIcon を `_cache/map_icons/<norm>.png` に置いて BGRA 1024×1024 で返す。"""
     from urllib.request import urlopen
@@ -110,19 +101,27 @@ def official_image(cfg: dict, map_name: str, log=print) -> np.ndarray | None:
                 log(f"  マップ画像を取得できませんでした（{e}）")
     if not p.exists():
         return None
-    img = _to_bgra(cv2.imread(str(p), cv2.IMREAD_UNCHANGED))
-    fix = TC.CALLOUT_FIX.get(norm(map_name))          # コールアウトだけでなく、画像にも同じ変換を掛ける
-    return apply_fix(img, fix) if img is not None and fix else img
+    # CALLOUT_FIX はコールアウトの座標だけに掛かるもの。画像はそのまま（Colab で確認：displayIcon は uv_base と一致）
+    return _to_bgra(cv2.imread(str(p), cv2.IMREAD_UNCHANGED))
+
+
+def floor_mask(bgr: np.ndarray) -> np.ndarray:
+    """放送のミニマップ（uv_base）の床：BGR→HSV で S<40 かつ V>90（0/255）。"""
+    hsv = cv2.cvtColor(bgr[:, :, :3], cv2.COLOR_BGR2HSV)
+    m = ((hsv[:, :, 1] < 40) & (hsv[:, :, 2] > 90)).astype(np.uint8) * 255
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    return cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
 
 
 def uv_image(rows: list[dict] | None) -> np.ndarray | None:
-    """放送のミニマップを同じ座標に写した画像（`records()` の uv_base）。白に近い画素以外を不透明とする。"""
+    """放送のミニマップを同じ座標に写した画像（`records()` の uv_base）。床マスクをアルファにして BGRA 1024 で返す。"""
     for r in rows or []:
         p = r.get("uv_base")
         if p and Path(p).exists():
             img = cv2.imread(str(p), cv2.IMREAD_COLOR)
             if img is not None:
-                return _to_bgra(cv2.resize(img, (SIZE, SIZE), interpolation=cv2.INTER_LINEAR))
+                img = cv2.resize(img, (SIZE, SIZE), interpolation=cv2.INTER_LINEAR)
+                return np.ascontiguousarray(np.dstack([img, floor_mask(img)]))
     return None
 
 
@@ -157,35 +156,71 @@ def track_points(rows: list[dict] | None, limit: int = 20000) -> list[tuple[floa
     return pts
 
 
-def check_alignment(base: np.ndarray, callouts: list[dict], rows: list[dict] | None) -> dict:
-    """コールアウト（スポーン以外）と追跡点のうち、下地の不透明な画素（半径 6px 以内）に乗っている割合。
-    コールアウト 90% 未満か追跡点 80% 未満なら switch=True（uv_base に切り替える）。"""
-    walk = _walkable(base)
-    cal = _frac_on(walk, [(float(c["x"]), float(c["y"])) for c in callouts if not _is_spawn_callout(c)])
-    trk = _frac_on(walk, track_points(rows))
-    ok = (cal is None or cal >= CALLOUT_OK) and (trk is None or trk >= TRACK_OK)
-    got = [x for x in (cal, trk) if x is not None]
-    return {"callout": cal, "track": trk, "ok": ok, "switch": not ok,
-            "pct": int(round(100 * min(got))) if got else None}
+def iou(a: np.ndarray, b: np.ndarray, n: int = 256) -> float:
+    """2 つのマスク（0 より大きい画素）の IoU。256px で測る。"""
+    x = cv2.resize((a > 0).astype(np.uint8), (n, n), interpolation=cv2.INTER_AREA if a.shape[0] > n else cv2.INTER_NEAREST) > 0
+    y = cv2.resize((b > 0).astype(np.uint8), (n, n), interpolation=cv2.INTER_AREA if b.shape[0] > n else cv2.INTER_NEAREST) > 0
+    u = (x | y).sum()
+    return float((x & y).sum() / u) if u else 0.0
+
+
+def ecc_align(off: np.ndarray, uv: np.ndarray, n: int = 256) -> tuple[np.ndarray, np.ndarray] | None:
+    """公式画像のマスクを uv_base の床マスクに重ねる（MOTION_AFFINE、単位行列から、両マスクを σ=2 でぼかす）。
+    動きが大きいときのために、粗い σ から σ=2 へ順に細かくする。(公式画像をずらした BGRA, 2×3 の変換) か None。"""
+    def small(m):
+        return cv2.resize((m > 0).astype(np.float32), (n, n), interpolation=cv2.INTER_AREA)
+    tmpl, inp = small(uv[:, :, 3]), small(off[:, :, 3])
+    w = np.eye(2, 3, dtype=np.float32)
+    try:
+        for sig in (8, 4, 2):
+            _cc, w = cv2.findTransformECC(cv2.GaussianBlur(tmpl, (0, 0), sig), cv2.GaussianBlur(inp, (0, 0), sig),
+                                          np.ascontiguousarray(w, dtype=np.float32), cv2.MOTION_AFFINE, (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 200, 1e-6),
+                                          None, 5)
+    except cv2.error:
+        return None
+    m = w.copy()
+    m[:, 2] *= off.shape[0] / n                           # 256px → 画像の大きさ
+    out = cv2.warpAffine(off, m, (off.shape[1], off.shape[0]), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                         borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
+    return np.ascontiguousarray(out), w
+
+
+def check_alignment(base: np.ndarray, uv: np.ndarray | None, callouts: list[dict] | None = None,
+                    rows: list[dict] | None = None) -> dict:
+    """公式画像のアルファのマスクと uv_base の床マスクの IoU（256px）。0.5 以上なら公式のまま（use=official）、
+    0.5 未満なら ECC（アフィン）で重ねて、それでも 0.5 未満なら uv_base（use=uv_base）。uv_base が無ければ公式のまま。
+    コールアウト・追跡点が通路に乗る割合（callout・track）は付録に出すだけで、判定には使わない。"""
+    out = {"iou": None, "ecc_iou": None, "use": "official", "image": base}
+    if uv is not None:
+        out["iou"] = iou(base[:, :, 3], uv[:, :, 3])
+        if out["iou"] < IOU_OK:
+            got = ecc_align(base, uv)
+            out["ecc_iou"] = iou(got[0][:, :, 3], uv[:, :, 3]) if got else None
+            if got and out["ecc_iou"] >= IOU_OK:
+                out["use"], out["image"] = "ecc", got[0]
+            else:
+                out["use"], out["image"] = "uv_base", uv
+    walk = _walkable(out["image"])
+    out["callout"] = _frac_on(walk, [(float(c["x"]), float(c["y"])) for c in callouts or [] if not _is_spawn_callout(c)])
+    out["track"] = _frac_on(walk, track_points(rows))
+    best = out["ecc_iou"] if out["use"] == "ecc" else out["iou"]
+    out["pct"] = int(round(100 * best)) if best is not None else None
+    return out
 
 
 def choose_base(cfg: dict, map_name: str, rows: list[dict] | None, callouts: list[dict],
                 log=print) -> tuple[np.ndarray | None, dict]:
-    """公式画像を使い、整合が悪いときだけ uv_base に切り替える。両方ダメなら公式のまま（整合 NN% を付録に）。"""
-    off = official_image(cfg, map_name, log)
-    uv = uv_image(rows)
+    """公式画像を使う。uv_base と形が合わない（IoU < 0.5）ときだけ ECC で重ね、それでも合わなければ uv_base（色分けなし）。"""
+    off, uv = official_image(cfg, map_name, log), uv_image(rows)
     if off is None:
-        if uv is None:
-            return None, {"source": None}
-        return uv, {"source": "uv_base", **check_alignment(uv, callouts, rows)}
-    al = check_alignment(off, callouts, rows)
-    if al["switch"] and uv is not None:
-        log(f"  {map_name}: 公式のマップ画像との整合が低い（コールアウト {al['callout']}・追跡点 {al['track']}）→ uv_base に切り替えます")
-        al2 = check_alignment(uv, callouts, rows)
-        if not al2["switch"]:
-            return uv, {"source": "uv_base", **al2, "switched_from": al}
-        log(f"  {map_name}: uv_base も整合が低いので公式のマップ画像のまま使います")
-    return off, {"source": "official", **al}
+        return (uv, {"source": "uv_base", **check_alignment(uv, None, callouts, rows)}) if uv is not None else (None, {"source": None})
+    al = check_alignment(off, uv, callouts, rows)
+    img = al.pop("image")
+    if al["use"] == "ecc":
+        log(f"  {map_name}: 公式のマップ画像を uv_base に ECC で重ねました（IoU {al['iou']:.2f} → {al['ecc_iou']:.2f}）")
+    elif al["use"] == "uv_base":
+        log(f"  {map_name}: 公式のマップ画像が uv_base と合わない（IoU {al['iou']:.2f}・ECC 後 {al['ecc_iou']}）→ uv_base（色分けなし）")
+    return img, {"source": "uv_base" if al["use"] == "uv_base" else "official", **al}
 
 
 # ============================================================== エリアの形（A4）
