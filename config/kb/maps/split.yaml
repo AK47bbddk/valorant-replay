@@ -7,22 +7,28 @@ summary: >-
 areas:
   - name: A Main
     callouts: [A Main, A Lobby]
+    vital: false
     choke: true
     dry: false
     eval: {distance: 近, take: 中, branch: あり, long: あり, hold: 容易}
     note: サイトエントリー・ヘブン進行・ベント抜けの起点。攻めはヴァイパーのカーテンでリソースを吐かせる
   - name: MID
     callouts: [Mid Top, Mid Mail, Mid Vent, Mid Bottom]
+    vital: true            # コーチ指定（2026-11-09）
     choke: false
     dry: true
     eval: {distance: 遠, take: 高, branch: あり, long: あり, hold: 困難}
     note: 手前までドライで進み、チョークを一気に抜ける。スキルトレード（犬とスロウの交換）が起きやすい
   - name: B Main
     callouts: [B Main, B Lobby, B Garage]
+    vital: false
     choke: true
     dry: true
     eval: {distance: 近, take: 低, branch: なし, long: あり, hold: 容易}
     note: コンタクトでの B セットが強い。守りはジャンピで初動の情報を取り続ける
+  - name: A Ramps
+    callouts: [A Ramps]
+    vital: true            # コーチ指定（2026-11-09）。A ランプ（スロープ）
 
 hands:
   defense:

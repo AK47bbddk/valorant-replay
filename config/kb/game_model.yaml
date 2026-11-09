@@ -1,0 +1,46 @@
+# コーチのゲームモデル（xmind「ゲームモデル」）。docs/PLAYBOOK_v4.md の 2 節。
+# tags の略号（DC・PrP・PoC・BP・BTP）は意味が確定していないので表示だけ（判定には使わない）。
+attack:
+  buildup:
+    - {id: fast_deep, name: 早く深く狭いビルドアップ, tags: [DC], text: バイタルエリアをコントロールしにいく}
+    - {id: bu_reaction, name: ビルドアップリアクション, tags: [DC], text: 少ない人数で持つ場所に圧を掛けられたら、反対側のバイタルをコントロールしに行く}
+    - {id: bu_counter, name: ビルドアップカウンター, tags: [PrP], text: 敵が圧を掛けてきた場所にファイトしに行く}
+    - {id: hold, name: 正しい戦略の模索（ホールド）, tags: [PoC], text: ホールドして敵のアクションを待つ}
+    - {id: freeze, name: ネガティブフィードバック（フリーズ）, tags: [BP], text: 早く深く狭いビルドアップ中にファーストキルを取られたら止まる}
+  vital:
+    - {id: v_reaction, name: バイタルリアクション, tags: [DC], text: 主力がいないバイタルで敵が動いたら、近いサイトを取りに行く}
+    - {id: v_counter, name: バイタルカウンター, tags: [PrP], text: 主力のいるバイタルに圧を掛けられたらファイトする}
+    - {id: v_hold, name: 正しい戦略の模索（ローテーション）, tags: [PoC], text: ホールドして待つか、別のバイタルを取りに行く}
+    - {id: v_occupy, name: バイタル占拠, tags: [BTP], text: バイタルを取ったあとスキルや撃ち合いで圧を掛ける}
+  attacking:
+    - {id: site_occupy, name: サイト占拠, tags: [DC, PrP], text: デュエリストが奥まで飛び込み、全員でカバーする}
+    - {id: direct, name: ダイレクトプレー, tags: [DC, PrP], text: バイタル占拠中にキルが出たらサイトに飛び込む}
+    - {id: challenge, name: チャレンジ, tags: [PoC], text: 主力がコンタクトでサイトに入る}
+    - {id: joker, name: Joker, tags: [BP], text: 待つ裏取りを攻める裏取りに切り替え、敵サイトの近くまで単独で圧を掛ける}
+  postplant:
+    - {id: choke_counter, name: チョークカウンター, tags: [PrP], text: 敵が入ってくるチョークでカウンター}
+    - {id: boom, name: 爆破狙い, tags: [BTP], text: サイトに 1〜2 人残して他は退く。時間を稼いで爆破}
+defense:
+  buildup:
+    - {id: fast_deep, name: 早く深いビルドアップ（開幕プッシュ）, tags: [DC], text: バイタルエリアをコントロールしにいく}
+    - {id: bu_counter, name: ビルドアップカウンター, tags: [PrP], text: 敵が圧を掛けてきた場所にファイトしに行く}
+    - {id: hold, name: 正しい戦略の模索（ホールド）, tags: [PoC], text: ホールドして敵のアクションを待つ}
+  vital:
+    - {id: v_reaction, name: バイタルリアクション, tags: [DC], text: 主力がいないバイタルで敵が動いたらプッシュする}
+    - {id: v_occupy, name: バイタル占拠, tags: [BTP], text: 取ったバイタルに留まって敵のアクションを待つ}
+    - {id: v_counter, name: バイタルカウンター, tags: [PrP], text: 主力のいるバイタルに圧を掛けられたらファイトする}
+    - {id: solo, name: 単独守備, tags: [BTP], text: 1 人がサイトに残り、他はローテする}
+  defense:
+    - {id: reaction_def, name: リアクションディフェンス, tags: [DC], text: 敵が人数の少ないサイトに行ったら、主力が裏を取りに行く}
+    - {id: choke_def, name: カウンターチョークディフェンス, tags: [PrP], text: 主力のいるサイトに来たら全力でチョークで倒す}
+    - {id: back_def, name: バックディフェンス, tags: [BTP], text: サイトの裏で時間を稼ぎ、ローテの味方と一緒に倒す}
+    - {id: retake_def, name: リテイクディフェンス, tags: [BTP], text: リテイクすると決めて守る。時間は稼ぐ}
+  retake:
+    - {id: fast, name: ファストローテ → ファストリテイク, tags: [DC]}
+    - {id: surround, name: 囲い込みリテイク, tags: [DC]}
+    - {id: slow, name: ゆっくりセットアップしてリテイク, tags: [BTP]}
+    - {id: save, name: 1 人で時間を稼ぐ・セーブ, tags: [BTP]}
+extreme:
+  - {id: up2, name: 人数有利（+2）, text: 距離を詰めてプレイする}
+  - {id: down1, name: 人数不利（−1）, text: 2 つに分かれて片方がチャレンジ、片方がコンタクト（ミニゲーム）}
+  - {id: anti_eco, name: マネー有利（アンチエコ）, text: 普段取らない戦略を取る（CT に抜ける、いつも取るバイタルをホールドにする）}

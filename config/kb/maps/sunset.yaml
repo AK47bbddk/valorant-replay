@@ -8,21 +8,25 @@ summary: >-
 areas:
   - name: A Main
     callouts: [A Main, A Lobby, A Elbow]
+    vital: true            # コーチ指定（2026-11-09）
     choke: true
     dry: false
     note: 攻めの A の入口。守りはここにスキルを返す（壊す・返す・殺す）のが基本。攻めはフラッシュ＋索敵＋デュエリストで抜ける
   - name: Mid
     callouts: [Mid Courtyard, Mid Top, Mid Tiles, Mid Bottom]
+    vital: true            # コーチ指定（2026-11-09）
     choke: false
     dry: true
     note: トップを取るとマーケット（B）と A リンク側の両方に圧をかけられる。守りがここを押すと攻めの B スプリットが止まる
   - name: B Market
     callouts: [B Market, B Boba]
+    vital: false
     choke: true
     dry: false
     note: トップ壁＋マーケット → タピオカ（Boba）で B を割る入口
   - name: B Main
     callouts: [B Main, B Lobby]
+    vital: false
     choke: true
     dry: true
     note: B の正面。マーケットと同時に当てるとサイトの守りが割れる
