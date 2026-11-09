@@ -2,6 +2,12 @@
 
 timezone: Asia/Tokyo
 
+notify:
+  # 終わったとき・失敗したときの通知先。null なら送らない（環境変数 VREPLAY_NOTIFY_URL でも指定できる）
+  # ntfy（スマホのアプリで購読）: https://ntfy.sh/<トピック名>
+  # Discord Webhook: https://discord.com/api/webhooks/<ID>/<TOKEN>
+  url: null
+
 filters:
   # 大会名に含まれる語（大文字小文字は無視）。空なら全大会。
   event_include: ["VCT", "Masters", "Champions"]
