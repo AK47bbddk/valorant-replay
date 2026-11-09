@@ -26,6 +26,7 @@ from . import tactics as TC
 from . import tactival as TV
 
 SIZE = 1024
+UNDERLINE = ' text-decoration="underline"'
 PRIO = {"GREEN": "#197A4B", "YELLOW": "#8A6D00", "RED": "#C7322B", "BLUE": "#0017C1"}
 PRIO_JA = {"GREEN": "緑", "YELLOW": "黄", "RED": "赤", "BLUE": "青"}
 TEAM_COL = {"def": "#0017C1", "atk": "#C7322B"}
@@ -583,7 +584,7 @@ class Figure:
             if nm in self.label_xy:
                 lx, ly = self.label_xy[nm]
                 out.append(f'<text x="{lx * SIZE:.1f}" y="{ly * SIZE + fs / 3:.1f}" {txt} '
-                           f'font-weight="{700}"{" text-decoration=underline" if nm in vital else ""}>'
+                           f'font-weight="{700}"{UNDERLINE if nm in vital else ""}>'
                            f'{html.escape(nm)}</text>')
         out += self._pieces(layers or [], fs, sw, txt)
         out.append("</svg>")

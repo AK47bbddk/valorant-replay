@@ -96,6 +96,7 @@ def test_figure_svg_uses_one_data_uri(tmp_path, monkeypatch):
     assert page.count('<use href="#map-split"/>') == 2
     assert 'role="img"' in a and 'aria-label="a"' in a and "GREEN" in a
 
+    assert 'text-decoration="underline"' in a and "text-decoration=underline" not in a      # 属性値はクォートする
 
 def test_pieces_spread_apart():
     out = MF.spread([(100, 100), (101, 100)], 30, 20)

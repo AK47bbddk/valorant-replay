@@ -529,6 +529,10 @@ def _atk_vital(F: Facts):
         if F.n_in(s25, area=v) == 0 and F.n_in(o40, area=v) > F.n_in(o25, area=v) \
                 and z40 in SITES and z40 != z25:
             return "v_reaction"
+    for v in m.vitals():                                            # バイタルカウンター：主力のいるバイタルに守りが当たり、そこで撃ち合い
+        evs = [x for x in F.ev if x["area"] == v and 20 <= x["e"] <= 50]
+        if F.n_in(s25, area=v) >= 2 and len(evs) >= 2 and (F.n_in(o40, area=v) >= 1 or any(x["by"] == "opp" for x in evs)):
+            return "v_counter"
     z60 = _main_zone(s60)
     if z25 and z60 and z25 != z60:
         return "v_hold"
@@ -623,6 +627,8 @@ def _extreme(F: Facts):
         if l <= -P["down_lead"] and down_from is None:
             down_from = e
         if l > -P["down_lead"]:
+            if down_from is not None and e - down_from >= P["down_secs"]:       # 戻る前に十分長く不利だった
+                return "down1"
             down_from = None
         if down_from is not None and e - down_from >= P["down_secs"]:
             return "down1"

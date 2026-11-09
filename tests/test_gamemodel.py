@@ -174,6 +174,32 @@ def test_extreme_nodes():
     assert GM.classify(rec("防衛", base, marks=marks, opp_eco="eco"), {}, m)["extreme"] == "anti_eco"
 
 
+def test_extreme_down1_when_deficit_ended_after_enough_seconds():
+    m = model()
+    base = still(["A Site"] * 5)
+    marks = D(*["A Site"] * 5)
+    # 10 秒で 1 人不利 → 30 秒で戻る（20 秒続いた）。dur が無くても down1
+    r = rec("防衛", base, marks=marks, feed=[(10, False), (30, True)], dur=None)
+    assert GM.classify(r, {}, m)["extreme"] == "down1"
+    # 10 秒しか続かなければ down1 ではない
+    r = rec("防衛", base, marks=marks, feed=[(10, False), (20, True)], dur=None, eco="semi-eco")
+    assert GM.classify(r, {}, m)["extreme"] is None
+
+
+def test_attack_vital_counter():
+    m = model()
+    lean = [(a, "Mid Vent") for a in AGS]
+    tr = {ag: [(25, "MID"), (40, "MID")] for ag in AGS}
+    # 主力が MID にいて、守りが当たってきて（相手のキル）、そこで撃ち合い（キル 2 以上）。自分のキルは 25 秒より前
+    r = atk(tr, _lean=lean, kills=[("Jett", "Raze", 22)], deaths=[("Omen", 30)])
+    opp = rec("防衛", {"Raze": [(22, "MID")], "Sage": [(25, "MID"), (40, "MID")]}, kills=[("Sage", "Omen", 30)])
+    assert GM.classify(r, opp, m)["vital"] == "v_counter"
+    # 撃ち合いが 1 回だけなら v_counter ではない
+    r1 = atk(tr, _lean=lean, kills=[("Jett", "Raze", 22)])
+    opp1 = rec("防衛", {"Raze": [(22, "MID")]})
+    assert GM.classify(r1, opp1, m)["vital"] != "v_counter"
+
+
 def test_connected_areas_use_adjacent_only():
     cs = FX.syn_meta()["callouts"]
     row = {"tracks": {"Jett": [(0, *POS["Mid Mail"], "Mid Mail", "det"), (5, *POS["A Site"], "A Site", "det"),

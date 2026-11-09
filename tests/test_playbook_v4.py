@@ -50,7 +50,7 @@ def test_formation_figures_say_1_40_and_one_background(pages):
     assert len(forms) >= 3
     assert all("<b>1:40</b>" in f for f in forms)
     assert page.count("data:image/jpeg;base64") == 1
-    assert "floor" not in page.lower() or True
+    assert "floor" not in page.lower()
 
 
 def test_area_cards_cover_vitals(pages):
@@ -106,6 +106,41 @@ def test_verbs_follow_the_move(pages):
         forms = re.findall(r'<section class="slide"><p class="eyebrow">守り / 1:40 の配置.*?</section>', page, re.S)
         push = [f for f in forms if "開幕プッシュ" in f]
         assert push and all("前に出て取る" in f for f in push)
+
+
+def test_agent_lines_see_1_30_and_early_fight():
+    from vreplay import gamemodel as GM
+    m = TG.model()
+    marks = TG.D("A Site", "A Site", "A Site", "B Site", "B Site")
+    tr = {"Jett": [(0, "A Site"), (10, "MID")],                                 # 1:30 に MID へ出て 1:25 に倒れた（1:20 の点は無い）
+          "Omen": [(0, "A Site"), (10, "MID"), (20, "A Site")],                 # 1:30 に MID へ出て、1:20 には戻った
+          "Sova": [(0, "A Site"), (10, "A Site"), (20, "A Site")],
+          "Viper": [(0, "B Site"), (20, "B Site")], "Cypher": [(0, "B Site"), (20, "B Site")]}
+    r = TG.rec("防衛", tr, marks=marks, deaths=[("Jett", 15)])
+    d = {"model": m}
+    i = {"r": r, "su": GM.setup_at_140(r, m), "cls": {}, "ev": []}
+    lines = dict(x.split("：", 1) for x in PB._agent_lines(d, i))
+    assert "前に出て取る" in lines["Jett"] and "前に出て取る" in lines["Omen"] and "ホールドする" in lines["Sova"]
+    # 1:20 までに MID で撃ち合った選手（点が無い）も「前に出て取る」
+    assert PB._verb(d, "防衛", "A Site", None, None, "MID") == "前に出て取る"
+    assert PB._verb(d, "防衛", "A Site", None, None, "A Site") == "ホールドする"
+
+
+def test_presence_works_without_regions():
+    m = TG.model()
+    d = {"model": m, "items": []}
+    m.regions = {}                                       # uv_base：多角形が無く、位置（cent）だけある
+    assert list(PB._presence(d, "防衛")) == list(m.cent) and m.cent
+
+
+def test_push_areas_count_staying_in_attack_half():
+    from vreplay import gamemodel as GM
+    m = TG.model()
+    r = TG.rec("防衛", {"Sova": [(0, "MID"), (10, "MID"), (25, "MID")], "Jett": [(0, "A Site"), (25, "A Site")],
+                       "Omen": [(0, "A Site"), (25, "A Site")]}, marks=TG.D("MID", "A Site", "A Site", "A Site", "A Site"))
+    su = GM.setup_at_140(r, m)
+    got = PB._push_areas(r, {}, m, su, [])
+    assert got[("MID", "Sova")] >= 1 and not any(k[0] == "A Site" for k in got)
 
 
 def test_ult_micro_and_show_stab_slides(pages):

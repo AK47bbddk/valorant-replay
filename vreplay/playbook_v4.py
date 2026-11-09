@@ -99,9 +99,10 @@ def prepare(reports: list[dict], team: str, map_name: str, cfg: dict, log=print)
             "vitals": model.vitals(), "connected": model.connected()}
     dm = [(i["r"], i["opp"]) for i in items if i["r"]["side"] == DEFENSE and not i["r"]["pistol"] and i["opp"]]
     am = [i for i in items if i["r"]["side"] == ATTACK and not i["r"]["pistol"] and i["opp"]]
+    am_ok = [i for i in am if GM.setup_at_140(i["opp"], model) is not None]          # 相手の 1:40 も 3 人以上取れたラウンドだけ
     out["colors"] = {DEFENSE: def_colors(model, dm),
                      ATTACK: atk_colors(model, [(i["r"], i["opp"]) for i in am],
-                                        def_colors(model, [(i["opp"], i["r"]) for i in am]))}
+                                        def_colors(model, [(i["opp"], i["r"]) for i in am_ok]))}
     return out
 
 
@@ -163,9 +164,12 @@ def _fig(d: dict, i: dict, **kw) -> str:
     return d["fig"].svg(_frames(d, i), alt=kw.pop("alt", ""), **kw)
 
 
-def _verb(d: dict, side: str, a0: str | None, a1: str | None) -> str:
-    """そのエージェントの 1:40 → 1:20 の動きから決める。"""
+def _verb(d: dict, side: str, a0: str | None, a1: str | None, a_mid: str | None = None, fight: str | None = None) -> str:
+    """そのエージェントの 1:40 → 1:20 の動きから決める。a_mid＝1:30 の場所、fight＝1:20 までに撃ち合った場所。"""
     m = d["model"]
+    if side == DEFENSE and not (a0 and m.half(a0)):                 # 1:30 や撃ち合いで攻め側半分に出ていたら、1:20 までに倒れても引いても「出た」
+        if any(a and "spawn" not in a.lower() and m.half(a) for a in (a_mid, fight)):
+            return "前に出て取る"
     if not a1 or a1 == a0:
         if side == DEFENSE:
             return "前に出て取る" if a0 and m.half(a0) and "spawn" not in a0.lower() else "ホールドする"
@@ -191,14 +195,19 @@ def _verb(d: dict, side: str, a0: str | None, a1: str | None) -> str:
 
 def _agent_lines(d: dict, i: dict) -> list[str]:
     r, side = i["r"], i["r"]["side"]
-    s20 = GM.snap(r, d["model"], 20, tol=8)
+    s20, s10 = GM.snap(r, d["model"], 20, tol=8), GM.snap(r, d["model"], 10, tol=8)
     node = i["cls"].get("defense" if side == DEFENSE else "attacking") or i["cls"].get("vital")
     nm = _node(d, side, "defense" if side == DEFENSE else "attacking", node) if node else None
     kills = Counter(x["killer"] for x in i["ev"] if x["by"] == "me")
+    fights = {}                                                       # 1:20 までの撃ち合い（e <= 20）の場所
+    for x in i["ev"]:
+        ag = x["killer"] if x["by"] == "me" else x["victim"]
+        if x["e"] <= 20 and ag and x["area"]:
+            fights.setdefault(ag, x["area"])
     out = []
     for ag, (_u, _v, a0) in sorted(i["su"].items()):
         a1 = (s20.get(ag) or (0, 0, None))[2]
-        t = f"{ag}：1:40 は {a0 or '?'}" + (f"、1:20 に {a1}" if a1 else "") + f"、{_verb(d, side, a0, a1)}"
+        t = f"{ag}：1:40 は {a0 or '?'}" + (f"、1:20 に {a1}" if a1 else "") + f"、{_verb(d, side, a0, a1, (s10.get(ag) or (0, 0, None))[2], fights.get(ag))}"
         if nm:
             t += f"（中盤は{nm}）"
         if kills.get(ag):
@@ -241,7 +250,7 @@ def _presence(d: dict, side: str) -> dict[str, dict]:
     """エリア → {"n": ラウンド数, "counts": Counter(人数→回数), "agents": Counter, "rate": 1 人以上いた割合}。"""
     its = _main(d, side)
     out = {}
-    for a in d["model"].regions:
+    for a in d["model"].cent:                     # uv_base のときは regions が空なので、位置のあるエリアで見る
         cnt, ag = Counter(), Counter()
         for i in its:
             sn = i["su"] if side == DEFENSE else GM.snap(i["r"], d["model"], 25, tol=8)
@@ -254,7 +263,7 @@ def _presence(d: dict, side: str) -> dict[str, dict]:
 
 
 def _push_areas(r: dict, opp: dict, model, su: dict, ev: list) -> Counter:
-    """開始 25 秒までに、1:40 の場所から攻め側半分へ出たエリア（出たエージェント付き）。"""
+    """開始 25 秒までに、1:40 の場所から攻め側半分へ出たエリア（出たエージェント付き）。1:40 から攻め側半分にいて動かなかったエリアも含める。"""
     out = Counter()
     for ag, pts in (r.get("tracks") or {}).items():
         a0 = (su.get(ag) or (0, 0, None))[2]
@@ -262,7 +271,7 @@ def _push_areas(r: dict, opp: dict, model, su: dict, ev: list) -> Counter:
         for p in pts:
             if 0 < p[0] <= 25:
                 ar = model.area_of(p[1], p[2], p[3])
-                if ar and ar != a0 and "spawn" not in ar.lower() and model.half(ar) and ar not in seen:
+                if ar and (ar != a0 or model.half(a0)) and "spawn" not in ar.lower() and model.half(ar) and ar not in seen:
                     seen.add(ar)
                     out[(ar, ag)] += 1
     for x in ev:                                      # 25 秒までの最初のファイトが攻め側半分で、自分たちがいた
@@ -751,12 +760,12 @@ def slides(d: dict) -> list[str]:
     areas = list(dict.fromkeys(list(d["vitals"]) + list(d["connected"])))
     types = formation_types(d)
     out.append(prio_overview(d, DEFENSE))
-    out += [area_card(d, DEFENSE, a) for a in areas if a in d["model"].regions]
+    out += [area_card(d, DEFENSE, a) for a in areas if a in d["model"].cent]
     out += [formation(d, t) for t in types[:6]]
     out += [midround(d), retake(d), vital_phase(d, DEFENSE), node_slide(d, DEFENSE, "buildup", "守りのビルドアップ", "守り / ビルドアップ"),
             ult(d, DEFENSE), micro_plays(d), show_stab(d, DEFENSE)]
     out.append(prio_overview(d, ATTACK))
-    out += [area_card(d, ATTACK, a) for a in areas if a in d["model"].regions]
+    out += [area_card(d, ATTACK, a) for a in areas if a in d["model"].cent]
     out += [lean_buildup(d), vital_phase(d, ATTACK), attacking(d), postplant(d), show_stab(d, ATTACK), extreme(d), pistol(d), model_summary(d),
             appendix(d, types[6:])]
     return [s for s in out if s]
