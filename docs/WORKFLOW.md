@@ -16,7 +16,8 @@ Claude（Opus）の使用量を減らすため、書く・見るを分ける。
 2. PC で：`opencode run "docs/tasks/<名前>.md を AGENTS.md の手順で実装して"`
    - 無料版が 403・上限・遅すぎるときは Claude に「Sonnet で」と言う。
 3. 実装が終わると `G:/マイドライブ/valorant-replay/_review/review_<名前>.txt` ができる。
-   Claude に「review_<名前> をレビューに出して」と言う → Claude が Gemini（Argon）に読ませて結果を受け取る。
+   Claude に「review_<名前> をレビューに出して」と言う → Claude がドライブでその .txt を「開く → Google ドキュメント」で変換し（Gemini はドライブの .txt を読めない。ドキュメントなら読める）、Gemini（Argon）に読ませて結果を受け取る。
+   - OpenCode を Claude から動かすときは、PC で `opencode serve --port 4096` を開いておく。Claude はアプリ内ブラウザから http://127.0.0.1:4096 の API（`/session`・`prompt_async`・`shell`）で指示を出す。
 4. 「必ず直すこと」があれば、Claude が指摘を指示書の末尾に足し、2 に戻る（OpenCode に直させる）。
 5. 「マージしてよい」なら、Claude がテストを確かめて main に入れ、PROMPT.md（プロジェクトの要約も）を直す。
 
