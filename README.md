@@ -205,6 +205,24 @@ os.environ['VREPLAY_CONFIG'] = '/content/drive/MyDrive/valorant-replay/config.ya
 | `sync` | 既存の `report.json` をまとめて DB に入れる |
 | `stats` | DB の件数を表示 |
 
+## 通知（終わったとき・失敗したとき）
+
+`run` / `batch` / `playbook` の終わりと失敗を、スマホへ 1 通ずつ送れます。送り先は `config.yaml` の `notify.url`
+（または環境変数 `VREPLAY_NOTIFY_URL`）。どちらも空なら何も送らず、今までどおり動きます。通信に失敗しても本体は止まりません。
+
+```yaml
+notify:
+  # ntfy（スマホの ntfy アプリで購読）
+  url: https://ntfy.sh/your-topic
+  # Discord Webhook ならこちら
+  # url: https://discord.com/api/webhooks/<ID>/<TOKEN>
+```
+
+- 正常終了：`vreplay batch 完了`（`<完了数>/<対象数> マップ・失敗 <n>・<所要時間>`）
+- 失敗：`vreplay batch 失敗`（例外の型とメッセージの末尾 300 文字・優先度は高め）
+- `batch` は同じマップの失敗が 3 回続いた・低解像度しか取れない状態が 3 マップ続いたときも、途中で 1 回だけエラーを送ります。
+- 通知したくないときは `--no-notify` を付けます。
+
 ## 大量の過去試合をまとめて分析する
 
 2024〜2026 の VCT Tier1 をまとめて見たいときは、**メタデータ → 動画 → プレイブック**の 3 段階で回します。

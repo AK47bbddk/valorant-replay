@@ -35,6 +35,41 @@ def parse_day(s: str) -> date:
     raise SystemExit(f"日付の形が読めません：{s}（例 2026-09-24）")
 
 
+def _done_body(cmd: str, seconds: float, result) -> str:
+    from .perf import fmt_seconds
+    took = fmt_seconds(seconds)
+    if cmd == "batch" and isinstance(result, dict):
+        b = result.get("batch") or {}
+        if b:
+            return (f"{b.get('done', 0)}/{b.get('total', 0)} マップ・"
+                    f"失敗 {b.get('failed', 0)}・{took}")
+    if cmd == "run" and isinstance(result, list):
+        return f"{len(result)} マップ・{took}"
+    if cmd == "playbook" and isinstance(result, list):
+        return f"{len(result)} 冊・{took}"
+    return took
+
+
+def _run_notified(cfg: dict, cmd: str, no_notify: bool, fn):
+    """コマンドを実行し、終わったとき・失敗したときに通知する（--no-notify なら送らない）。"""
+    import time
+    from .notify import send
+    t0 = time.time()
+    try:
+        result = fn()
+    except SystemExit as e:
+        if not no_notify and e.code not in (0, None):
+            send(cfg, f"vreplay {cmd} 失敗", f"SystemExit: {e}"[-300:], level="error")
+        raise
+    except Exception as e:
+        if not no_notify:
+            send(cfg, f"vreplay {cmd} 失敗", f"{type(e).__name__}: {e}"[-300:], level="error")
+        raise
+    if not no_notify:
+        send(cfg, f"vreplay {cmd} 完了", _done_body(cmd, time.time() - t0, result))
+    return result
+
+
 def main():
     ap = argparse.ArgumentParser(prog="vreplay")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -46,6 +81,7 @@ def main():
     r.add_argument("--no-video", action="store_true")
     r.add_argument("--force", action="store_true", help="作成済みのページも作り直す")
     r.add_argument("--upsert-only", action="store_true", help="Notion の試合・マップ行だけ更新（本文・動画解析なし）")
+    r.add_argument("--no-notify", action="store_true", help="終わったとき・失敗したときに通知しない")
     r.add_argument("--config")
     f = sub.add_parser("fetch", help="動画の該当区間だけを video.cache_dir に保存（自宅 PC で実行）")
     f.add_argument("--date", default="yesterday")
@@ -77,6 +113,7 @@ def main():
     bt.add_argument("--redo-before", help="この時刻（例 2026-11-06T02:00）より前に解析したマップだけ作り直す。止まっても同じ値で再開できる")
     bt.add_argument("--out", help="出力ルート（既定 output.dir）")
     bt.add_argument("--map", nargs="*", dest="maps", help="このマップだけ（例 --map Sunset）")
+    bt.add_argument("--no-notify", action="store_true", help="終わったとき・失敗したときに通知しない")
     bt.add_argument("--config")
 
     pb = sub.add_parser("playbook", help="DB からチーム別・構成別の HTML を作る")
@@ -88,6 +125,7 @@ def main():
     pb.add_argument("--notion", nargs="?", const="config", default=None,
                     help="Notion にも書く。親ページの URL を渡す（省略時は config の playbook.notion_parent）")
     pb.add_argument("--no-llm", action="store_true", help="LLM の API キーがあっても要約を書かせない")
+    pb.add_argument("--no-notify", action="store_true", help="終わったとき・失敗したときに通知しない")
     pb.add_argument("--config")
 
     tv = sub.add_parser("tactival", help="作戦ボードアプリ TactiVal 用の座標合わせ")
@@ -180,8 +218,9 @@ def main():
             from datetime import timedelta
             d0, d1 = day or (date.today() - timedelta(days=1)), parse_day(a.date_to)
             days = [d0 + timedelta(days=k) for k in range((d1 - d0).days + 1)]
-        run(cfg, day=day, match_urls=a.match, no_video=a.no_video, force=a.force, upsert_only=a.upsert_only,
-            days=days)
+        _run_notified(cfg, "run", a.no_notify,
+                      lambda: run(cfg, day=day, match_urls=a.match, no_video=a.no_video, force=a.force,
+                                  upsert_only=a.upsert_only, days=days))
     elif a.cmd == "fetch":
         day = None if a.date == "yesterday" else parse_day(a.date)
         from .pipeline import fetch
@@ -192,35 +231,42 @@ def main():
                  pages_max=a.pages_max, tier1=not a.all_events, dry_run=a.dry_run)
     elif a.cmd == "batch":
         from .batch import run as batch
-        batch(cfg, start=parse_day(a.start).isoformat() if a.start else None, end=parse_day(a.end).isoformat() if a.end else None, limit=a.limit, retry_failed=not a.no_retry,
-              shard=a.shard, force=a.force, out_root=Path(a.out) if a.out else None,
-              redo_before=a.redo_before, maps=a.maps)
+        _run_notified(cfg, "batch", a.no_notify,
+                      lambda: batch(cfg, start=parse_day(a.start).isoformat() if a.start else None,
+                                    end=parse_day(a.end).isoformat() if a.end else None, limit=a.limit,
+                                    retry_failed=not a.no_retry, shard=a.shard, force=a.force,
+                                    out_root=Path(a.out) if a.out else None,
+                                    redo_before=a.redo_before, maps=a.maps,
+                                    notify_enabled=not a.no_notify))
     elif a.cmd == "playbook":
-        from . import db, deck
-        from .playbook import build
-        out = Path(a.out) if a.out else Path(cfg["output"]["dir"]) / "playbook"
-        if a.sync:
-            conn = db.open_warehouse(cfg)
-            n = db.sync_reports(conn, Path(cfg["output"]["dir"]))
-            print(f"{n} 件の report.json を DB に取り込みました")
-            conn.close()
-        nt, parent = None, None
-        if a.notion:
-            import os
-            from .notion import Notion
-            from .notion_playbook import page_id
-            parent = page_id(a.notion if a.notion != "config" else str((cfg.get("playbook") or {}).get("notion_parent") or ""))
-            if not os.environ.get("NOTION_TOKEN") or not parent:
-                print("Notion に書くには NOTION_TOKEN と親ページ（--notion <URL> か config の playbook.notion_parent）が必要です")
-            else:
-                nt = Notion(os.environ["NOTION_TOKEN"])
-        deck.build(cfg, out, team=a.team, map_name=a.map, min_maps=a.min_maps, use_llm=not a.no_llm,
-                   notion=nt, notion_parent=parent)
-        if not a.team:
-            from . import meta_page                              # マップのメタの冊子（全チームの手・相性）
-            meta_page.build(cfg, out, map_name=a.map)
-        if not a.team and not a.map:
-            build(cfg, out / "stats", min_maps=a.min_maps)      # 以前の集計ページ（ヒートマップ・型の表）
+        def _playbook():
+            from . import db, deck
+            from .playbook import build
+            out = Path(a.out) if a.out else Path(cfg["output"]["dir"]) / "playbook"
+            if a.sync:
+                conn = db.open_warehouse(cfg)
+                n = db.sync_reports(conn, Path(cfg["output"]["dir"]))
+                print(f"{n} 件の report.json を DB に取り込みました")
+                conn.close()
+            nt, parent = None, None
+            if a.notion:
+                import os
+                from .notion import Notion
+                from .notion_playbook import page_id
+                parent = page_id(a.notion if a.notion != "config" else str((cfg.get("playbook") or {}).get("notion_parent") or ""))
+                if not os.environ.get("NOTION_TOKEN") or not parent:
+                    print("Notion に書くには NOTION_TOKEN と親ページ（--notion <URL> か config の playbook.notion_parent）が必要です")
+                else:
+                    nt = Notion(os.environ["NOTION_TOKEN"])
+            decks = deck.build(cfg, out, team=a.team, map_name=a.map, min_maps=a.min_maps, use_llm=not a.no_llm,
+                               notion=nt, notion_parent=parent)
+            if not a.team:
+                from . import meta_page                          # マップのメタの冊子（全チームの手・相性）
+                meta_page.build(cfg, out, map_name=a.map)
+            if not a.team and not a.map:
+                build(cfg, out / "stats", min_maps=a.min_maps)  # 以前の集計ページ（ヒートマップ・型の表）
+            return decks
+        _run_notified(cfg, "playbook", a.no_notify, _playbook)
     elif a.cmd == "tactival":
         import json as J
 

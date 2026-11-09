@@ -17,8 +17,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
-from . import db, perf, report, vlr
-from .pipeline import _slug, _work_root, analyze_video, base_report, download
+from . import db, notify, perf, report, vlr
+from .pipeline import LowResolution, _slug, _work_root, analyze_video, base_report, download
 from .video import ensure_pot_server, remove_video
 
 
@@ -76,7 +76,7 @@ def _rows(conn, start: str | None, end: str | None, retry_failed: bool,
 def run(cfg: dict, start: str | None = None, end: str | None = None, limit: int | None = None,
         retry_failed: bool = True, shard: str | None = None, force: bool = False,
         out_root: Path | None = None, log=print, redo_before: str | None = None,
-        maps: list[str] | None = None) -> dict:
+        maps: list[str] | None = None, notify_enabled: bool = True) -> dict:
     perf.start()
     t0 = time.time()
     conn = db.open_warehouse(cfg)
@@ -84,7 +84,10 @@ def run(cfg: dict, start: str | None = None, end: str | None = None, limit: int 
     if not rows:
         log("処理待ちのマップがありません。先に `vreplay backfill` を実行してください。")
         perf.stop()
-        return db.stats(conn)
+        st = db.stats(conn)
+        st["batch"] = {"total": 0, "done": 0, "failed": 0, "skipped": 0,
+                       "seconds": time.time() - t0}
+        return st
     log(f"動画解析の対象: {len(rows)} マップ（DB {db.warehouse_path(cfg)}）")
 
     by_match: dict[str, list] = {}
@@ -93,6 +96,17 @@ def run(cfg: dict, start: str | None = None, end: str | None = None, limit: int 
     root = Path(out_root or cfg["output"]["dir"])
     done = failed = skipped = 0
     reports_by_day: dict[str, list[dict]] = {}
+    sent: set[str] = set()
+    last_fail_map: str | None = None
+    same_map_failures = 0
+    low_res_streak = 0
+
+    def alert(reason: str, title: str, body: str):
+        if not notify_enabled or reason in sent:
+            return
+        sent.add(reason)
+        notify.send(cfg, title, body, level="error")
+
     if cfg.get("notion", {}).get("enabled"):
         # 過去分まで Notion に書くと重いので、batch では既定で書かない
         log("  batch では Notion へは書きません（必要なときは日別の vreplay run を使ってください）")
@@ -104,6 +118,9 @@ def run(cfg: dict, start: str | None = None, end: str | None = None, limit: int 
             m = vlr.parse_match(group[0]["url"])
         except Exception as e:
             failed += len(group)
+            last_fail_map = None
+            same_map_failures = 0
+            low_res_streak = 0
             log(f"× 試合ページを読めません {mid}: {e}")
             for r in group:
                 db.mark_failed(conn, mid, r["map_order"], str(e))
@@ -144,6 +161,9 @@ def run(cfg: dict, start: str | None = None, end: str | None = None, limit: int 
                     db.mark_failed(conn, m.id, md.order, rep["analysis_note"])
                     conn.commit()
                     failed += 1
+                    last_fail_map = None
+                    same_map_failures = 0
+                    low_res_streak = 0
                     continue
                 path = None
                 try:
@@ -157,6 +177,9 @@ def run(cfg: dict, start: str | None = None, end: str | None = None, limit: int 
                     db.ingest_report(conn, rep)
                     conn.commit()
                     done += 1
+                    last_fail_map = None
+                    same_map_failures = 0
+                    low_res_streak = 0
                     day_key = rep.get("date") or day or "unknown"
                     reports_by_day.setdefault(day_key, []).append(rep)
                     log(f"  {md.order}. {md.name}: 完了（全体 {done}／失敗 {failed}／スキップ {skipped}）")
@@ -167,6 +190,17 @@ def run(cfg: dict, start: str | None = None, end: str | None = None, limit: int 
                     db.mark_failed(conn, m.id, md.order, str(e))
                     conn.commit()
                     log(f"  {md.order}. {md.name}: 失敗 {e}")
+                    same_map_failures = same_map_failures + 1 if md.name == last_fail_map else 1
+                    last_fail_map = md.name
+                    if same_map_failures >= 3:
+                        alert(f"same-map:{md.name}", "vreplay batch で同じマップの失敗が続いています",
+                              f"{md.name} の解析が {same_map_failures} 回続けて失敗しました"
+                              f"（成功 {done}／失敗 {failed}）。cookies や PO トークンのサーバーを確認してください。")
+                    low_res_streak = low_res_streak + 1 if isinstance(e, LowResolution) else 0
+                    if low_res_streak >= 3:
+                        alert("low-resolution", "vreplay batch で低画質の失敗が続いています",
+                              f"{md.name} で {low_res_streak} マップ続けて低解像度の動画しか取れませんでした。"
+                              "cookies を更新するか、PO トークンのサーバーを起動し直してください。")
                 finally:
                     # 分割取得なら parts.json だけでなく各部分の動画も消す（1 マップ約 2GB。消し忘れると
                     # 100 マップ前後で Colab のディスク 235GB が埋まってランタイムが落ちる）。失敗したマップも消す
@@ -190,6 +224,8 @@ def run(cfg: dict, start: str | None = None, end: str | None = None, limit: int 
     perf.print_summary(summary, log)
     perf.stop()
     st = db.stats(conn)
+    st["batch"] = {"total": len(rows), "done": done, "failed": failed, "skipped": skipped,
+                   "seconds": time.time() - t0}
     log(f"batch 完了: 成功 {done}／失敗 {failed}／スキップ {skipped}（{time.time() - t0:.0f} 秒）")
     log(f"DB: 試合 {st['matches']}・マップ {st['maps']}（解析済み {st['maps_done']}）・ラウンド {st['rounds']}")
     return st
