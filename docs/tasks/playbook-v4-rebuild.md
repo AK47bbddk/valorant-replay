@@ -150,3 +150,16 @@ Colab で PRX Split・LOUD Sunset を作った結果：Split は公式画像・T
 7. **docs/PLAYBOOK_v4.md に「7. 図（マップ）の決まり」を足す**（この指示書の A 節の要約 7 行：公式画像だけ・TactiVal の向き・エリアの形で塗る・重心にラベル・駒・下地 1 回・整合チェック）。触ってよいファイルに docs/PLAYBOOK_v4.md を足す。
 
 通すテストと終わりの条件は前と同じ。加えて、合成マップの PNG（Map Prio・守りの形 1 枚）を撮り直して目で確かめる。
+
+## レビューの指摘（Gemini Argon・2026-11-10）：必ず直すこと
+
+1. `vreplay/gamemodel.py` `_extreme()`：人数不利が 15 秒以上続いたあとに人数差が戻ると down1 が漏れる（例：feed = [(10, False), (30, True)]、dur 無し）。リセットする前に「down_from から e までが down_secs 以上か」を見る。テストを足す。
+2. `vreplay/playbook_v4.py` `_agent_lines()`／`_verb()`：1:40 と 1:20 の 2 点だけで動詞を決めているので、1:30 に攻め側半分へ出て 1:20 までに倒れた（snap で消える）・引いた選手が「ホールドする」になり、開幕プッシュの型で「前に出て取る」が 1 人もいなくなる。1:30（e = 10）の点と e <= 20 の撃ち合いの場所も見る。テストを足す（開幕プッシュの型なら 1 人以上「前に出て取る」）。
+3. `vreplay/playbook_v4.py` の `d["model"].regions` を見ている所（`_presence` と `slides()` のエリアカード）：uv_base のとき regions が空でエリアカードが 0 枚・人数が 0 になる。`d["model"].cent` を見る。uv_base のテストを足す。
+4. `vreplay/gamemodel.py` `_atk_vital()`：`config/kb/game_model.yaml` の attack.vital にある `v_counter`（バイタルカウンター）が判定されない。守りの `_def_vital()` と同じ考え方（主力のいるバイタルに守りが当たってきて、そこで撃ち合い＝キル 2 以上）で足す。テストを足す。
+5. `vreplay/mapfig.py` `Figure.svg()`：`text-decoration=underline` の値をクォートする（`text-decoration="underline"`）。
+6. `tests/test_playbook_v4.py:53`：`or True` を消して、本当に確かめるテストにする（落ちるならアサーションの中身を正しい条件に直す）。
+
+## できれば直すこと
+- `_push_areas()`：1:40 から攻め側半分にいて 1:15 まで同じエリアにいたラウンドも GREEN の集計に入れる（`ar != a0 or model.half(a0)` など）。
+- `prepare()`：攻めの Map Prio 用の `def_colors` に渡すペアを、相手の 1:40 も 3 人以上取れているラウンドに絞る。
