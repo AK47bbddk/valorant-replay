@@ -125,6 +125,7 @@ def main():
     pb.add_argument("--notion", nargs="?", const="config", default=None,
                     help="Notion にも書く。親ページの URL を渡す（省略時は config の playbook.notion_parent）")
     pb.add_argument("--no-llm", action="store_true", help="LLM の API キーがあっても要約を書かせない")
+    pb.add_argument("--v4", action="store_true", help="プレイブック v4（ゲームモデル・公式のマップ画像の上の図）を --team と --map で 1 冊作る")
     pb.add_argument("--no-notify", action="store_true", help="終わったとき・失敗したときに通知しない")
     pb.add_argument("--config")
 
@@ -248,6 +249,14 @@ def main():
                 n = db.sync_reports(conn, Path(cfg["output"]["dir"]))
                 print(f"{n} 件の report.json を DB に取り込みました")
                 conn.close()
+            if a.v4:
+                if not (a.team and a.map):
+                    raise SystemExit("--v4 には --team と --map が要ります（例 --v4 --team PRX --map Split）")
+                from . import playbook_v4
+                conn = db.open_warehouse(cfg)
+                reps = deck.load_reports(conn)
+                conn.close()
+                return [playbook_v4.build(reps, a.team, a.map, out, cfg)]
             nt, parent = None, None
             if a.notion:
                 import os

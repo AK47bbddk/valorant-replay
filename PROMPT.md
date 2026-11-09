@@ -139,6 +139,10 @@ Notion に次の 2 つのデータソースがすでにある。新しい DB は
    - 位置は `transform` の逆変換でミニマップ画像の座標に戻し、試合をまたいで valorant-api のマップ画像に重ねる。画像は HTML に埋め込む（1 ファイルで開ける・印刷で 1 スライド 1 ページ）。
    - デザインはデジタル庁デザインシステム（Noto Sans JP、キーカラー #0017C1、コントラスト、フォーカス）。
    - 以前の集計ページ（`vreplay/playbook.py`、ヒートマップと型の表）は `playbook/stats/` に出す。
+   - **v4**（`vreplay playbook --v4 --team PRX --map Split`、または `python scripts/playbook_v4.py "<report.json の glob>" --team … --map … --out …`）は 3 つのモジュールに分ける（方針は `docs/PLAYBOOK_v4.md`）。
+     `vreplay/mapfig.py`＝図（下地は valorant-api の displayIcon だけ・TactiVal と同じ向き・エリアの形はアルファ×コールアウトのボロノイ×kb の `areas[].callouts`・ラベルは多角形の重心）、
+     `vreplay/gamemodel.py`＝ラウンド × 局面 → ノードの判定（描画しない・しきい値は `config/kb/game_model.yaml` の `params`）、`vreplay/playbook_v4.py`＝冊子の HTML（スライドごとに 1 関数）。
+     設定 `playbook.map_orientation`：`tactival`（既定）／`api`。マップ画像が取れないときは図を出さず「マップ画像がありません（オフライン）」と書く。
 
 コマンド例：
 
