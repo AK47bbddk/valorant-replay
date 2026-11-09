@@ -182,3 +182,12 @@ def test_connected_areas_use_adjacent_only():
     assert m.vitals() == ["MID"]
     assert m.connected() == ["A Site"]            # B Main は MID と隣でない
     assert m.half("MID") and not m.half("A Site")
+
+
+def test_card_areas_are_always_connected():
+    """kb で card: true のエリア（コーチ指定）は、追跡の回数や隣かどうかに関係なく必ずエリアとして出る。"""
+    row = {"tracks": {"Jett": [(0, *POS["Mid Mail"], "Mid Mail", "det"), (5, *POS["A Site"], "A Site", "det")]}}
+    m = model(rows=[row])
+    m.kb_area["B Main"]["card"] = True
+    m._conn = None
+    assert m.connected()[0] == "B Main" and "A Site" in m.connected()

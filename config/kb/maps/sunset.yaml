@@ -7,7 +7,7 @@ summary: >-
 
 areas:
   - name: A Main
-    callouts: [A Main, A Lobby, A Elbow]
+    callouts: [A Main, A Lobby]   # A Elbow はサイトの中なので入れない（2026-11-09）
     vital: true            # コーチ指定（2026-11-09）
     choke: true
     dry: false
@@ -21,12 +21,14 @@ areas:
   - name: B Market
     callouts: [B Market, B Boba]
     vital: false
+    card: true             # コーチ指定（2026-11-09）：エリアとして必ず出す
     choke: true
     dry: false
     note: トップ壁＋マーケット → タピオカ（Boba）で B を割る入口
   - name: B Main
     callouts: [B Main, B Lobby]
     vital: false
+    card: true             # コーチ指定（2026-11-09）：エリアとして必ず出す
     choke: true
     dry: true
     note: B の正面。マーケットと同時に当てるとサイトの守りが割れる

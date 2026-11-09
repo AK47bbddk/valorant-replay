@@ -224,6 +224,21 @@ def choose_base(cfg: dict, map_name: str, rows: list[dict] | None, callouts: lis
 
 
 # ============================================================== エリアの形（A4）
+VITAL_SHRINK = 1.35      # バイタルの多角形がサイトの奥まで伸びないよう、バイタルのコールアウトまでの距離をこの倍で測る
+
+
+def area_weights(kb_map: dict | None) -> dict[str, float]:
+    """kb の areas[].name → 距離の重み（大きいほど狭くなる）。`shrink` があればそれ、無ければバイタルは VITAL_SHRINK。"""
+    out = {}
+    for a in (kb_map or {}).get("areas") or []:
+        w = a.get("shrink")
+        if w is None and a.get("vital"):
+            w = VITAL_SHRINK
+        if w:
+            out[a["name"]] = float(w)
+    return out
+
+
 def area_groups(kb_map: dict | None) -> dict[str, str]:
     """コールアウトのエリア名（正規化）→ kb の areas[].name。kb に無いコールアウトは入らない（単独のエリア）。"""
     out = {}
@@ -255,7 +270,8 @@ def _polys(mask: np.ndarray) -> list[list[list[float]]]:
 def area_regions(base: np.ndarray, callouts: list[dict], kb_map: dict | None, *, k: int = 0,
                  cache_dir: Path | None = None, map_name: str = "") -> dict[str, list[list[list[float]]]]:
     """エリア名 → 多角形のリスト（表示の向きの 0..1）。
-    通路のマスク（下地のアルファ > 0）の画素を、いちばん近いコールアウトに割り当て（ボロノイ・256×256 で計算）、
+    通路のマスク（下地のアルファ > 0）の画素を、いちばん近いコールアウトに割り当て（ボロノイ・256×256 で計算。
+    バイタルは距離を VITAL_SHRINK 倍で測って、サイトの奥まで伸びないようにする）、
     kb の areas[].callouts でまとめる。通路の画素はすべてどれかのエリアに入る（スポーンがいちばん近い画素だけ外す）。"""
     cs = [c for c in callouts if not _is_spawn_callout(c) and callout_area(c)]
     sp = [c for c in callouts if _is_spawn_callout(c)]
@@ -264,8 +280,11 @@ def area_regions(base: np.ndarray, callouts: list[dict], kb_map: dict | None, *,
     pts = [to_view(float(c["x"]), float(c["y"]), k) for c in cs]
     sp_pts = [to_view(float(c["x"]), float(c["y"]), k) for c in sp]
     names = [groups.get(norm(callout_area(c)), callout_area(c)) for c in cs]
+    wts = area_weights(kb_map)
+    W = np.array([wts.get(n, 1.0) for n in names] + [1.0] * len(sp_pts), dtype=np.float64)
     key = _sha(view.tobytes(), json.dumps([[round(p[0], 4), round(p[1], 4), n] for p, n in zip(pts, names)]),
-               json.dumps([[round(p[0], 4), round(p[1], 4)] for p in sp_pts]), k, "all-pixels")
+               json.dumps([[round(p[0], 4), round(p[1], 4)] for p in sp_pts]), k, "all-pixels",
+               json.dumps(W.round(3).tolist()))
     cp = None
     if cache_dir is not None and map_name:
         cp = Path(cache_dir) / "map_areas" / f"{norm(map_name)}_{int(k) % 4}.json"
@@ -284,8 +303,9 @@ def area_regions(base: np.ndarray, callouts: list[dict], kb_map: dict | None, *,
     P = np.stack([px.ravel(), py.ravel()], 1)
     C = np.array(pts + sp_pts, dtype=np.float64)
     d2 = ((P[:, None, :] - C[None, :, :]) ** 2).sum(2)
-    idx = d2.argmin(1)
-    idx[idx >= len(pts)] = -1              # スポーンのコールアウトがいちばん近い画素だけ外す
+    spawn = d2.argmin(1) >= len(pts)       # スポーンのコールアウトがいちばん近い画素だけ外す（重みなしの距離で）
+    idx = (d2[:, :len(pts)] * (W[None, :len(pts)] ** 2)).argmin(1)
+    idx[spawn] = -1
     lab = cv2.resize(idx.reshape(n, n).astype(np.int16), (SIZE, SIZE), interpolation=cv2.INTER_NEAREST)
     walk = view[:, :, 3] > 0
     order = list(dict.fromkeys(names))

@@ -392,7 +392,7 @@ def prio_overview(d: dict, side: str) -> str:
                 lis.append(_s(_safe(side, f"{c} {MF.PRIO_JA[c]}｜{x['why']}")))
     if not lis:
         lis.append(_s(f"{d['tag']} の{ttl}は色の条件に当てはまるエリアがまだありません（{len(_main(d, side))} ラウンド）。"))
-    svg = d["fig"].svg(prio=pr, vital=d["vitals"], labels=list(pr) or None,
+    svg = d["fig"].svg(prio=pr, vital=d["vitals"], labels=list(dict.fromkeys([*pr, *d["vitals"], *d["connected"]])),
                        alt=f"{ttl}の Map Prio（{'・'.join(sorted(set(pr.values()))) or '色なし'}）")
     return D._slide(f"{ttl} / Map Prio", f"{ttl}の Map Prio（全体図）",
                     f'<div class="fig52">{svg}<div class="txt"><ul>{"".join(lis)}</ul></div></div>', d["foot"])

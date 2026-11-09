@@ -162,7 +162,11 @@ class MapModel:
                     for x, y in ((a, b), (b, a)):
                         if x in vit and y not in vit and (min(x, y), max(x, y)) in self.adj:
                             cnt[y] += 1
-        self._conn = [a for a, _ in sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0]))[:self.P["connect_top"]]]
+        auto = [a for a, _ in sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0]))[:self.P["connect_top"]]]
+        # kb で `card: true` のエリア（コーチ指定）は追跡の回数に関係なく必ず入れる
+        forced = [a["name"] for a in (self.kb.get("areas") or [])
+                  if a.get("card") and a["name"] not in vit and a["name"] in self.cent]
+        self._conn = forced + [a for a in auto if a not in forced]
         return self._conn
 
 

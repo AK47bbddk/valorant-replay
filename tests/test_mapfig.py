@@ -185,3 +185,18 @@ def test_figure_switches_to_ecc_official_and_stays_filled(tmp_path, monkeypatch)
     cv2.imwrite(str(tmp_path / "uv.png"), _uv_png(FX.syn_base(512)[:, :, 3] > 0))
     fig = MF.Figure("Split", _cfg(tmp_path), rows=[{"uv_base": str(tmp_path / "uv.png"), "uv": []}])
     assert fig.info["source"] == "official" and fig.info["use"] == "ecc" and fig.fillable and fig.regions
+
+
+def test_vital_shrinks_so_it_does_not_reach_into_the_site():
+    """バイタルは距離を VITAL_SHRINK 倍で測る：重みなしより狭くなり、ほかのエリアの画素が増える。"""
+    kbm = K.load({}).map("Split")
+    plain = {**kbm, "areas": [{**a, "vital": False, "shrink": None} for a in kbm["areas"]]}
+    base, cs = FX.syn_base(1024), FX.syn_meta()["callouts"]
+    vit = [a["name"] for a in kbm["areas"] if a.get("vital")]
+    a = MF.area_regions(base, cs, kbm)
+    b = MF.area_regions(base, cs, plain)
+    size = lambda reg, n: MF._fill(reg.get(n, [])).sum()
+    assert vit and all(size(a, v) <= size(b, v) for v in vit)
+    assert sum(size(a, v) for v in vit) < sum(size(b, v) for v in vit)
+    assert MF.area_weights(kbm)[vit[0]] == MF.VITAL_SHRINK
+    assert MF.area_weights({"areas": [{"name": "X", "shrink": 1.1}]}) == {"X": 1.1}
