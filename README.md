@@ -209,6 +209,7 @@ os.environ['VREPLAY_CONFIG'] = '/content/drive/MyDrive/valorant-replay/config.ya
 
 `run` / `batch` / `playbook` の終わりと失敗を、スマホへ 1 通ずつ送れます。送り先は `config.yaml` の `notify.url`
 （または環境変数 `VREPLAY_NOTIFY_URL`）。どちらも空なら何も送らず、今までどおり動きます。通信に失敗しても本体は止まりません。
+Colab では 🔑（シークレット）に `VREPLAY_NOTIFY_URL` として登録すると、セル 1 が読み込みます（webhook の URL は合言葉と同じなので、リポジトリや config.yaml には書かない）。
 
 ```yaml
 notify:
