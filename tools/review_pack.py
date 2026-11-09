@@ -8,7 +8,7 @@ import subprocess, sys
 MAX = 60000  # Gemini アプリの入力に収める目安（文字）
 
 def git(*a):
-    return subprocess.run(["git", *a], capture_output=True, text=True, check=True).stdout
+    return subprocess.run(["git", *a], capture_output=True, text=True, encoding="utf-8", errors="replace", check=True).stdout
 
 def main():
     args = sys.argv[1:]
