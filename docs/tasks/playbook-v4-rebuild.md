@@ -33,7 +33,7 @@ v4 を main から作り直す。図は**公式のマップ画像（valorant-api
 ### 0. 準備
 ```bash
 git fetch origin
-git switch -c task/playbook-v4-rebuild origin/main
+git switch -c task/playbook-v4-rebuild origin/claude/playbook-v4-rebuild-task   # この指示書が入っている（中身は main と同じ＋指示書）
 git checkout origin/claude/playbook-v4 -- config/kb/game_model.yaml config/kb/maps/split.yaml config/kb/maps/sunset.yaml docs/PLAYBOOK_v4.md
 ```
 `claude/playbook-v4` の `vreplay/playbook_v4.py`・`vreplay/gamemodel.py`・テストは**持ってこない・コピーしない**（1 から書く）。
