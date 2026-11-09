@@ -31,7 +31,7 @@ PRIO_JA = {"GREEN": "緑", "YELLOW": "黄", "RED": "赤", "BLUE": "青"}
 TEAM_COL = {"def": "#0017C1", "atk": "#C7322B"}
 VITAL_COL, CONNECT_COL = "#0017C1", "#8A6D00"
 NO_MAP = "マップ画像がありません（オフライン）"
-ASSIGN_MAX = 0.08          # コールアウトからこれより遠い画素はどのエリアにも入れない（0..1）
+NO_FILL = "公式のマップ画像と合わないため、放送のミニマップで表示（色分けなし）"
 MIN_AREA_PX = 40
 EPS_PX = 1.5
 NEAR_PX = 6                # 整合チェックで通路の画素に乗っているとみなす距離
@@ -85,6 +85,15 @@ def _to_bgra(img: np.ndarray | None) -> np.ndarray | None:
     return np.ascontiguousarray(out)
 
 
+def apply_fix(img: np.ndarray, fix) -> np.ndarray:
+    """tactics.CALLOUT_FIX（0..1 の (u, v) → (a·u + b·v + c, d·u + e·v + f)）を画像にも掛ける。外は透明。"""
+    a, b, c, d, e, f = fix
+    n = img.shape[1]
+    m = np.float32([[a, b, c * n], [d, e, f * n]])
+    return np.ascontiguousarray(cv2.warpAffine(img, m, (n, img.shape[0]), flags=cv2.INTER_LINEAR,
+                                               borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0)))
+
+
 def official_image(cfg: dict, map_name: str, log=print) -> np.ndarray | None:
     """valorant-api の displayIcon を `_cache/map_icons/<norm>.png` に置いて BGRA 1024×1024 で返す。"""
     from urllib.request import urlopen
@@ -101,7 +110,9 @@ def official_image(cfg: dict, map_name: str, log=print) -> np.ndarray | None:
                 log(f"  マップ画像を取得できませんでした（{e}）")
     if not p.exists():
         return None
-    return _to_bgra(cv2.imread(str(p), cv2.IMREAD_UNCHANGED))
+    img = _to_bgra(cv2.imread(str(p), cv2.IMREAD_UNCHANGED))
+    fix = TC.CALLOUT_FIX.get(norm(map_name))          # コールアウトだけでなく、画像にも同じ変換を掛ける
+    return apply_fix(img, fix) if img is not None and fix else img
 
 
 def uv_image(rows: list[dict] | None) -> np.ndarray | None:
@@ -210,13 +221,16 @@ def area_regions(base: np.ndarray, callouts: list[dict], kb_map: dict | None, *,
                  cache_dir: Path | None = None, map_name: str = "") -> dict[str, list[list[list[float]]]]:
     """エリア名 → 多角形のリスト（表示の向きの 0..1）。
     通路のマスク（下地のアルファ > 0）の画素を、いちばん近いコールアウトに割り当て（ボロノイ・256×256 で計算）、
-    kb の areas[].callouts でまとめる。0.08 より遠い画素はどこにも入れない。"""
+    kb の areas[].callouts でまとめる。通路の画素はすべてどれかのエリアに入る（スポーンがいちばん近い画素だけ外す）。"""
     cs = [c for c in callouts if not _is_spawn_callout(c) and callout_area(c)]
+    sp = [c for c in callouts if _is_spawn_callout(c)]
     groups = area_groups(kb_map)
     view = rotate_image(base, k)
     pts = [to_view(float(c["x"]), float(c["y"]), k) for c in cs]
+    sp_pts = [to_view(float(c["x"]), float(c["y"]), k) for c in sp]
     names = [groups.get(norm(callout_area(c)), callout_area(c)) for c in cs]
-    key = _sha(view.tobytes(), json.dumps([[round(p[0], 4), round(p[1], 4), n] for p, n in zip(pts, names)]), k)
+    key = _sha(view.tobytes(), json.dumps([[round(p[0], 4), round(p[1], 4), n] for p, n in zip(pts, names)]),
+               json.dumps([[round(p[0], 4), round(p[1], 4)] for p in sp_pts]), k, "all-pixels")
     cp = None
     if cache_dir is not None and map_name:
         cp = Path(cache_dir) / "map_areas" / f"{norm(map_name)}_{int(k) % 4}.json"
@@ -233,10 +247,10 @@ def area_regions(base: np.ndarray, callouts: list[dict], kb_map: dict | None, *,
     gx = (np.arange(n) + 0.5) / n
     px, py = np.meshgrid(gx, gx)
     P = np.stack([px.ravel(), py.ravel()], 1)
-    C = np.array(pts, dtype=np.float64)
+    C = np.array(pts + sp_pts, dtype=np.float64)
     d2 = ((P[:, None, :] - C[None, :, :]) ** 2).sum(2)
     idx = d2.argmin(1)
-    idx[np.sqrt(d2.min(1)) > ASSIGN_MAX] = -1
+    idx[idx >= len(pts)] = -1              # スポーンのコールアウトがいちばん近い画素だけ外す
     lab = cv2.resize(idx.reshape(n, n).astype(np.int16), (SIZE, SIZE), interpolation=cv2.INTER_NEAREST)
     walk = view[:, :, 3] > 0
     order = list(dict.fromkeys(names))
@@ -386,6 +400,7 @@ class Figure:
         self.kb_map = K.load(cfg).map(map_name)
         self.base, self.info = choose_base(cfg, map_name, rows, self.callouts, log)
         self.ok = self.base is not None
+        self.fillable = False
         self.regions: dict = {}
         self.adj: set = set()
         self.label_xy: dict = {}
@@ -396,10 +411,20 @@ class Figure:
         if not self.ok:
             return
         cache = Path(cfg["output"]["dir"]) / "_cache" if (cfg.get("output") or {}).get("dir") else None
-        self.regions = area_regions(self.base, self.callouts, self.kb_map, k=self.k, cache_dir=cache,
-                                    map_name=map_name)
-        self.adj = adjacent(self.regions)
-        self.label_xy = label_positions(self.regions)
+        self.fillable = self.info.get("source") == "official"     # uv_base は通路と背景を分けられないので塗らない
+        if self.fillable:
+            self.regions = area_regions(self.base, self.callouts, self.kb_map, k=self.k, cache_dir=cache,
+                                        map_name=map_name)
+            self.adj = adjacent(self.regions)
+            self.label_xy = label_positions(self.regions)
+        else:                                  # エリア名はコールアウトの点の位置（グループは点の平均）
+            groups = area_groups(self.kb_map)
+            pts = {}
+            for c in self.callouts:
+                a = callout_area(c)
+                if a and not _is_spawn_callout(c):
+                    pts.setdefault(groups.get(norm(a), a), []).append(to_view(float(c["x"]), float(c["y"]), self.k))
+            self.label_xy = {n: (sum(p[0] for p in v) / len(v), sum(p[1] for p in v) / len(v)) for n, v in pts.items()}
         self.view = rotate_image(self.base, self.k)
         ys, xs = np.nonzero(self.view[:, :, 3] > 0)
         if len(xs):
@@ -452,6 +477,8 @@ class Figure:
 
     def legend(self, prio=None, vital: bool = False, connected: bool = False) -> str:
         li = []
+        if self.ok and not self.fillable:
+            return f'<p class="cap">{html.escape(NO_FILL)}</p>'
         if prio:
             used = set(prio) if not isinstance(prio, bool) else set(PRIO)
             li += [f'<li><span class="sw" style="background:{c}"></span>{n} {PRIO_JA[n]}</li>'
@@ -463,16 +490,16 @@ class Figure:
         return f'<ul class="lg">{"".join(li)}</ul>' if li else ""
 
     def svg(self, layers: list[dict] | None = None, *, prio: dict | None = None, vital=None, connected=None,
-            labels=None, alt: str = "", legend: bool = True) -> str:
+            labels=None, alt: str = "", legend: bool = True, px: int = 460) -> str:
         """layers = [{"mark": "1:40", "pieces": [{"agent", "u", "v", "team": "def"|"atk"}]}, ...]（古い順）。
         prio = {エリア: GREEN|YELLOW|RED|BLUE}、vital・connected = エリア名の集まり、labels = 名前を出すエリア。"""
         if not self.ok:
             return f'<p class="nomap">{html.escape(NO_MAP)}</p>'
         prio, vital, connected = prio or {}, set(vital or ()), set(connected or ()) - set(vital or ())
         x0, y0, w, h = self.vb
-        fs = round(13.5 * w / 460, 1)                       # 460px 表示で 13.5px
+        fs = round(13.5 * w / px, 1)                        # px（表示の幅）で 13.5px
         sw = round(w / 460, 2)
-        out = [f'<svg class="mapsvg" viewBox="{x0:.1f} {y0:.1f} {w:.1f} {h:.1f}" role="img" '
+        out = [f'<svg class="mapsvg" style="width:min(100%,{px}px)" viewBox="{x0:.1f} {y0:.1f} {w:.1f} {h:.1f}" role="img" '
                f'aria-label="{html.escape(alt or self.map_name + " のマップ")}" preserveAspectRatio="xMidYMid meet" '
                f'xmlns="http://www.w3.org/2000/svg" font-family="Noto Sans JP,sans-serif">'
                f'<use href="#{self.id}"/>']
@@ -480,6 +507,8 @@ class Figure:
         def pts(p):
             return " ".join(f"{a * SIZE:.1f},{b * SIZE:.1f}" for a, b in p)
 
+        if not self.fillable:
+            prio, vital, connected = {}, set(), set()
         for nm, c in prio.items():
             col = PRIO.get(c, "#767676")
             for p in self.regions.get(nm, []):
@@ -532,12 +561,15 @@ class Figure:
                 ux, uy = (c - a) / dist, (d - b) / dist
                 ex, ey = c - ux * r, d - uy * r
                 col = TEAM_COL.get(key[1], "#4d4d4d")
-                hx, hy = ex - ux * 7 * sw * 2, ey - uy * 7 * sw * 2
-                out.append(f'<line x1="{a + ux * r:.1f}" y1="{b + uy * r:.1f}" x2="{hx:.1f}" y2="{hy:.1f}" '
+                hx, hy = ex - ux * 14 * sw, ey - uy * 14 * sw
+                wx, wy = -uy * 7 * sw, ux * 7 * sw
+                out.append(f'<line x1="{a + ux * r:.1f}" y1="{b + uy * r:.1f}" x2="{ex:.1f}" y2="{ey:.1f}" '
                            f'stroke="{col}" stroke-opacity="{op:.2f}" stroke-width="{2 * sw}" '
                            f'stroke-dasharray="{6 * sw},{4 * sw}"/>'
-                           f'<polygon points="{ex:.1f},{ey:.1f} {hx - uy * 4 * sw * 2:.1f},{hy + ux * 4 * sw * 2:.1f} '
-                           f'{hx + uy * 4 * sw * 2:.1f},{hy - ux * 4 * sw * 2:.1f}" fill="{col}" fill-opacity="{op:.2f}"/>')
+                           f'<line x1="{ex:.1f}" y1="{ey:.1f}" x2="{hx + wx:.1f}" y2="{hy + wy:.1f}" stroke="{col}" '
+                           f'stroke-opacity="{op:.2f}" stroke-width="{2 * sw}"/>'
+                           f'<line x1="{ex:.1f}" y1="{ey:.1f}" x2="{hx - wx:.1f}" y2="{hy - wy:.1f}" stroke="{col}" '
+                           f'stroke-opacity="{op:.2f}" stroke-width="{2 * sw}"/>')
         for i in reversed(range(n)):                        # 古いコマ（1:40）を濃く・新しいコマを薄く
             op = 1.0 if n == 1 else 1.0 - 0.55 * i / (n - 1)
             fr = layers[i]

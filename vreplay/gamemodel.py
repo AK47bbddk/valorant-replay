@@ -79,14 +79,16 @@ class MapModel:
     """エリアの形（多角形）・隣・攻守の半分・バイタル・チョーク。"""
 
     def __init__(self, regions: dict, adj: set, k: int, kb_map: dict | None, spawns: dict | None = None,
-                 rows: list[dict] | None = None, roles: dict | None = None, gm: dict | None = None):
+                 rows: list[dict] | None = None, roles: dict | None = None, gm: dict | None = None,
+                 cent: dict | None = None):
         self.regions, self.adj, self.k = regions, set(adj), int(k)
         self.kb = kb_map or {}
         self.groups = MF.area_groups(self.kb)
         self.kb_area = {a["name"]: a for a in self.kb.get("areas") or []}
         self.roles = roles or {}
         self.P = params(gm)
-        self.cent = MF.label_positions(regions, shift=False) if regions else {}
+        # エリアの位置（表示の向きの 0..1）。多角形があれば重心、uv_base のときはコールアウトの点（cent で渡す）
+        self.cent = cent if cent is not None else (MF.label_positions(regions, shift=False) if regions else {})
         sp = spawns or {}
         self.sp = {s: MF.to_view(float(v[0]), float(v[1]), self.k) for s, v in sp.items() if v}
         self._conn: list[str] | None = None
@@ -128,7 +130,7 @@ class MapModel:
         return bool((self.kb_area.get(area or "") or {}).get("counter"))
 
     def vitals(self) -> list[str]:
-        return [a for a in self.regions if self.is_vital(a)]
+        return [a for a in self.cent if self.is_vital(a)]
 
     def lane(self, u: float, v: float) -> str | None:
         """1:40 の攻め（スポーンの中）がどのバリアの後ろか：いちばん近いゾーンの重心。"""

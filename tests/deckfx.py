@@ -214,12 +214,12 @@ def _zone_counts(dots: list, t: float) -> dict:
 # 512×512 の RGBA に「A サイト・MID・B サイト」の通路を矩形で描いたもの（アルファ > 0 が通路）。
 # コールアウトは (name, super, x, y)。x, y は valorant-api の displayIcon の 0..1（回転前）。
 SYN_CALLOUTS = [
-    ("Site", "A", 0.33, 0.20), ("Main", "A", 0.18, 0.55),
-    ("Top", "Mid", 0.49, 0.23), ("Mail", "Mid", 0.50, 0.42), ("Vent", "Mid", 0.50, 0.55), ("Bottom", "Mid", 0.50, 0.70),
-    ("Main", "B", 0.82, 0.55), ("Site", "B", 0.64, 0.20),
-    ("Spawn", "Attacker Side", 0.50, 0.93), ("Spawn", "Defender Side", 0.50, 0.08),
+    ("Site", "A", 0.33, 0.20), ("Main", "A", 0.18, 0.70),
+    ("Top", "Mid", 0.49, 0.23), ("Mail", "Mid", 0.50, 0.42), ("Vent", "Mid", 0.50, 0.55), ("Bottom", "Mid", 0.50, 0.78),
+    ("Main", "B", 0.82, 0.70), ("Site", "B", 0.64, 0.20),
+    ("Spawn", "Attacker Side", 0.50, 0.99), ("Spawn", "Defender Side", 0.50, 0.01),
 ]
-_RECTS = [(0.40, 0.04, 0.60, 0.12), (0.45, 0.12, 0.55, 0.88), (0.40, 0.88, 0.60, 0.97),
+_RECTS = [(0.45, 0.06, 0.55, 0.12), (0.45, 0.12, 0.55, 0.88), (0.45, 0.88, 0.55, 0.94),
           (0.08, 0.10, 0.36, 0.28), (0.14, 0.28, 0.22, 0.88), (0.14, 0.80, 0.60, 0.88),
           (0.64, 0.10, 0.92, 0.28), (0.78, 0.28, 0.86, 0.88), (0.40, 0.80, 0.86, 0.88),
           (0.36, 0.20, 0.45, 0.26), (0.55, 0.20, 0.64, 0.26)]
@@ -332,7 +332,8 @@ def report_v4(mid, t1, t2, seed, map_name="Split"):
                        "side": side1 if w == 1 else ("防衛" if side1 == "攻撃" else "攻撃"), "side1": side1,
                        "eco1": "pistol" if n in (1, 13) else "full", "eco2": "pistol" if n in (1, 13) else "full",
                        "t_drop": t0, "plant_t": t0 + plant_e if planted else None, "duration": "1:20", "kills": kills,
-                       "ults": [], "yt_url": f"https://youtu.be/x?t={int(t0)}",
+                       "ults": ([{"t": t0 + 30, "player": _SYN_PL[name[w]][1], "team": name[w], "agent": _SYN_AG[name[w]][1]}]
+                                if n % 3 == 0 else []), "yt_url": f"https://youtu.be/x?t={int(t0)}",
                        "tactics": {"aligned": True, "timeline": {"1:15": {"1": {"A": 1}, "2": {"B": 1}}},
                                    "plant_site": site, "plant_zones": {}, "first_fight": site or "A", "setups": {},
                                    "agents": agents, "tracks": tracks},

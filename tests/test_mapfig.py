@@ -110,3 +110,52 @@ def test_pieces_spread_apart():
     out = MF.spread([(100, 100), (101, 100)], 30, 20)
     import math
     assert math.dist(out[0], out[1]) >= 29 or max(math.dist(o, p) for o, p in zip(out, [(100, 100), (101, 100)])) >= 19.9
+
+
+def test_callout_fix_warps_the_image_too():
+    import cv2
+    fix = (1.0029, -0.0801, 0.1319, 0.1005, 1.0385, -0.1653)     # Sunset の CALLOUT_FIX と同じ形
+    base = FX.syn_base(1024)
+    cs = [c for c in FX.syn_meta()["callouts"] if c["name"] != "Spawn"]
+    fixed = [{**c, "x": fix[0] * c["x"] + fix[1] * c["y"] + fix[2], "y": fix[3] * c["x"] + fix[4] * c["y"] + fix[5]} for c in cs]
+    assert MF.check_alignment(base, fixed, [])["switch"] is True        # 画像をそのままだと外れる
+    warped = MF.apply_fix(base, fix)
+    assert warped.shape == base.shape
+    assert MF.check_alignment(warped, fixed, [])["switch"] is False      # 画像にも掛ければ乗る
+    assert warped[0, 0, 3] == 0 or warped[:, :, 3].min() == 0            # 外は透明
+
+
+def test_official_image_applies_fix_for_sunset(tmp_path, monkeypatch):
+    import cv2
+    d = tmp_path / "_cache" / "map_icons"
+    d.mkdir(parents=True)
+    cv2.imwrite(str(d / "sunset.png"), FX.syn_base(512))
+    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
+    a = MF.official_image(_cfg(tmp_path), "Sunset")
+    b = MF.apply_fix(MF._to_bgra(cv2.imread(str(d / "sunset.png"), cv2.IMREAD_UNCHANGED)), MF.TC.CALLOUT_FIX["sunset"])
+    assert (a == b).all()
+
+
+def test_all_floor_pixels_belong_to_an_area():
+    reg = _regions()
+    cover = np.zeros((1024, 1024), bool)
+    for polys in reg.values():
+        cover |= MF._fill(polys).astype(bool)
+    floor = FX.syn_base(1024)[:, :, 3] > 0
+    assert (cover & floor).sum() / floor.sum() >= 0.95
+
+
+def test_uv_base_is_never_filled(tmp_path, monkeypatch):
+    import cv2
+    FX.syn_patch(monkeypatch, with_base=False)
+    img = np.full((512, 512, 3), 250, np.uint8)
+    img[FX.syn_base(512)[:, :, 3] > 0] = (150, 150, 150)
+    cv2.imwrite(str(tmp_path / "uv.jpg"), img)
+    rows = [{"uv_base": str(tmp_path / "uv.jpg"), "uv": []}]
+    fig = MF.Figure("Split", _cfg(tmp_path), rows=rows)
+    assert fig.ok and fig.info["source"] == "uv_base" and not fig.regions and "MID" in fig.label_xy
+    s = fig.svg([{"mark": "1:40", "pieces": [{"agent": "Jett", "u": .5, "v": .4, "team": "def"},
+                                              {"agent": "Jett", "u": .2, "v": .2, "team": "def"}]},
+                 {"mark": "1:30", "pieces": [{"agent": "Jett", "u": .5, "v": .7, "team": "def"}]}],
+                prio={"MID": "GREEN"}, vital={"MID"}, labels=["MID"], alt="x")
+    assert "<polygon" not in s and "<path" not in s and "色分けなし" in s and ">MID<" in s
