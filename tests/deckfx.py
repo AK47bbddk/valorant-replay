@@ -208,3 +208,141 @@ def _zone_counts(dots: list, t: float) -> dict:
             continue
         out[int(p[4])][p[6]] = out[int(p[4])].get(p[6], 0) + 1
     return out
+
+
+# ====================================================================== プレイブック v4 用の合成マップ
+# 512×512 の RGBA に「A サイト・MID・B サイト」の通路を矩形で描いたもの（アルファ > 0 が通路）。
+# コールアウトは (name, super, x, y)。x, y は valorant-api の displayIcon の 0..1（回転前）。
+SYN_CALLOUTS = [
+    ("Site", "A", 0.33, 0.20), ("Main", "A", 0.18, 0.70),
+    ("Top", "Mid", 0.49, 0.23), ("Mail", "Mid", 0.50, 0.42), ("Vent", "Mid", 0.50, 0.55), ("Bottom", "Mid", 0.50, 0.78),
+    ("Main", "B", 0.82, 0.70), ("Site", "B", 0.64, 0.20),
+    ("Spawn", "Attacker Side", 0.50, 0.99), ("Spawn", "Defender Side", 0.50, 0.01),
+]
+_RECTS = [(0.45, 0.06, 0.55, 0.12), (0.45, 0.12, 0.55, 0.88), (0.45, 0.88, 0.55, 0.94),
+          (0.08, 0.10, 0.36, 0.28), (0.14, 0.28, 0.22, 0.88), (0.14, 0.80, 0.60, 0.88),
+          (0.64, 0.10, 0.92, 0.28), (0.78, 0.28, 0.86, 0.88), (0.40, 0.80, 0.86, 0.88),
+          (0.36, 0.20, 0.45, 0.26), (0.55, 0.20, 0.64, 0.26)]
+
+
+def syn_base(n: int = 512):
+    """合成マップ（BGRA）。左上に目印の青い四角、右下に赤い四角（向きの確認用）。"""
+    import numpy as np
+    img = np.zeros((n, n, 4), np.uint8)
+    for x0, y0, x1, y1 in _RECTS:
+        img[int(y0 * n):int(y1 * n), int(x0 * n):int(x1 * n)] = (200, 200, 200, 255)
+    img[int(.11 * n):int(.16 * n), int(.10 * n):int(.15 * n)] = (255, 0, 0, 255)      # 青（BGR）
+    img[int(.80 * n):int(.85 * n), int(.55 * n):int(.60 * n)] = (0, 0, 255, 255)      # 赤
+    return img
+
+
+def syn_meta() -> dict:
+    cs = [{"name": a, "super": b, "x": x, "y": y} for a, b, x, y in SYN_CALLOUTS]
+    return {"name": "Split", "icon": None, "callouts": cs, "spawns": {"攻撃": (0.5, 0.93), "防衛": (0.5, 0.08)},
+            "scale": {}}
+
+
+def syn_patch(monkeypatch, with_base: bool = True):
+    """ネットワークなしで Figure を作れるようにする（load_map と base_image を合成に差し替える）。"""
+    from vreplay import mapfig as MF
+    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: syn_meta())
+    monkeypatch.setattr(MF, "official_image", lambda *a, **k: syn_base(1024) if with_base else None)
+    monkeypatch.setattr("vreplay.agents.load_icons", lambda *a, **k: {})
+
+
+# ---- 合成マップ上の report.json（プレイブック v4 のテスト用）。点は合成コールアウトの座標（T は恒等）
+_PL = {"Jett": "Jett", "Omen": "Omen"}
+_SYN_AG = {"PRX": ["Jett", "Omen", "Sova", "Viper", "Cypher"], "LOUD": ["Raze", "Sage", "Fade", "Killjoy", "Skye"]}
+_SYN_PL = {t: [f"{t}p{i}" for i in range(5)] for t in _SYN_AG}
+_SYN_POS = {f"{sup} {nm}" if sup in ("A", "B") else f"{sup} {nm}": (sup, nm, x, y) for nm, sup, x, y in SYN_CALLOUTS}
+# 守りの配置（5 人）。1:40 → 1:20 で動くもの・動かないもの
+_DEF_PATS = [
+    (["Mid Mail", "Mid Vent", "Mid Top", "A Site", "B Site"], None),                     # 1-3-1 開幕プッシュ
+    (["B Site", "B Site", "B Site", "B Site", "A Site"], None),                          # 1-0-4 スタック
+    (["A Site", "A Site", "B Site", "B Site", "B Site"], None),                          # 2-0-3 形だけ
+]
+_ATK_PATS = [
+    (["A Main", "A Main", "A Main", "Mid Vent", "B Main"], "A"),
+    (["Mid Vent", "Mid Vent", "Mid Vent", "A Main", "B Main"], "B"),
+    (["B Main", "B Main", "B Main", "Mid Vent", "A Main"], "B"),
+]
+_LANE_Y = {"A Main": (0.18, 0.88), "Mid Vent": (0.5, 0.88), "Mid Mail": (0.5, 0.88), "B Main": (0.82, 0.88)}
+
+
+def _pt(place, e, spawn=False):
+    sup, nm, x, y = _SYN_POS[place]
+    zone = sup
+    callout = f"{sup} {nm}" if sup in ("A", "B") else nm
+    return [e, x, y, 0.9, "det", zone, callout]
+
+
+def report_v4(mid, t1, t2, seed, map_name="Split"):
+    """24 ラウンド。1:40 の配置・追跡・キルを持つ合成 report.json（deck.records() が読める形）。"""
+    T_ = {"mirror": False, "theta": 0.0, "scale": 1.0, "tx": 0.5, "ty": 0.5, "aspect": 1.0, "confidence": 0.9}
+    rnd = random.Random(seed)
+    name = {1: t1, 2: t2}
+    rounds, trounds, s1, s2 = [], {}, 0, 0
+    for n in range(1, 25):
+        side1 = "攻撃" if n <= 12 else "防衛"
+        atk_no = 1 if side1 == "攻撃" else 2
+        def_no = 3 - atk_no
+        t0 = 200.0 * n
+        dpat = _DEF_PATS[(n + seed + def_no) % len(_DEF_PATS)][0]
+        apat, asite = _ATK_PATS[(n * 2 + seed + atk_no) % len(_ATK_PATS)]
+        planted = n % 4 != 0
+        plant_e = [30, 45, 60][n % 3] if planted else None
+        site = asite if planted else None
+        w = rnd.choice([1, 2])
+        s1 += w == 1
+        s2 += w == 2
+        tracks, agents = {}, {"1:40": [], "1:30": []}
+        for no, pat in ((def_no, dpat), (atk_no, apat)):
+            ags = _SYN_AG[name[no]]
+            tr = {}
+            for ag, pl in zip(ags, pat):
+                pts = []
+                for e in (0, 10, 20, 25, 40, 60):
+                    here = pl
+                    if no == atk_no and e >= 25:
+                        here = f"{site or 'A'} Site" if e >= 40 else pl
+                    if no == def_no and e >= 40 and pat is dpat and plant_e and e >= plant_e - 10:
+                        here = f"{site} Site" if site else pl
+                    pts.append(_pt(here, e))
+                if planted:
+                    pts.append(_pt(f"{site} Site", plant_e + 12))
+                tr[ag] = pts
+                if no == atk_no:
+                    x, y = _LANE_Y[pl]
+                    z = {"A Main": "A", "B Main": "B"}.get(pl, "Mid")
+                    agents["1:40"].append({"team": no, "agent": ag, "x": x, "y": y, "zone": "攻撃側", "callout": "Spawn"})
+                else:
+                    p0 = _pt(pl, 0)
+                    agents["1:40"].append({"team": no, "agent": ag, "x": p0[1], "y": p0[2], "zone": p0[5], "callout": p0[6]})
+            tracks[str(no)] = tr
+        kills = []
+        for i in range(4):
+            kt = rnd.choice([1, 2])
+            kills.append({"t": t0 + 18 + i * 12, "killer": _SYN_PL[name[kt]][i % 5], "killer_team": name[kt],
+                          "victim": _SYN_PL[name[3 - kt]][(i + 1) % 5], "victim_team": name[3 - kt], "weapon": "vandal"})
+        if planted:
+            kills.append({"t": t0 + plant_e + 8, "killer": _SYN_PL[name[def_no]][0], "killer_team": name[def_no],
+                          "victim": _SYN_PL[name[atk_no]][0], "victim_team": name[atk_no], "weapon": "vandal"})
+        kills.sort(key=lambda k: k["t"])
+        rounds.append({"n": n, "winner": name[w], "winner_no": w, "score": f"{s1}-{s2}", "how": "defuse" if planted else "elim",
+                       "side": side1 if w == 1 else ("防衛" if side1 == "攻撃" else "攻撃"), "side1": side1,
+                       "eco1": "pistol" if n in (1, 13) else "full", "eco2": "pistol" if n in (1, 13) else "full",
+                       "t_drop": t0, "plant_t": t0 + plant_e if planted else None, "duration": "1:20", "kills": kills,
+                       "ults": ([{"t": t0 + 30, "player": _SYN_PL[name[w]][1], "team": name[w], "agent": _SYN_AG[name[w]][1]}]
+                                if n % 3 == 0 else []), "yt_url": f"https://youtu.be/x?t={int(t0)}",
+                       "tactics": {"aligned": True, "timeline": {"1:15": {"1": {"A": 1}, "2": {"B": 1}}},
+                                   "plant_site": site, "plant_zones": {}, "first_fight": site or "A", "setups": {},
+                                   "agents": agents, "tracks": tracks},
+                       "reason": {"tags": ["1ピック"], "main": "1ピック"}, "notes": [], "weapons": {}})
+        trounds[str(n)] = {"start": t0, "plant": t0 + plant_e if planted else None, "end": t0 + 100, "side1": side1,
+                           "site": site}
+    players = [{"name": p, "agent": a, "team": no} for no, t in ((1, t1), (2, t2)) for p, a in zip(_SYN_PL[t], _SYN_AG[t])]
+    cs = [{"name": nm, "super": sup, "x": x, "y": y} for nm, sup, x, y in SYN_CALLOUTS]
+    return {"match_id": mid, "order": 1, "team1": t1, "team2": t2, "tag1": t1, "tag2": t2, "map": map_name,
+            "date": f"2026-10-{10 + seed % 10:02d}", "event": "Champions", "stage": "Playoffs", "score1": s1, "score2": s2,
+            "players": players, "rounds": rounds, "video_ok": True,
+            "tactics": {"aligned": True, "transform": T_, "positions": [], "rounds": trounds, "callouts_placed": cs}}
