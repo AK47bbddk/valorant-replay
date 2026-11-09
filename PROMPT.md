@@ -323,6 +323,8 @@ vreplay pick --map Sunset --team OURS --side 攻撃 --hand "B スプリット" -
 - 計測：動画取得・キャリブレーション・スキャン・素材づくり・Notion 書き込みなどの所要時間と、そのときの CPU・GPU・RAM を記録し、ログ・`perf.json`・HTML レポート・Notion に表示する。
 - どこかの解析が失敗しても、VLR 由来のデータとスクリーンショットだけでページは出す（部分失敗を許す）。
 - 秘密情報（Notion トークン、YouTube cookies）は Colab のシークレット／Drive に置き、リポジトリに入れない。
+- 通知：`vreplay run` / `batch` / `playbook` の完了・失敗を ntfy（`notify.url` か環境変数 `VREPLAY_NOTIFY_URL`）または Discord Webhook に送る。URL が無ければ何もせず、通信が失敗しても本体は止めない（`--no-notify` で抑止）。
+- `batch` は同じマップの失敗が 3 回続く・低解像度しか取れない状態が 3 マップ続くなど、放っておくと全部失敗する状態なら途中でも 1 回だけエラー通知を送る。
 - テストは実際の放送から切り出した HUD 部分（`tests/fixtures`）と合成データで、ネットワークなしで通ること（`pytest`）。
 
 ## 受け入れ条件
