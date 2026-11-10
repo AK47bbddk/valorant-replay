@@ -39,6 +39,13 @@ walls:
 - [0.3198, 0.2490, 0.3198, 0.2868]      # 8 B Market 北の通路
 - [0.7828, 0.2355, 0.8451, 0.2355]      # 9 Mid Top | A Link
 - [0.6777, 0.3382, 0.7388, 0.3382]      # 10 Mid Top 南東の通路
+# 2026-11-11 のスポーン出口4本。指示書の初期値（各出口のボトルネック中点を通る短い線分）では
+# 通路幅を塞げずスポーン区画が外とつながったままだったので、同じ向きのまま両端を
+# 最初の歩行不可画素まで延長した（端点の調整は指示書で許容）。
+- [0.4644, 0.7904, 0.5338, 0.7148]      # 11 T 北出口
+- [0.6009, 0.8239, 0.6492, 0.8722]      # 12 T 東出口
+- [0.4155, 0.1430, 0.3392, 0.1158]      # 13 CT 南西出口
+- [0.6593, 0.1414, 0.5899, 0.2169]      # 14 CT 東出口
 areas:
 - name: A Main
   callouts:
@@ -166,6 +173,32 @@ areas:
     hold: 容易
   note: C10 より手前（B Lobby 側）の通路。C10 は B Main と B Site の境（2026-11-11 青木の決定）。B 攻めの正面で、取りやすいが単独では浅く、Market との挟みで真価
   card: true
+- name: T Spawn
+  callouts:
+  - 攻撃側 Spawn
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 低
+    branch: なし
+    long: なし
+    hold: 容易
+  note: 攻め側スポーン（暫定）。出口4本の wall で外と区切る。評価は暫定で、プレイの判断には使わない
+- name: CT Spawn
+  callouts:
+  - 防衛側 Spawn
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 低
+    branch: なし
+    long: なし
+    hold: 容易
+  note: 守り側スポーン（暫定）。出口4本の wall で外と区切る。評価は暫定で、プレイの判断には使わない
 
 hands:
   defense:

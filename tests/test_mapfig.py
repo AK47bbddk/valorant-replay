@@ -220,7 +220,7 @@ def test_kb_chokes_are_read():
 def test_kb_walls_are_read():
     """kb がマップの wall（青木の境界線）を読める。形式は 4 要素のリストと辞書。"""
     walls = K.walls(K.load({}).map("Sunset"))
-    assert len(walls) == 10
+    assert len(walls) == 14
     assert all(set(w) == {"u1", "v1", "u2", "v2"} for w in walls)
     assert K.walls({"walls": [[0.1, 0.2, 0.3, 0.4]]}) == [{"u1": 0.1, "v1": 0.2, "u2": 0.3, "v2": 0.4}]
     assert K.walls({"walls": [{"u1": 0.1, "v1": 0.2, "u2": 0.3, "v2": 0.4}]})[0]["u2"] == 0.3

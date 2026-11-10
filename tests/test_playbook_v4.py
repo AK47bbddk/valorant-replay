@@ -589,3 +589,63 @@ def test_sunset_wall6_west_side_is_a_site():
     assert (u > 0.8927).any()
 
 
+# ====================================================================== スポーン2エリア（2026-11-11）
+def test_sunset_spawn_areas_and_walls_separate_from_the_map():
+    """受け入れ条件：4本のスポーン出口 wall を入れた状態で、攻撃側 Spawn の地点は T Spawn、
+    防衛側 Spawn の地点は CT Spawn になり、スポーン区画から B Lobby / A Lobby / Mid Top /
+    B Market / A Link へ wall を越えずには到達できないこと。"""
+    import cv2
+    import numpy as np
+
+    from vreplay import kb as K
+    from vreplay import mapfig as MF
+
+    kbm = K.load({}).map("Sunset")
+    ar = _sunset_areas()
+    cs = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]} for v in ar.values()]
+    reg = MF.area_regions(_sunset_base(), cs, kbm, k=0)
+    atk, dfd = ar["攻撃側 Spawn"], ar["防衛側 Spawn"]
+    assert MF.contains(reg.get("T Spawn", []), atk["x"], atk["y"])
+    assert MF.contains(reg.get("CT Spawn", []), dfd["x"], dfd["y"])
+    assert not MF.contains(reg.get("CT Spawn", []), atk["x"], atk["y"])
+    assert not MF.contains(reg.get("T Spawn", []), dfd["x"], dfd["y"])
+
+    walls = K.walls(kbm)[10:]                       # 今回追加した出口4本だけでも分離できること
+    n = 256
+    view = MF.rotate_image(_sunset_base(), 0)
+    walk = cv2.resize((view[:, :, 3] > 0).astype(np.uint8), (n, n),
+                      interpolation=cv2.INTER_NEAREST) > 0
+    seg = walk & ~MF._wall_cut_mask(walls, 0, n)
+    _n, comp = cv2.connectedComponents(seg.astype(np.uint8), connectivity=8)
+
+    def comp_at(p):
+        ix = min(n - 1, max(0, int(p["x"] * n)))
+        iy = min(n - 1, max(0, int(p["y"] * n)))
+        q = MF._nearest_walkable(seg, ix, iy)
+        return int(comp.ravel()[q]) if q >= 0 else -1
+
+    anchors = ("B Lobby", "A Lobby", "Mid Top", "B Market", "A Link")
+    for spawn, others in ((atk, anchors), (dfd, anchors)):
+        c = comp_at(spawn)
+        assert c > 0
+        for a in others:
+            assert comp_at(ar[a]) != c, (spawn, a)
+    assert comp_at(atk) != comp_at(dfd)
+
+
+def test_sunset_a_site_region_keeps_the_elbow_band():
+    """エルボー監査：A Elbow は kb で A Site 側なので、A Site の領域にエルボー地点が入り、
+    配置図のラベル候補（deck._area_xy）にも A Elbow が含まれること。
+    本文に Elbow が出ないのは report.json の setup に Elbow の出現が無いため（データ側）。"""
+    from vreplay import deck as D
+    from vreplay import kb as K
+    from vreplay import mapfig as MF
+
+    kbm = K.load({}).map("Sunset")
+    ar = _sunset_areas()
+    cs = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]} for v in ar.values()]
+    reg = MF.area_regions(_sunset_base(), cs, kbm, k=0)
+    elbow = ar["A Elbow"]
+    assert MF.contains(reg["A Site"], elbow["x"], elbow["y"])
+    assert not MF.contains(reg.get("A Main", []), elbow["x"], elbow["y"])
+    assert "A Elbow" in D._area_xy(cs)

@@ -65,6 +65,33 @@ def _is_spawn_callout(c: dict) -> bool:
     return str(c.get("name") or "").lower() == "spawn" or "spawn" in str(c.get("super") or "").lower()
 
 
+def _spawn_side(c: dict) -> str | None:
+    """スポーンのコールアウトが攻め側か守り側か（'attack' / 'defend' / None）。"""
+    s = f"{c.get('super') or ''} {c.get('name') or ''}".lower()
+    if any(t in s for t in ("attacker", "attack", "攻撃")):
+        return "attack"
+    if any(t in s for t in ("defender", "defend", "防衛")):
+        return "defend"
+    return None
+
+
+def spawn_area(c: dict, kb_map: dict | None) -> str | None:
+    """スポーンのコールアウトに対応する kb のエリア名（例: 攻撃側 Spawn → T Spawn）。
+
+    `callout_area` はスポーンをどちらも「Spawn」にするため、kb の callouts に書いた
+    「攻撃側 Spawn」「防衛側 Spawn」と side の語で対応づける。対応するエリアが無ければ None。"""
+    side = _spawn_side(c)
+    if side is None:
+        return None
+    toks = ("attacker", "attack", "攻撃") if side == "attack" else ("defender", "defend", "防衛")
+    for a in (kb_map or {}).get("areas") or []:
+        for co in a.get("callouts") or []:
+            low = str(co).lower()
+            if "spawn" in low and any(t in low for t in toks):
+                return a.get("name")
+    return None
+
+
 def callout_area(c: dict) -> str | None:
     """コールアウト → records() のエリア名と同じ呼び方（tactics.area_name）。"""
     return TC.area_name(c.get("super"), c.get("name"))
@@ -758,7 +785,10 @@ def area_regions(base: np.ndarray, callouts: list[dict], kb_map: dict | None, *,
     どのエリアにも入れない（境界を直線のまま保つ。チョークを回り込む領域の混入を防ぐ）。
     chokes が無いマップは従来どおり（測地距離のみ）。
     重み（バイタルの VITAL_SHRINK、`shrink` 指定）は距離に掛けて、大きいほど狭くする。
-    通路の画素は、断面バリアの画素と、スポーンがいちばん近い画素を除いてどれかのエリアに入る。"""
+    スポーンのコールアウトは、kb の areas に同じ side のスポーンエリア（例: 攻撃側 Spawn →
+    T Spawn）があればその区画の種にし、無ければ従来どおりどのエリアにも入れない。
+    通路の画素は、断面バリアの画素と、どのエリアにもならないスポーンがいちばん近い画素を除いて
+    どれかのエリアに入る。"""
     from . import kb as K
 
     cs = [c for c in callouts if not _is_spawn_callout(c) and callout_area(c)]
@@ -766,8 +796,16 @@ def area_regions(base: np.ndarray, callouts: list[dict], kb_map: dict | None, *,
     groups = area_groups(kb_map)
     view = rotate_image(base, k)
     pts = [to_view(float(c["x"]), float(c["y"]), k) for c in cs]
-    sp_pts = [to_view(float(c["x"]), float(c["y"]), k) for c in sp]
     names = [groups.get(norm(callout_area(c)), callout_area(c)) for c in cs]
+    sp_pts = []
+    for c in sp:
+        p = to_view(float(c["x"]), float(c["y"]), k)
+        nm = spawn_area(c, kb_map)                  # T Spawn / CT Spawn があるマップは区画の種にする
+        if nm:
+            pts.append(p)
+            names.append(nm)
+        else:
+            sp_pts.append(p)
     wts = dict(area_weights(kb_map))
     chokes = K.chokes(kb_map)
     walls = K.walls(kb_map)
