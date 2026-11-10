@@ -205,15 +205,26 @@ def test_vital_shrinks_so_it_does_not_reach_into_the_site():
 
 # ====================================================================== チョーク境界モデル（2026-11-10）
 def test_kb_chokes_are_read():
-    """kb がマップのチョーク（点と、その点で切り替わる 2 エリア）を読める。形式は 4 要素のリストと辞書。"""
+    """kb がマップのチョーク（点と、その点で切り替わる 2 エリア）を読める。形式は 4 要素のリストと辞書。
+    Sunset は 2026-11-11 に A Elbow の縦帯チョークを削除したので 7 点。"""
     kbm = K.load({}).map("Sunset")
     ch = K.chokes(kbm)
-    assert len(ch) == 8
+    assert len(ch) == 7
     assert all({"x", "y", "areas"} == set(c) for c in ch)
     assert all(len(c["areas"]) == 2 for c in ch)
     assert K.chokes({"chokes": [{"x": 0.1, "y": 0.2, "between": ["Mid", "B Site"]}]}) == \
         [{"x": 0.1, "y": 0.2, "areas": ["Mid", "B Site"]}]
     assert K.chokes({"chokes": [[0.3, 0.4, "A Main", "A Site"]]})[0]["areas"] == ["A Main", "A Site"]
+
+
+def test_kb_walls_are_read():
+    """kb がマップの wall（青木の境界線）を読める。形式は 4 要素のリストと辞書。"""
+    walls = K.walls(K.load({}).map("Sunset"))
+    assert len(walls) == 10
+    assert all(set(w) == {"u1", "v1", "u2", "v2"} for w in walls)
+    assert K.walls({"walls": [[0.1, 0.2, 0.3, 0.4]]}) == [{"u1": 0.1, "v1": 0.2, "u2": 0.3, "v2": 0.4}]
+    assert K.walls({"walls": [{"u1": 0.1, "v1": 0.2, "u2": 0.3, "v2": 0.4}]})[0]["u2"] == 0.3
+    assert K.walls(None) == [] and K.walls({}) == []
 
 
 def test_geodesic_distance_takes_the_path():

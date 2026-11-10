@@ -268,13 +268,17 @@ def _polys(mask: np.ndarray) -> list[list[list[float]]]:
     return out
 
 
-GEO_TAG = "choke-segment-v3"    # 方式が変わったら上げる（キャッシュのキーに入る）
+GEO_TAG = "choke-segment-v4"    # 方式が変わったら上げる（キャッシュのキーに入る）
 CHOKE_CUT = 0.025                # 切れ目の円の半径（表示 0..1）
 CHOKE_PROBE = 0.04               # 局所分離の検査で、チョーク点から両側へ取るプローブの距離（表示 0..1）
 CHOKE_LOCAL = 0.08               # 局所分離を見る範囲（チョーク点からの測地距離、表示 0..1）
 CHOKE_BARRIER_MARGIN = 4         # 断面バリアを歩行不可領域の外へ伸ばす余裕（256px 画素）
 CHOKE_BARRIER_WIDTH = 3          # 断面バリアの太さ（256px 画素）
 CHOKE_BARRIER_DEG = 1            # 断面バリアの向きを探す刻み（度）。移動方向に垂直な向きを最小断面で選ぶ
+WALL_THICK = 3                   # kb の wall（青木の境界線）を焼き込む切れ目の太さ（256px 画素）
+WALL_NEAR = 0.02                 # この距離以内に wall があるチョークは円・バリアを使わない（表示 0..1）
+WALL_SS = 4                      # wall を焼き込むときの拡大率。整数丸めで線が南へずれ、サイトが
+#                                  1〜2px はみ出すのを抑える（表示 0..1 で 0.004 の許容に収める）
 
 
 def _nearest_walkable(walk: np.ndarray, ix: int, iy: int) -> int:
@@ -337,6 +341,36 @@ def _choke_cut_mask(walk: np.ndarray, choke_pts: list[tuple[float, float]],
         cx, cy = int(round(x * n)), int(round(y * n))
         cv2.circle(cut, (cx, cy), max(1, int(round(r * n))), 1, -1)
     return cut > 0
+
+
+def _wall_cut_mask(walls: list[dict], k: int, n: int, thick: int | None = None) -> np.ndarray:
+    """kb の wall（displayIcon の線分）を表示の向きに回し、256 グリッドへ焼き込んだ切れ目。
+    線分の両端は壁に届いている前提で、延長しない（2026-11-11 青木の線分）。
+    整数丸めで線が南へずれてサイトの領域がはみ出すのを抑えるため、WALL_SS 倍で描いてから
+    縮小する（WALL_THICK は 256px 画素の太さなので WALL_SS 倍する）。"""
+    thick = WALL_THICK if thick is None else thick
+    ss = max(1, int(WALL_SS))
+    m = np.zeros((n * ss, n * ss), np.uint8)
+    for w in walls:
+        x1, y1 = to_view(float(w["u1"]), float(w["v1"]), k)
+        x2, y2 = to_view(float(w["u2"]), float(w["v2"]), k)
+        cv2.line(m, (int(round(x1 * n * ss)), int(round(y1 * n * ss))),
+                 (int(round(x2 * n * ss)), int(round(y2 * n * ss))), 1, thick * ss)
+    if ss > 1:
+        m = cv2.resize(m, (n, n), interpolation=cv2.INTER_AREA)
+    return m > 0
+
+
+def _dist_to_walls(u: float, v: float, walls: list[dict]) -> float:
+    """点 (u, v) から wall（線分）までの最短距離（displayIcon の 0..1）。"""
+    best = 9.0
+    for w in walls:
+        x1, y1, x2, y2 = float(w["u1"]), float(w["v1"]), float(w["u2"]), float(w["v2"])
+        dx, dy = x2 - x1, y2 - y1
+        dd = dx * dx + dy * dy
+        t = 0.0 if dd <= 0 else max(0.0, min(1.0, ((u - x1) * dx + (v - y1) * dy) / dd))
+        best = min(best, math.hypot(u - (x1 + t * dx), v - (y1 + t * dy)))
+    return best
 
 
 def _nearest_callout(pts: list[tuple[float, float]], names: list[str], area: str,
@@ -563,17 +597,29 @@ def _local_separated(walk: np.ndarray, cut: np.ndarray, cp: tuple[float, float],
 
 
 def _choke_cuts(walk: np.ndarray, sides: list[tuple[dict, tuple[float, float], list]],
-                n: int) -> tuple[np.ndarray, list[float], list[list[int | None]], np.ndarray]:
+                n: int, walls: list[dict] | None = None,
+                wall_cut: np.ndarray | None = None) -> tuple[np.ndarray, list[float], list[list[int | None]], np.ndarray]:
     """チョークの切れ目と、局所分離のプローブ、断面バリアの画素。
 
     円（CHOKE_CUT）で局所分離できないチョーク（＝領域がチョークを回り込むおそれがある
     チョーク）は、円ではなく断面バリア（`_barrier_mask`）で切る。円で局所分離できる
-    チョークは円のまま。同一エリアのチョークは分離を要求しない（円だけ）。"""
+    チョークは円のまま。同一エリアのチョークは分離を要求しない（円だけ）。
+
+    kb に wall（青木の境界線）があるときは、その切れ目（`wall_cut`）を先に入れ、
+    近く（WALL_NEAR 以内）に wall があるチョークは円・バリアを使わない（wall を優先）。
+    wall が無いチョークは従来どおり。"""
+    skip = [bool(walls) and _dist_to_walls(float(ch["x"]), float(ch["y"]), walls) <= WALL_NEAR
+            for ch, _cp, _near in sides]
     radii = [CHOKE_CUT] * len(sides)
-    cut = _choke_cut_mask(walk, [s[1] for s in sides], radii, n)
+    keep = [i for i, s in enumerate(skip) if not s]
+    cut = _choke_cut_mask(walk, [sides[i][1] for i in keep], [radii[i] for i in keep], n)
+    if wall_cut is not None:
+        cut = cut | wall_cut
     probes = _probe_indices(walk, sides, n)
     barrier = np.zeros((n, n), bool)
     for i, (ch, cp, _near) in enumerate(sides):
+        if skip[i]:
+            continue
         areas = ch.get("areas") or []
         if len(areas) < 2 or areas[0] == areas[1]:
             continue
@@ -604,10 +650,14 @@ def _fill_cut(assigned: np.ndarray, best_id: np.ndarray, cut: np.ndarray, n: int
 
 def _segment_regions(walk: np.ndarray, view: np.ndarray, pts: list[tuple[float, float]],
                      names: list[str], sp_pts: list[tuple[float, float]], wts: dict[str, float],
-                     chokes: list[dict], k: int, n: int) -> dict[str, list[list[list[float]]]]:
-    """チョークの切れ目で通路を区画に分けてから、区画ごとにエリアを割り当てる。"""
+                     chokes: list[dict], k: int, n: int,
+                     walls: list[dict] | None = None) -> dict[str, list[list[list[float]]]]:
+    """チョークの切れ目で通路を区画に分けてから、区画ごとにエリアを割り当てる。
+    kb に wall（青木の境界線）があれば先に焼き込み、近くに wall があるチョークは
+    円・バリアを使わない（`_choke_cuts`）。"""
     sides = _choke_sides(chokes, pts, names, k)
-    cut, radii, probes, barrier = _choke_cuts(walk, sides, n)
+    wall_cut = _wall_cut_mask(walls, k, n) if walls else None
+    cut, radii, probes, barrier = _choke_cuts(walk, sides, n, walls=walls, wall_cut=wall_cut)
     seg = walk & ~cut
     ncomp, comp = cv2.connectedComponents(seg.astype(np.uint8), connectivity=8)
     order = list(dict.fromkeys(names))
@@ -720,10 +770,13 @@ def area_regions(base: np.ndarray, callouts: list[dict], kb_map: dict | None, *,
     names = [groups.get(norm(callout_area(c)), callout_area(c)) for c in cs]
     wts = dict(area_weights(kb_map))
     chokes = K.chokes(kb_map)
+    walls = K.walls(kb_map)
     key = _sha(view.tobytes(), GEO_TAG,
                json.dumps([[round(p[0], 4), round(p[1], 4), n] for p, n in zip(pts, names)]),
                json.dumps([[round(p[0], 4), round(p[1], 4)] for p in sp_pts]), k,
                json.dumps([[round(c["x"], 4), round(c["y"], 4), c["areas"]] for c in chokes]),
+               json.dumps([[round(w["u1"], 4), round(w["v1"], 4), round(w["u2"], 4), round(w["v2"], 4)]
+                           for w in walls]),
                json.dumps(sorted((n, round(w, 4)) for n, w in wts.items())))
     cp = None
     if cache_dir is not None and map_name:
@@ -740,7 +793,7 @@ def area_regions(base: np.ndarray, callouts: list[dict], kb_map: dict | None, *,
     n = 256
     walk = cv2.resize((view[:, :, 3] > 0).astype(np.uint8), (n, n), interpolation=cv2.INTER_NEAREST) > 0
     if chokes:
-        regions = _segment_regions(walk, view, pts, names, sp_pts, wts, chokes, k, n)
+        regions = _segment_regions(walk, view, pts, names, sp_pts, wts, chokes, k, n, walls)
     else:
         seeds: list[tuple[tuple[float, float], str | None]] = [(p, nm) for p, nm in zip(pts, names)]
         for p in sp_pts:

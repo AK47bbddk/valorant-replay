@@ -101,6 +101,29 @@ def chokes(kb_map: dict | None) -> list[dict]:
     return out
 
 
+def walls(kb_map: dict | None) -> list[dict]:
+    """マップの壁（`config/kb/maps/<map>.yaml` の `walls`）を正規化して返す。
+
+    各要素は `{u1, v1, u2, v2}`。displayIcon の 0..1（CALLOUT_FIX 補正後）の線分で、
+    通路のボトルネックに壁から壁まで引かれている（青木の境界線）。mapfig はこれを
+    歩行マスクの切れ目として焼き込む。書ける形は 4 要素のリストか辞書。"""
+    out = []
+    for w in (kb_map or {}).get("walls") or []:
+        if isinstance(w, dict):
+            vals = [w.get("u1"), w.get("v1"), w.get("u2"), w.get("v2")]
+        else:
+            try:
+                vals = list(w)[:4]
+            except TypeError:
+                continue
+        try:
+            u1, v1, u2, v2 = (float(x) for x in vals)
+        except (TypeError, ValueError):
+            continue
+        out.append({"u1": u1, "v1": v1, "u2": u2, "v2": v2})
+    return out
+
+
 def _merge(a, b):
     """dict は再帰的に、hands・areas などの名前つきリストは name で重ねる。"""
     if isinstance(a, dict) and isinstance(b, dict):
