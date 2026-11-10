@@ -142,7 +142,8 @@ Notion に次の 2 つのデータソースがすでにある。新しい DB は
    - **v4**（`vreplay playbook --v4 --team PRX --map Split`、または `python scripts/playbook_v4.py "<report.json の glob>" --team … --map … --out …`）は 3 つのモジュールに分ける（方針は `docs/PLAYBOOK_v4.md`）。
      `vreplay/mapfig.py`＝図（下地は valorant-api の displayIcon だけ・TactiVal と同じ向き・エリアの形はアルファ×コールアウトのボロノイ×kb の `areas[].callouts`・ラベルは多角形の重心）、
      `vreplay/gamemodel.py`＝ラウンド × 局面 → ノードの判定（描画しない・しきい値は `config/kb/game_model.yaml` の `params`）、`vreplay/playbook_v4.py`＝冊子の HTML（スライドごとに 1 関数）。
-     エリアの形はコールアウトへの近さで分け、バイタルは距離を 1.35 倍（kb の `shrink` で変更可）で測ってサイトの奥まで伸ばさない。kb の `card: true` のエリアは追跡に関係なくエリアカードを出す。
+      エリアの形はコールアウトへの近さで分け、バイタルは距離を 1.35 倍（kb の `shrink` で変更可）で測ってサイトの奥まで伸ばさない。kb の `card: true` のエリアは追跡に関係なくエリアカードを出す。
+      **エリアはチョークを跨がない**（2026-11-10）：チョーク手前（ロビー〜チョーク本体）のコールアウトと、チョークの先（サイト内・スポーン側）のコールアウトを同じエリアに混ぜない。チョーク本体は手前側のエリアに属し、バイタルの範囲もチョーク手前まで（Sunset の A Main に A Elbow を入れない、が前例）。判定は `vreplay.kb.is_entry_callout` と `vreplay.kb.choke_crossings`（`tests/test_kb.py`）で固定する。kb が無いマップの自動生成にも同じ入口系の一覧を使う。
     設定 `playbook.map_orientation`：`tactival`（既定）／`api`。マップ画像が取れないときは図を出さず「マップ画像がありません（オフライン）」と書く。
 
 コマンド例：

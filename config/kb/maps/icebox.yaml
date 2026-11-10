@@ -1,0 +1,95 @@
+# ドラフト（2026-11-10、Muse 作成・GLM レビューと青木の決定を反映済み）。エリアと評価のみ。手（hands）は未収録。
+map: Icebox
+summary: 高低差の大きいマップ。A はベルトとパイプの立体、B はイエローとグリーンの2ルート。エリアは平面より高さで分けて考える。
+entry_callouts:
+- A Belt
+- A Nest
+- A Pipes
+- B Garage
+- B Yellow
+- B Green
+- B Cubby
+areas:
+- name: A Approach
+  callouts:
+  - A Belt
+  - A Nest
+  - A Pipes
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: A 進入帯。ベルトの高所取りが核で、取ると Nest からサイト全体を見られる
+- name: A Site
+  callouts:
+  - A Site
+  - A Rafters
+  - A Screen
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: サイト内。Rafters と Screen 裏のクリアリングが多い立体サイト
+- name: Mid
+  callouts:
+  - Mid Blue
+  - Mid Boiler
+  - Mid Pallet
+  vital: false
+  choke: false
+  dry: true
+  eval:
+    distance: 遠
+    take: 中
+    branch: あり
+    long: あり
+    hold: 困難
+  note: 細く長いミッド。両サイトの裏へ通じるため圧の価値は高いが保持は難しい
+- name: B Approach
+  callouts:
+  - B Garage
+  - B Yellow
+  - B Green
+  - B Cubby
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: あり
+    long: あり
+    hold: 困難
+  note: Yellow と Green の2ルート進入。どちらか片方だけでは浅く、両面の圧で B の守りを割る
+- name: B Site
+  callouts:
+  - B Site
+  - B Back
+  - B Kitchen
+  - B Orange
+  - B Snowman
+  - B Snow Pile
+  - B Tube
+  - B Fence
+  - B Hall
+  - B Hut
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: サイト内。Kitchen の通り抜けと Snowman 周りが保持の要点。コールアウトが多い＝クリアリング量が多いサイト

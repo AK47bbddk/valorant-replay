@@ -166,3 +166,43 @@ def test_show_stab_needs_two_shows_then_a_win_elsewhere():
     dd = [{**_it(n, None, w, form=f), "r": {**_it(n, None, w)["r"], "side": "防衛"}} for n, w, f in
           ((1, False, f1), (2, False, f1), (3, True, f2))]
     assert len(PB.stabs({"items": dd}, "防衛")) == 1
+
+
+def test_sunset_vital_area_does_not_reach_into_the_site():
+    """規則2：A Main（バイタル）の色はチョークの先（A Elbow・A Site）へ広がらない。
+    実マップのコールアウト座標（tests/fixtures）でエリアの多角形を作って確認する。"""
+    import numpy as np
+
+    from vreplay import kb as K
+    from vreplay import mapfig as MF
+
+    kbm = K.load({}).map("Sunset")
+    ar = FX.areas("sunset")
+    cs = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]} for v in ar.values()]
+    base = np.zeros((1024, 1024, 4), np.uint8)
+    base[:, :, 3] = 255                       # 全面が通路（アルファ > 0）
+    reg = MF.area_regions(base, cs, kbm, k=0)
+    assert "A Main" in reg
+    for c in ("A Elbow", "A Site", "A Link", "A Alley"):
+        assert not MF.contains(reg["A Main"], ar[c]["x"], ar[c]["y"]), c
+
+
+def test_split_vital_areas_do_not_reach_into_the_site():
+    """規則2（Split 版）：バイタル MID・A Ramps の色はチョークの先（サイト内・ヘブン）へ広がらない。
+    Sunset 版（test_sunset_vital_area_does_not_reach_into_the_site）と対になる確認。"""
+    import numpy as np
+
+    from vreplay import kb as K
+    from vreplay import mapfig as MF
+
+    kbm = K.load({}).map("Split")
+    ar = FX.areas("split")
+    cs = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]} for v in ar.values()]
+    base = np.zeros((1024, 1024, 4), np.uint8)
+    base[:, :, 3] = 255
+    reg = MF.area_regions(base, cs, kbm, k=0)
+    assert "MID" in reg and "A Ramps" in reg
+    for c in ("A Site", "B Site", "A Tower", "B Tower", "B Link"):
+        assert not MF.contains(reg["MID"], ar[c]["x"], ar[c]["y"]), ("MID", c)
+    for c in ("A Site", "A Tower", "A Screens", "A Main"):
+        assert not MF.contains(reg["A Ramps"], ar[c]["x"], ar[c]["y"]), ("A Ramps", c)

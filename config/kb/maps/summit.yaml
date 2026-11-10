@@ -1,0 +1,104 @@
+# ドラフト（2026-11-10、Muse 作成・GLM レビューと青木の決定を反映済み）。エリアと評価のみ。手（hands）は未収録。
+map: Summit
+summary: 全面ドラフト（情報が少なく評価は構造からの推定）。両サイト＋ミッドの3レーン型。
+entry_callouts:
+- A Lobby
+- A Main
+- A Garden
+- B Main
+- B Lobby
+areas:
+- name: A Main
+  callouts:
+  - A Lobby
+  - A Main
+  - A Garden
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: あり
+    long: あり
+    hold: 困難
+  note: A の手前。Garden 側への分岐がある
+- name: A Site
+  callouts:
+  - A Site
+  - A Art
+  - A Cave
+  - A Hall
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: サイト内。Cave と Hall の小部屋が多い
+- name: Mid
+  callouts:
+  - Mid Bottom
+  - Mid Top
+  - Mid Window
+  - Mid Fountain
+  - Mid Bend
+  - Mid Tiles
+  vital: false
+  choke: false
+  dry: true
+  eval:
+    distance: 遠
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: コールアウト数の多い広いミッド。分割の要否自体が要確認
+- name: B Main
+  callouts:
+  - B Main
+  - B Lobby
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: なし
+    long: あり
+    hold: 容易
+  note: B の正面（GLM レビューで B Lobby の存在を確認し追加、2026-11-10）
+- name: B Site
+  callouts:
+  - B Site
+  - B Gym
+  - B Trophy
+  - B Tower
+  - B Drop
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: サイト内。Tower の高所と Drop の落とし込み
+- name: A Link
+  callouts:
+  - A Link
+  vital: false
+  choke: false
+  dry: false
+  note: 接続コールアウト。エリアではなくリンクとして表示する（2026-11-10 青木の決定）
+- name: B Link
+  callouts:
+  - B Link
+  vital: false
+  choke: false
+  dry: false
+  note: 接続コールアウト。エリアではなくリンクとして表示する（2026-11-10 青木の決定）

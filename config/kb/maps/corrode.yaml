@@ -1,0 +1,114 @@
+# ドラフト（2026-11-10、Muse 作成・GLM レビューと青木の決定を反映済み）。エリアと評価のみ。手（hands）は未収録。
+map: Corrode
+summary: ミッドが細く、両サイトとも入口が2系統あるマップ。壁の多さでクリアリング量が多く、エリアを取るたびに人数を割く設計。
+entry_callouts:
+- A Lobby
+- A Main
+- A Yard
+- B Lobby
+- B Main
+- B Arch
+areas:
+- name: A Main
+  callouts:
+  - A Lobby
+  - A Main
+  - A Yard
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: あり
+    long: あり
+    hold: 困難
+  note: Yard まで含めた A の手前エリア。分岐があり保持は重い
+- name: A Site
+  callouts:
+  - A Site
+  - A Crane
+  - A Pocket
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: サイト内。Crane の高所と Pocket の小部屋が要点
+- name: Mid
+  callouts:
+  - Mid Bottom
+  - Mid Stairs
+  - Mid Window
+  - Mid Top
+  vital: false
+  choke: false
+  dry: true
+  eval:
+    distance: 遠
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: 細いミッド。Window と Stairs の2層で、取るにも守るにも人数が要る
+- name: B Main
+  callouts:
+  - B Lobby
+  - B Main
+  - B Arch
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: なし
+    long: あり
+    hold: 容易
+  note: Arch までの正面。A Main より一本道寄り
+- name: B Site
+  callouts:
+  - B Site
+  - B Tower
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: サイト内。Tower の高所管理が核
+- name: A Link
+  callouts:
+  - A Link
+  vital: false
+  choke: false
+  dry: false
+  note: 接続コールアウト。エリアではなくリンクとして表示する（2026-11-10 青木の決定）
+- name: B Link
+  callouts:
+  - B Link
+  vital: false
+  choke: false
+  dry: false
+  note: 接続コールアウト。エリアではなくリンクとして表示する（2026-11-10 青木の決定）
+- name: A Elbow
+  callouts:
+  - A Elbow
+  vital: false
+  choke: false
+  dry: false
+  note: 接続コールアウト。エリアではなくリンクとして表示する（2026-11-10 青木の決定）
+- name: B Elbow
+  callouts:
+  - B Elbow
+  vital: false
+  choke: false
+  dry: false
+  note: 接続コールアウト。エリアではなくリンクとして表示する（2026-11-10 青木の決定）

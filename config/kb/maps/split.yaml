@@ -4,6 +4,9 @@ summary: >-
   MID（ベント・メールボックス）を取った側がローテーションの主導権を持つマップ。攻めは「MID・A で見せて B にコンタクト」
   「A ランプを取ってヘブンに圧」、守りは「初動 A メインテイク」「サイト耐えモク＋ファストローテート」が軸。
 
+# チョーク手前の許可リスト（2026-11-10 採用。判定はこの一覧を優先する）
+entry_callouts: [A Main, A Lobby, B Main, B Lobby, B Garage]
+
 areas:
   - name: A Main
     callouts: [A Main, A Lobby]

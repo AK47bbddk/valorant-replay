@@ -31,6 +31,51 @@ def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(s or "").lower())
 
 
+# ---------------------------------------------------------------- エリアとチョーク（2026-11-10）
+# エリアはチョークを跨がない（docs/PLAYBOOK_v4.md 7 節）。チョーク手前（ロビー〜チョーク本体）の
+# コールアウトと、チョークの先（サイト内・スポーン側）のコールアウトを同じエリアに混ぜない。
+# 入口系の名前はここで「手前」と見なす（kb が無いマップの自動生成でも同じ一覧を使う）。
+# Link は入口系に入れない（2026-11-10 青木の決定：Link は Mid からサイトへ入るサイト側の接続として扱う）
+ENTRY_CALLOUTS = ("main", "lobby", "long", "short", "market", "boba", "ramps", "garage")
+
+
+def is_entry_callout(callout: str, kb_map: dict | None = None) -> bool:
+    """コールアウト名がチョーク手前（入口系）か。A Main / B Lobby / B Boba などは手前。
+    許可リスト方式（2026-11-10 青木の指示）：kb のあるマップは YAML の entry_callouts を正とし、
+    名前からの推測は kb が無いマップの下書き生成用にだけ使う。"""
+    lst = (kb_map or {}).get("entry_callouts")
+    if lst is not None:
+        return callout in lst
+    toks = [t for t in re.split(r"[^a-z0-9]+", str(callout or "").lower()) if t]
+    return any(t in ENTRY_CALLOUTS for t in toks)
+
+
+# チョーク跨ぎの例外（意図的な混在として固定、2026-11-10 青木の決定）。
+# (マップ名の小文字, エリア名) の組で指定し、それ以外の混在は従来どおり検出する。
+# - Sunset B Site の B Boba：線の引き方の問題としてサイト側で固定
+# - Bind A Short の A Cubby（小部屋は A ショートとセットで取る）、Bind B Short の B Window（窓部屋そのものがエリア）
+CHOKE_EXCEPTIONS = {("sunset", "B Site"), ("bind", "A Short"), ("bind", "B Short")}
+
+
+def choke_crossings(kb_map: dict | None) -> list[dict]:
+    """エリアがチョークを跨いでいる箇所（入口系とサイト側のコールアウトを同じエリアに混ぜた所）を返す。
+    返す要素：{area, before, after, choke, vital}。空なら規則どおり。"""
+    out = []
+    map_name = str((kb_map or {}).get("map") or "").lower()
+    has_list = (kb_map or {}).get("entry_callouts") is not None
+    for a in (kb_map or {}).get("areas") or []:
+        # 許可リストのあるマップでは例外登録を使わない（決定は一覧側で表現する）
+        if not has_list and (map_name, a.get("name")) in CHOKE_EXCEPTIONS:
+            continue
+        cs = a.get("callouts") or []
+        before = [c for c in cs if is_entry_callout(c, kb_map)]
+        after = [c for c in cs if not is_entry_callout(c, kb_map)]
+        if before and after:
+            out.append({"area": a.get("name"), "before": before, "after": after,
+                        "choke": bool(a.get("choke")), "vital": bool(a.get("vital"))})
+    return out
+
+
 def _merge(a, b):
     """dict は再帰的に、hands・areas などの名前つきリストは name で重ねる。"""
     if isinstance(a, dict) and isinstance(b, dict):

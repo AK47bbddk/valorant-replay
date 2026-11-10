@@ -1,0 +1,89 @@
+# ドラフト（2026-11-10、Muse 作成・GLM レビューと青木の決定を反映済み）。エリアと評価のみ。手（hands）は未収録。
+map: Fracture
+summary: 攻めスポーンが2方向に分かれ、守りを両面から挟む構造のマップ。サイトはどちらも入口が複数で、エリア確保は挟みの片翼として評価する。
+entry_callouts:
+- A Main
+- A Gate
+- A Dish
+- B Main
+- B Tree
+areas:
+- name: A Main
+  callouts:
+  - A Main
+  - A Gate
+  - A Dish
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: あり
+    long: あり
+    hold: 困難
+  note: 衛星側からの A 正面。Gate までが手前エリア
+- name: A Site
+  callouts:
+  - A Site
+  - A Hall
+  - A Door
+  - A Rope
+  - A Drop
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: サイト内。Drop の落とし込みと Rope の高所が要点
+- name: B Main
+  callouts:
+  - B Main
+  - B Tree
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: なし
+    long: あり
+    hold: 困難
+  note: B の正面。Tree の遮蔽越しの進行
+- name: B Site
+  callouts:
+  - B Site
+  - B Bench
+  - B Arcade
+  - B Tower
+  - B Generator
+  - B Canteen
+  - B Tunnel
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: サイト内。Tower の高所と Arcade 側の2層構造。クリアリング量が多い
+- name: A Link
+  callouts:
+  - A Link
+  vital: false
+  choke: false
+  dry: false
+  note: 接続コールアウト。エリアではなくリンクとして表示する（2026-11-10 青木の決定）
+- name: B Link
+  callouts:
+  - B Link
+  vital: false
+  choke: false
+  dry: false
+  note: 接続コールアウト。エリアではなくリンクとして表示する（2026-11-10 青木の決定）

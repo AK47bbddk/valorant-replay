@@ -1,37 +1,141 @@
-# サンセットのメタ（手と相性）。エリア名は valorant-api のコールアウト（「A Main」「Mid Top」「B Market」）。
-# when の書き方は vreplay/hands.py の先頭。detail・how は人が書く説明（プレイブックにそのまま出る）。
+# サンセットのメタ。エリア割りは青木の Tactival 分解（2026-11-10）に基づく再作成版（ドラフト）。
 map: Sunset
-summary: >-
-  A・B の 2 サイトに MID（コートヤード・トップ・タイルズ）が絡むマップ。守りは「A にどれだけ寄せるか」と
-  「MID をどうするか」、攻めは「A メインを速く取るか」「MID トップ・マーケットから B を割るか」のじゃんけんになる。
-
+summary: 'ミッドが2サイトの接続でもあるマップ。攻めはミッドと A メイン、B はマーケットとメインの挟み。守りは A メイン内側のポジションが肝。※エリア割りは青木の
+  Tactival 分解（2026-11-10）に基づく再作成版。現行 sunset.yaml との差分: サイトのエリア化、Mid Top の分離、A Link・A
+  Alley の新設。'
+entry_callouts:
+- A Main
+- A Lobby
+- B Market
+- B Main
+- B Lobby
 areas:
-  - name: A Main
-    callouts: [A Main, A Lobby]   # A Elbow はサイトの中なので入れない（2026-11-09）
-    vital: true            # コーチ指定（2026-11-09）
-    choke: true
-    dry: false
-    note: 攻めの A の入口。守りはここにスキルを返す（壊す・返す・殺す）のが基本。攻めはフラッシュ＋索敵＋デュエリストで抜ける
-  - name: Mid
-    callouts: [Mid Courtyard, Mid Top, Mid Tiles, Mid Bottom]
-    vital: true            # コーチ指定（2026-11-09）
-    choke: false
-    dry: true
-    note: トップを取るとマーケット（B）と A リンク側の両方に圧をかけられる。守りがここを押すと攻めの B スプリットが止まる
-  - name: B Market
-    callouts: [B Market, B Boba]
-    vital: false
-    card: true             # コーチ指定（2026-11-09）：エリアとして必ず出す
-    choke: true
-    dry: false
-    note: トップ壁＋マーケット → タピオカ（Boba）で B を割る入口
-  - name: B Main
-    callouts: [B Main, B Lobby]
-    vital: false
-    card: true             # コーチ指定（2026-11-09）：エリアとして必ず出す
-    choke: true
-    dry: true
-    note: B の正面。マーケットと同時に当てるとサイトの守りが割れる
+- name: A Main
+  callouts:
+  - A Main
+  - A Lobby
+  vital: true
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: なし
+    long: あり
+    hold: 容易
+  note: コーチ指定のバイタル（上限その2）。初動で取るか引くかの判断が A の攻防の起点。Tactival の矩形は Elbow 際までだが、Elbow はサイト側の現行分類を維持
+- name: A Site
+  callouts:
+  - A Site
+  - A Elbow
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: サイト内（Tactival で独立エリア）。Elbow・Alley・Link と接続が多く、設置後の保持はラーク管理が要る
+- name: A Link
+  callouts:
+  - A Link
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: なし
+    long: なし
+    hold: 困難
+  note: Mid Top から A サイト裏への接続（Tactival では上段の帯の一部）。サイト側の接続として扱う（2026-11-10 青木の決定で Link
+    の一般則が確定）
+- name: A Alley
+  callouts:
+  - A Alley
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 低
+    branch: なし
+    long: なし
+    hold: 容易
+  note: A サイト裏〜守りスポーン脇の帯（Tactival で独立エリア）。深くはないが、リテイクの通り道として価値がある
+- name: Mid Top
+  callouts:
+  - Mid Top
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 遠
+    take: 中
+    branch: あり
+    long: なし
+    hold: 困難
+  note: Tactival で Mid から分離。A Link と Market の両方に分岐する上段。取る側がローテーションの選択肢を持つ
+- name: Mid
+  callouts:
+  - Mid Tiles
+  - Mid Courtyard
+  - Mid Bottom
+  vital: true
+  choke: false
+  dry: true
+  eval:
+    distance: 遠
+    take: 高
+    branch: あり
+    long: あり
+    hold: 困難
+  note: コーチ指定のバイタル。Mid 全体はコーチ指定どおりバイタルとし、Top 分離後も本エリア側が指定対象。タイル〜コートヤードの面の取り合いが中心
+- name: B Market
+  callouts:
+  - B Market
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: なし
+    long: なし
+    hold: 困難
+  note: B 攻めの片翼。ドアの開閉管理と、Mid からの圧と合わせた挟みが本体。市場内は保持しづらい。Boba はサイト側へ移した（青木の決定）
+  card: true
+- name: B Site
+  callouts:
+  - B Site
+  - B Boba
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 容易
+  note: サイト内。Boba はサイト側で固定（2026-11-10 青木の決定。線の引き方の問題として扱い、チョーク検査では例外登録済み）
+- name: B Main
+  callouts:
+  - B Main
+  - B Lobby
+  vital: false
+  choke: true
+  dry: true
+  eval:
+    distance: 近
+    take: 低
+    branch: なし
+    long: あり
+    hold: 容易
+  note: B 攻めの正面。取りやすいが単独では浅く、Market との挟みで真価
+  card: true
 
 hands:
   defense:

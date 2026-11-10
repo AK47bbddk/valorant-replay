@@ -1,0 +1,120 @@
+# ドラフト（2026-11-10、Muse 作成・GLM レビューと青木の決定を反映済み）。エリアと評価のみ。手（hands）は未収録。
+map: Ascent
+summary: 長いミッドレーンが特徴。A挟みが基本戦術で、B挟みはミッドを深く取らないと成立しない。守りはマーケットがミッドとBの両面をカバーする。
+entry_callouts:
+- A Lobby
+- A Main
+- A Tree
+- A Garden
+- A Window
+- Mid Pizza
+- Mid Market
+- Mid Link
+- B Lobby
+- B Main
+areas:
+- name: A Main
+  callouts:
+  - A Lobby
+  - A Main
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: なし
+    long: あり
+    hold: 容易
+  note: Aロング。狭く長い一本道で、サイトまでの距離は近い。確保・進行とも普通で、A攻めの正面
+- name: A Tree
+  callouts:
+  - A Tree
+  - A Garden
+  - A Window
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: Aショート相当。ドアがチョーク。取れれば確保の価値は非常に高い（挟み・裏・再展開の起点）が、侵入口が複数で保持は難しい
+- name: A Site
+  callouts:
+  - A Site
+  - A Rafters
+  - A Wine
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: サイト内。ヘル（Rafters下）・ワイン・スイッチ周りのクリアリング量が多い
+- name: Mid
+  callouts:
+  - Mid Bottom
+  - Mid Cubby
+  - Mid Courtyard
+  - Mid Top
+  - Mid Catwalk
+  vital: false
+  choke: false
+  dry: true
+  eval:
+    distance: 遠
+    take: 中
+    branch: あり
+    long: あり
+    hold: 困難
+  note: 長いミッドレーン。深く（ピザ・マーケット）まで取る必要は基本的に無く、ゲート手前までのコントロールで寄りの不利を消す使い方が中心。Catwalk は
+    A Tree への接続
+- name: B Market
+  callouts:
+  - Mid Pizza
+  - Mid Market
+  - Mid Link
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: B挟みの入口。守りはここに置くと Mid と B の両面をカバーできる。攻めが取ると B サイトの守りが割れる
+- name: B Main
+  callouts:
+  - B Lobby
+  - B Main
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 低
+    branch: なし
+    long: あり
+    hold: 容易
+  note: Bロング。取りやすいが確保・進行の価値は低め。1pick 狙いの場所
+- name: B Site
+  callouts:
+  - B Site
+  - B Boat House
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 容易
+  note: サイト内。ボートハウスとスイッチ側の2方向を見る形。引いて守る選択肢がある

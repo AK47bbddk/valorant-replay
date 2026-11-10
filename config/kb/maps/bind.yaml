@@ -1,0 +1,114 @@
+# ドラフト（2026-11-10、Muse 作成・GLM レビューと青木の決定を反映済み）。エリアと評価のみ。手（hands）は未収録。
+map: Bind
+summary: テレポーターで A と B がつながるマップ。時間稼ぎが効きにくく、エリアコントロールと TP の速度勝負。攻めは B が基本で、A は小部屋（Cubby）までの確保が目的になる。
+entry_callouts:
+- A Lobby
+- A Short
+- A Cubby
+- B Long
+- B Garden
+- B Fountain
+- B Short
+- B Window
+areas:
+- name: A Short
+  callouts:
+  - A Lobby
+  - A Short
+  - A Cubby
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: Aショート＋小部屋。セットで取るのが前提で難易度は高いが、取れば TP で寄りの速度を上回れる。設置ではなく小部屋までの確保が目的の取り方もある
+- name: A Bath
+  callouts:
+  - A Bath
+  vital: false
+  choke: true
+  dry: true
+  eval:
+    distance: 近
+    take: 低
+    branch: なし
+    long: なし
+    hold: 困難
+  note: シャワー。狭く取りやすいが取り返しもされやすい。保持の価値は低く、裏取りと1pickのための場所
+- name: A Site
+  callouts:
+  - A Site
+  - A Tower
+  - A Lamps
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: サイト内。見る箇所が多く単体の守備力は低め。設置後の侵入口も多い
+- name: B Long
+  callouts:
+  - B Long
+  - B Garden
+  - B Fountain
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: なし
+    long: あり
+    hold: 容易
+  note: Bロング。進行が強く、B攻めの本命ルート。取ると B の守りを割れるし TP の逃げ道にもなる
+- name: B Short
+  callouts:
+  - B Short
+  - B Window
+  vital: false
+  choke: true
+  dry: true
+  eval:
+    distance: 近
+    take: 低
+    branch: なし
+    long: なし
+    hold: 困難
+  note: 窓部屋（フーカー）。狭く取りやすいが保持は難しい。入るなら Bロング側からが本命で、こちらは圧と挟み用
+- name: B Site
+  callouts:
+  - B Site
+  - B Elbow
+  - B Hall
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 容易
+  note: サイト内。エルボーとホールの2方向。B の守備はこのマップの要
+- name: A Link
+  callouts:
+  - A Link
+  vital: false
+  choke: false
+  dry: false
+  note: 接続コールアウト。エリアではなくリンクとして表示する（2026-11-10 青木の決定）
+- name: B Link
+  callouts:
+  - B Link
+  vital: false
+  choke: false
+  dry: false
+  note: 接続コールアウト。エリアではなくリンクとして表示する（2026-11-10 青木の決定）

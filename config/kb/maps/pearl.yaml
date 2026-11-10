@@ -1,0 +1,105 @@
+# ドラフト（2026-11-10、Muse 作成・GLM レビューと青木の決定を反映済み）。エリアと評価のみ。手（hands）は未収録。
+map: Pearl
+summary: オーソドックスな2サイトマップ。ミッドが4方向に枝分かれし、ミッドの取り合いが両サイトの攻防を決める。B はロング気味の正面。
+entry_callouts:
+- A Main
+- A Restaurant
+- A Art
+- B Ramp
+- B Main
+- B Club
+areas:
+- name: A Main
+  callouts:
+  - A Main
+  - A Restaurant
+  - A Art
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: あり
+    long: あり
+    hold: 容易
+  note: A の正面。レストラン経由とアート経由の2つの顔がある
+- name: A Site
+  callouts:
+  - A Site
+  - A Flowers
+  - A Secret
+  - A Dugout
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 容易
+  note: サイト内。Flowers の高所気味ポジションと Dugout の窪みが要点
+- name: Mid
+  callouts:
+  - Mid Plaza
+  - Mid Shops
+  - Mid Top
+  - Mid Doors
+  - Mid Connector
+  vital: false
+  choke: false
+  dry: true
+  eval:
+    distance: 遠
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: 4方向に分岐するミッド。取る側が両サイトの裏を握る。保持には人数が要る
+- name: B Main
+  callouts:
+  - B Ramp
+  - B Main
+  - B Club
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: なし
+    long: あり
+    hold: 容易
+  note: B の正面。Ramp からの長い視線が特徴
+- name: B Site
+  callouts:
+  - B Site
+  - B Hall
+  - B Tunnel
+  - B Tower
+  - B Screen
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: サイト内。Hall と Tunnel の2方向リテイクを捌けるかが保持の条件
+- name: A Link
+  callouts:
+  - A Link
+  vital: false
+  choke: false
+  dry: false
+  note: 接続コールアウト。エリアではなくリンクとして表示する（2026-11-10 青木の決定）
+- name: B Link
+  callouts:
+  - B Link
+  vital: false
+  choke: false
+  dry: false
+  note: 接続コールアウト。エリアではなくリンクとして表示する（2026-11-10 青木の決定）

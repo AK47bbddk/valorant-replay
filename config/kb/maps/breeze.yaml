@@ -1,0 +1,96 @@
+# ドラフト（2026-11-10、Muse 作成・GLM レビューと青木の決定を反映済み）。エリアと評価のみ。手（hands）は未収録。
+map: Breeze
+summary: 広くてロングの多いマップ。ミッドの柱（Pillar）周りが中心で、両サイトとも設置後の保持が難しく、ローテーションと情報戦の色が濃い。
+entry_callouts:
+- A Lobby
+- A Shop
+- A Ramp
+- B Main
+- B Elbow
+areas:
+- name: A Main
+  callouts:
+  - A Lobby
+  - A Shop
+  - A Ramp
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: なし
+    long: あり
+    hold: 困難
+  note: Shop がチョークの店。取るのは中程度だが保持はしづらい
+- name: A Site
+  callouts:
+  - A Site
+  - A Pyramids
+  - A Bridge
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: あり
+    hold: 困難
+  note: サイト内。Pyramids の遮蔽と Bridge の高所。広くて保持は難しい
+- name: Mid
+  callouts:
+  - Mid Top
+  - Mid Nest
+  - Mid Pillar
+  - Mid Wood Doors
+  - Mid Hall
+  - Mid Cannon
+  - Mid Bottom
+  vital: false
+  choke: false
+  dry: true
+  eval:
+    distance: 遠
+    take: 中
+    branch: あり
+    long: あり
+    hold: 困難
+  note: Pillar 中心の広いミッド。取る側が両サイトの裏とローテの速さを握る
+- name: B Main
+  callouts:
+  - B Main
+  - B Elbow
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: なし
+    long: あり
+    hold: 容易
+  note: B の正面。Elbow の曲がりまでが手前エリア
+- name: B Site
+  callouts:
+  - B Site
+  - B Back
+  - B Wall
+  - B Tunnel
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: あり
+    hold: 困難
+  note: サイト内。Tunnel からのリテイクと Wall 際の撃ち合いが要点
+- name: B Window
+  callouts:
+  - B Window
+  vital: false
+  choke: false
+  dry: false
+  note: 接続コールアウト。エリアではなくリンクとして表示する（2026-11-10 青木の決定）

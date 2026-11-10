@@ -1,0 +1,128 @@
+# ドラフト（2026-11-10、Muse 作成・GLM レビューと青木の決定を反映済み）。エリアと評価のみ。手（hands）は未収録。
+map: Haven
+summary: サイトが3つのマップ。A は孤立し、B と C は連結している。守りの寄りが早く、攻めはエリア確保そのものより1pickと情報で人数差を作るマップ。
+entry_callouts:
+- A Lobby
+- A Long
+- A Garden
+- A Sewer
+- C Garage
+- C Window
+- C Lobby
+- C Long
+areas:
+- name: A Long
+  callouts:
+  - A Lobby
+  - A Long
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: なし
+    long: あり
+    hold: 容易
+  note: 情報取りのエリア。確保しきらなくても「通った可能性」を与えることで守りを A2 に固定する仕事がある
+- name: A Short
+  callouts:
+  - A Garden
+  - A Sewer
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: あり
+    long: なし
+    hold: 困難
+  note: ガーデン〜下水の入口。高低差があり、ロングと対で A の圧を作る
+- name: A Site
+  callouts:
+  - A Site
+  - A Tower
+  - A Link
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: サイト内。他エリアと直結せず、A攻めはここで完結する
+- name: Mid
+  callouts:
+  - Mid Doors
+  - Mid Courtyard
+  - Mid Window
+  vital: false
+  choke: false
+  dry: true
+  eval:
+    distance: 近
+    take: 低
+    branch: あり
+    long: なし
+    hold: 困難
+  note: 最速なら取りやすいが、窓をスモークで塞がれると広い道になる。B サイトへの入口でもある
+- name: B Site
+  callouts:
+  - B Site
+  - B Back
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 容易
+  note: サイトと思わずミッドコントロールの延長と見るのが定石。侵入口は3つで取り返しはされやすいが、取り返し自体も楽
+- name: C Garage
+  callouts:
+  - C Garage
+  - C Window
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 低
+    branch: なし
+    long: なし
+    hold: 困難
+  note: このマップの最重要エリア。B と C の連結（イエロー）への唯一の道で、確保すれば守りを1人イエローに釘付けにできる。取るのは簡単だが保持が難しい
+- name: C Long
+  callouts:
+  - C Lobby
+  - C Long
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: なし
+    long: あり
+    hold: 容易
+  note: 狭く長く、取りにくいが取り返しもされにくい。1人で持てる情報エリア
+- name: C Site
+  callouts:
+  - C Site
+  - C Cubby
+  - C Link
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 容易
+  note: サイト内。ガレージ側とロング側の挟みが成立すると割れる

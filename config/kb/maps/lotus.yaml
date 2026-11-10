@@ -1,0 +1,136 @@
+# ドラフト（2026-11-10、Muse 作成・GLM レビューと青木の決定を反映済み）。エリアと評価のみ。手（hands）は未収録。
+map: Lotus
+summary: サイト3つのマップ。回転ドアと破壊可能な壁でエリアの接続が変わる。A はラブル（瓦礫）のコントロール、B はメイン1本、C はロング気味の正面が軸。
+entry_callouts:
+- A Lobby
+- A Main
+- A Root
+- A Rubble
+- B Main
+- B Pillars
+- C Lobby
+- C Main
+- C Bend
+areas:
+- name: A Main
+  callouts:
+  - A Lobby
+  - A Main
+  - A Root
+  - A Rubble
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: あり
+    long: あり
+    hold: 困難
+  note: Rubble の奪い合いが A の起点。取る側が A リンクとサイトの両方に圧をかけられる
+- name: A Site
+  callouts:
+  - A Site
+  - A Top
+  - A Drop
+  - A Hut
+  - A Tree
+  - A Door
+  - A Stairs
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: サイト内。高低差（Top/Drop）と Tree のクリアリング量が多い
+- name: A Link
+  callouts:
+  - A Link
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 遠
+    take: 中
+    branch: なし
+    long: なし
+    hold: 困難
+  note: A ロビーと B をつなぐ回転ドアの接続。フェイクと再展開の通り道
+- name: B Main
+  callouts:
+  - B Main
+  - B Pillars
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: なし
+    long: なし
+    hold: 困難
+  note: B の唯一の正面入口。Pillars 周りのスモーク戦が中心
+- name: B Site
+  callouts:
+  - B Site
+  - B Upper
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 容易
+  note: サイト内。Upper の高所が攻守どちらにも効く
+- name: C Main
+  callouts:
+  - C Lobby
+  - C Main
+  - C Bend
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: なし
+    long: あり
+    hold: 容易
+  note: C の正面。Bend までのコントロールが取れればサイトは近い
+- name: C Site
+  callouts:
+  - C Site
+  - C Mound
+  - C Waterfall
+  - C Hall
+  - C Door
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: サイト内。Waterfall と Hall の2方向リテイクが前提の設計
+- name: C Link
+  callouts:
+  - C Link
+  vital: false
+  choke: false
+  dry: false
+  note: 接続コールアウト。エリアではなくリンクとして表示する（2026-11-10 青木の決定）
+- name: C Gravel
+  callouts:
+  - C Gravel
+  vital: false
+  choke: false
+  dry: false
+  note: 接続コールアウト。エリアではなくリンクとして表示する（2026-11-10 青木の決定）

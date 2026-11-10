@@ -1,0 +1,108 @@
+# ドラフト（2026-11-10、Muse 作成・GLM レビューと青木の決定を反映済み）。エリアと評価のみ。手（hands）は未収録。
+map: Abyss
+summary: 落下のあるマップ。ミッドの高低とブリッジが特徴で、サイトはどちらも接続が多い。エリアの保持より、取るタイミングと人数の掛け方が効く。
+entry_callouts:
+- A Lobby
+- A Main
+- B Lobby
+- B Main
+areas:
+- name: A Main
+  callouts:
+  - A Lobby
+  - A Main
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: なし
+    long: あり
+    hold: 容易
+  note: A の正面入口。一本道気味で、取る判断が早い
+- name: A Site
+  callouts:
+  - A Site
+  - A Tower
+  - A Secret
+  - A Security
+  - A Vent
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: サイト内。Tower の高所と Vent・Secret の小部屋でクリアリングが多い
+- name: Mid
+  callouts:
+  - Mid Bottom
+  - Mid Bend
+  - Mid Top
+  - Mid Library
+  - Mid Catwalk
+  vital: false
+  choke: false
+  dry: true
+  eval:
+    distance: 遠
+    take: 高
+    branch: あり
+    long: あり
+    hold: 困難
+  note: 高低差のあるミッド。Catwalk と Library で両サイトへ分岐する。取り切るより圧の維持が中心
+- name: B Main
+  callouts:
+  - B Lobby
+  - B Main
+  vital: false
+  choke: true
+  dry: false
+  eval:
+    distance: 近
+    take: 中
+    branch: なし
+    long: あり
+    hold: 容易
+  note: B の正面入口。A Main と対の構造
+- name: B Site
+  callouts:
+  - B Site
+  - B Nest
+  - B Tower
+  - B Danger
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 高
+    branch: あり
+    long: なし
+    hold: 困難
+  note: サイト内。Nest と Tower の高所、Danger の落下際が要点
+- name: A Link
+  callouts:
+  - A Link
+  vital: false
+  choke: false
+  dry: false
+  note: 接続コールアウト。エリアではなくリンクとして表示する（2026-11-10 青木の決定）
+- name: B Link
+  callouts:
+  - B Link
+  vital: false
+  choke: false
+  dry: false
+  note: 接続コールアウト。エリアではなくリンクとして表示する（2026-11-10 青木の決定）
+- name: A Bridge
+  callouts:
+  - A Bridge
+  vital: false
+  choke: false
+  dry: false
+  note: 接続コールアウト。エリアではなくリンクとして表示する（2026-11-10 青木の決定）
