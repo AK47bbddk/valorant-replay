@@ -7,19 +7,21 @@ entry_callouts:
 - A Main
 - A Lobby
 - B Market
-- B Main
 - B Lobby
-# チョークポイント（2026-11-10 青木が Tactival 上に赤丸で示した 7 点）。
+# チョークポイント（2026-11-10 青木が Tactival 上に赤丸で示した 7 点＋2026-11-11 追加 1 点）。
 # [x, y, エリアA, エリアB]：x, y は displayIcon の 0..1（CALLOUT_FIX 補正後の空間）。
-# エリアA と エリアB の境目がこの点を通る。B Lobby→B Main と A Lobby→A Main は
-# 同じエリア内の入口のチョークなので両側とも同じエリア名（局所分離の検査では対象外）。
+# エリアA と エリアB の境目がこの点を通る。A Lobby→A Main は同じエリア（A Main）内の
+# チョークなので両側とも A Main（局所分離の検査では対象外）。C10 は B Main|B Site の境で、
+# C10 より北の通路（B Main コールアウトの位置）はサイト側（2026-11-11 青木のモデル）。
+# そのため entry_callouts から B Main を外す（B Main コールアウトはサイト側の呼び方になった）。
 chokes:
-- [0.1134, 0.5867, B Main, B Main]      # B Lobby → B Main の入口（同一エリア内。2026-11-10 訂正）
+- [0.1134, 0.5867, B Main, B Site]      # C10：B の境界（C10 より北の通路はサイト側＝B Site。2026-11-11 青木の決定）
 - [0.3846, 0.4585, Mid, B Market]        # Mid → B Market の境
 - [0.2441, 0.5116, B Market, B Site]     # B Market → B Site のドア
 - [0.4994, 0.3620, Mid, Mid Top]         # Mid → Mid Top（上段）の境
 - [0.7657, 0.6295, A Main, A Main]       # A Lobby → A Main の入口（同一エリア内）
 - [0.6979, 0.4743, A Main, A Site]       # A Main → A Site の入口
+- [0.9180, 0.3450, A Site, A Alley]      # A Elbow の縦帯：A Site と A Alley をここで横に切る（2026-11-11 追加）
 - [0.8988, 0.3192, A Alley, A Site]      # A Alley → A Site の裏口
 areas:
 - name: A Main
@@ -123,6 +125,7 @@ areas:
   callouts:
   - B Site
   - B Boba
+  - B Main
   vital: false
   choke: false
   dry: false
@@ -132,10 +135,9 @@ areas:
     branch: あり
     long: なし
     hold: 容易
-  note: サイト内。Boba はサイト側で固定（2026-11-10 青木の決定。線の引き方の問題として扱い、チョーク検査では例外登録済み）
+  note: サイト内。Boba はサイト側で固定（2026-11-10 青木の決定。線の引き方の問題として扱い、チョーク検査では例外登録済み）。B Main コールアウトは C10 より北（サイト側）なのでここに入れる（2026-11-11 青木のモデル）
 - name: B Main
   callouts:
-  - B Main
   - B Lobby
   vital: false
   choke: true
@@ -146,7 +148,7 @@ areas:
     branch: なし
     long: あり
     hold: 容易
-  note: B 攻めの正面。取りやすいが単独では浅く、Market との挟みで真価
+  note: C10 より手前（B Lobby 側）の通路。C10 は B Main と B Site の境（2026-11-11 青木の決定）。B 攻めの正面で、取りやすいが単独では浅く、Market との挟みで真価
   card: true
 
 hands:

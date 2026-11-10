@@ -268,12 +268,13 @@ def _polys(mask: np.ndarray) -> list[list[list[float]]]:
     return out
 
 
-GEO_TAG = "choke-segment-v2"    # 方式が変わったら上げる（キャッシュのキーに入る）
+GEO_TAG = "choke-segment-v3"    # 方式が変わったら上げる（キャッシュのキーに入る）
 CHOKE_CUT = 0.025                # 切れ目の円の半径（表示 0..1）
 CHOKE_PROBE = 0.04               # 局所分離の検査で、チョーク点から両側へ取るプローブの距離（表示 0..1）
 CHOKE_LOCAL = 0.08               # 局所分離を見る範囲（チョーク点からの測地距離、表示 0..1）
 CHOKE_BARRIER_MARGIN = 4         # 断面バリアを歩行不可領域の外へ伸ばす余裕（256px 画素）
 CHOKE_BARRIER_WIDTH = 3          # 断面バリアの太さ（256px 画素）
+CHOKE_BARRIER_DEG = 1            # 断面バリアの向きを探す刻み（度）。移動方向に垂直な向きを最小断面で選ぶ
 
 
 def _nearest_walkable(walk: np.ndarray, ix: int, iy: int) -> int:
@@ -426,10 +427,10 @@ def _shortest_path(walk: np.ndarray, src: int, dst: int, n: int) -> list[int] | 
     return path
 
 
-def _barrier_mask(walk: np.ndarray, probes: list[int | None], cp: tuple[float, float],
-                  n: int) -> np.ndarray | None:
-    """チョークの断面バリア。両プローブを結ぶ通路の最短路を取り、チョーク点に最も近い点で、
-    経路の進行方向に垂直な線分を歩行不可領域まで伸ばす（＋余裕）。これを切れ目とする。"""
+def _barrier_mask_path(walk: np.ndarray, probes: list[int | None], cp: tuple[float, float],
+                       n: int) -> np.ndarray | None:
+    """（旧方式）両プローブを結ぶ通路の最短路を取り、経路上でチョーク点に最も近い点で
+    経路の進行方向に垂直な線分を引く。"""
     if len(probes) < 2 or probes[0] is None or probes[1] is None:
         return None
     path = _shortest_path(walk, probes[0], probes[1], n)
@@ -463,6 +464,62 @@ def _barrier_mask(walk: np.ndarray, probes: list[int | None], cp: tuple[float, f
         ends.append(end)
     m = np.zeros((n, n), np.uint8)
     cv2.line(m, ends[0], ends[1], 1, CHOKE_BARRIER_WIDTH)
+    return m > 0
+
+
+def _barrier_mask(walk: np.ndarray, probes: list[int | None], cp: tuple[float, float],
+                  n: int) -> np.ndarray | None:
+    """チョークの断面バリア。チョーク点を通り、両プローブを分ける向きのうち、
+    歩行可能な断面の長さがいちばん短い直線（＝通路のいちばん細い所を横切る線）を選び、
+    両端を歩行不可領域まで伸ばす（＋余裕）。向きが見つからないときは旧方式に落とす。
+
+    移動方向に垂直な直線で切るための実装。円で局所分離できても領域がチョークを
+    回り込む場合（西端の細い通路を伝う等）に、この断面バリアで確実に止める。"""
+    if len(probes) < 2 or probes[0] is None or probes[1] is None:
+        return None
+    cpx, cpy = cp[0] * n, cp[1] * n
+    q0, q1 = divmod(probes[0], n), divmod(probes[1], n)      # (y, x)
+    cx, cy = int(round(cpx)), int(round(cpy))
+    if not (0 <= cx < n and 0 <= cy < n and walk[cy, cx]):
+        q = _nearest_walkable(walk, min(n - 1, max(0, cx)), min(n - 1, max(0, cy)))
+        if q < 0:
+            return _barrier_mask_path(walk, probes, cp, n)
+        cy, cx = divmod(q, n)
+        cpx, cpy = float(cx), float(cy)                       # 線を通す点に合わせる
+
+    def side(dx: float, dy: float, q: tuple[int, int]) -> float:
+        return dx * (q[0] - cpy) - dy * (q[1] - cpx)         # 向きに対する符号（q は (y, x)）
+
+    best = None
+    for deg in range(0, 180, CHOKE_BARRIER_DEG):
+        th = math.radians(deg)
+        dx, dy = math.cos(th), math.sin(th)
+        s0, s1 = side(dx, dy, q0), side(dx, dy, q1)
+        if s0 == 0.0 or s1 == 0.0 or s0 * s1 > 0:            # 両プローブが同じ側：分けない
+            continue
+        ends, ok, tot = [], True, 0
+        for sgn in (1, -1):
+            step = 0
+            while step < n:
+                step += 1
+                ix = int(round(cx + sgn * dx * step))
+                iy = int(round(cy + sgn * dy * step))
+                if ix < 0 or ix >= n or iy < 0 or iy >= n or not walk[iy, ix]:
+                    break
+            if step >= n:                                    # 壁に届かない：断面にならない
+                ok = False
+                break
+            ends.append((ix, iy))
+            tot += step
+        if ok and (best is None or tot < best[0]):
+            best = (tot, ends, dx, dy)
+    if best is None:
+        return _barrier_mask_path(walk, probes, cp, n)
+    _tot, ends, dx, dy = best
+    a = (int(round(ends[1][0] - dx * CHOKE_BARRIER_MARGIN)), int(round(ends[1][1] - dy * CHOKE_BARRIER_MARGIN)))
+    b = (int(round(ends[0][0] + dx * CHOKE_BARRIER_MARGIN)), int(round(ends[0][1] + dy * CHOKE_BARRIER_MARGIN)))
+    m = np.zeros((n, n), np.uint8)
+    cv2.line(m, a, b, 1, CHOKE_BARRIER_WIDTH)
     return m > 0
 
 
@@ -506,14 +563,16 @@ def _local_separated(walk: np.ndarray, cut: np.ndarray, cp: tuple[float, float],
 
 
 def _choke_cuts(walk: np.ndarray, sides: list[tuple[dict, tuple[float, float], list]],
-                n: int) -> tuple[np.ndarray, list[float], list[list[int | None]]]:
-    """チョークの切れ目（円＋断面バリア）と、局所分離のプローブ。
+                n: int) -> tuple[np.ndarray, list[float], list[list[int | None]], np.ndarray]:
+    """チョークの切れ目と、局所分離のプローブ、断面バリアの画素。
 
-    円（CHOKE_CUT）で局所分離できないチョークにだけ、断面バリアを足す。同一エリアの
-    チョークは分離を要求しない（円だけ）。"""
+    円（CHOKE_CUT）で局所分離できないチョーク（＝領域がチョークを回り込むおそれがある
+    チョーク）は、円ではなく断面バリア（`_barrier_mask`）で切る。円で局所分離できる
+    チョークは円のまま。同一エリアのチョークは分離を要求しない（円だけ）。"""
     radii = [CHOKE_CUT] * len(sides)
     cut = _choke_cut_mask(walk, [s[1] for s in sides], radii, n)
     probes = _probe_indices(walk, sides, n)
+    barrier = np.zeros((n, n), bool)
     for i, (ch, cp, _near) in enumerate(sides):
         areas = ch.get("areas") or []
         if len(areas) < 2 or areas[0] == areas[1]:
@@ -521,9 +580,12 @@ def _choke_cuts(walk: np.ndarray, sides: list[tuple[dict, tuple[float, float], l
         if _local_separated(walk, cut, cp, probes[i], n):
             continue
         bm = _barrier_mask(walk, probes[i], cp, n)
-        if bm is not None:
-            cut = cut | bm
-    return cut, radii, probes
+        if bm is None:
+            continue
+        cut = cut & ~_choke_cut_mask(walk, [cp], [CHOKE_CUT], n)   # 円を外してバリアに置き換える
+        cut = cut | bm
+        barrier = barrier | bm
+    return cut, radii, probes, barrier
 
 
 def _fill_cut(assigned: np.ndarray, best_id: np.ndarray, cut: np.ndarray, n: int) -> None:
@@ -545,7 +607,7 @@ def _segment_regions(walk: np.ndarray, view: np.ndarray, pts: list[tuple[float, 
                      chokes: list[dict], k: int, n: int) -> dict[str, list[list[list[float]]]]:
     """チョークの切れ目で通路を区画に分けてから、区画ごとにエリアを割り当てる。"""
     sides = _choke_sides(chokes, pts, names, k)
-    cut, radii, _probes = _choke_cuts(walk, sides, n)
+    cut, radii, probes, barrier = _choke_cuts(walk, sides, n)
     seg = walk & ~cut
     ncomp, comp = cv2.connectedComponents(seg.astype(np.uint8), connectivity=8)
     order = list(dict.fromkeys(names))
@@ -586,6 +648,21 @@ def _segment_regions(walk: np.ndarray, view: np.ndarray, pts: list[tuple[float, 
             continue
         cx = (float(xs.mean()) + 0.5) / n
         cy = (float(ys.mean()) + 0.5) / n
+        # コールアウトを持たない区画：この区画に入っているチョークのプローブのエリアにする。
+        # プローブはチョークの手前／先の 0.04 先の点なので、区画がどちら側かがそのまま分かる。
+        pcand = []
+        for i, (ch, _cp, _near) in enumerate(sides):
+            for j, q in enumerate(probes[i]):
+                if q is None or q < 0 or not seg.ravel()[q] or comp.ravel()[q] != c:
+                    continue
+                nm = (ch.get("areas") or [])[j] if j < len(ch.get("areas") or []) else None
+                if nm in name_id:
+                    qy, qx = divmod(q, n)
+                    d = ((qx + 0.5) / n - cx) ** 2 + ((qy + 0.5) / n - cy) ** 2
+                    pcand.append((d, nm))
+        if pcand:
+            best_id[cmask.ravel()] = name_id[min(pcand)[1]]
+            continue
         touch = []
         for i, (ch, cp, _near) in enumerate(sides):
             m = np.zeros((n, n), np.uint8)
@@ -600,6 +677,7 @@ def _segment_regions(walk: np.ndarray, view: np.ndarray, pts: list[tuple[float, 
         nm = min(cand, key=lambda t: math.hypot(t[0][0] - cx, t[0][1] - cy))[1]
         best_id[cmask.ravel()] = name_id.get(nm, -1)
     _fill_cut(walk & ~cut & (best_id.reshape(n, n) >= 0), best_id, cut, n)
+    best_id[barrier.ravel()] = -1          # 断面バリアの画素はどのエリアにも入れない（境界を直線のまま保つ）
     lab = cv2.resize(best_id.reshape(n, n).astype(np.int16), (SIZE, SIZE),
                      interpolation=cv2.INTER_NEAREST)
     walk_full = view[:, :, 3] > 0
@@ -620,13 +698,17 @@ def area_regions(base: np.ndarray, callouts: list[dict], kb_map: dict | None, *,
     通路のマスク（下地のアルファ > 0）の画素を、各コールアウトからの**経路距離**（256×256 の
     測地距離。多始点ダイクストラ）でいちばん近いコールアウトに割り当て、kb の areas[].callouts で
     まとめる。直線距離のボロノイと違い、境界が狭い通路（チョーク）へ寄る。
-    kb に `chokes` があるマップは、チョーク点に切れ目（円、局所分離できない所は断面バリア）を
-    入れて通路を区画に分け、区画ごとに割り当てる（区画内にコールアウトが無ければ、その区画に
-    接するチョークのペアのエリアのうち、重心からいちばん近いコールアウトのエリアにする）。
-    切れ目の画素は、いちばん近い割り当て済み画素のエリアにする。chokes が無いマップは従来どおり
-    （測地距離のみ）。
+    kb に `chokes` があるマップは、チョーク点に切れ目を入れて通路を区画に分け、区画ごとに
+    割り当てる。切れ目は、円（CHOKE_CUT）で局所分離できるチョークは円、できないチョークは
+    移動方向に垂直な断面バリア（`_barrier_mask`：チョーク点を通り両プローブを分ける向きのうち
+    断面が最短の直線）にする。区画内にコールアウトが無ければ、その区画に入っているチョークの
+    プローブのエリア（プローブはチョークの手前／先の 0.04 先の点）にする。それも無ければ、
+    その区画に接するチョークのペアのエリアのうち重心からいちばん近いコールアウトのエリアにする。
+    切れ目の画素は、いちばん近い割り当て済み画素のエリアにする。ただし断面バリアの画素は
+    どのエリアにも入れない（境界を直線のまま保つ。チョークを回り込む領域の混入を防ぐ）。
+    chokes が無いマップは従来どおり（測地距離のみ）。
     重み（バイタルの VITAL_SHRINK、`shrink` 指定）は距離に掛けて、大きいほど狭くする。
-    通路の画素はすべてどれかのエリアに入る（スポーンがいちばん近い画素だけ外す）。"""
+    通路の画素は、断面バリアの画素と、スポーンがいちばん近い画素を除いてどれかのエリアに入る。"""
     from . import kb as K
 
     cs = [c for c in callouts if not _is_spawn_callout(c) and callout_area(c)]

@@ -281,15 +281,19 @@ def test_sunset_chokes_are_locally_separated():
     kbm = K.load({}).map("Sunset")
     chokes = [c for c in K.chokes(kbm)
               if len(c.get("areas") or []) >= 2 and c["areas"][0] != c["areas"][1]]
-    assert len(chokes) == 5
+    assert len(chokes) == 7
     walk, n, sides = _sunset_sides(chokes)
-    cut, _radii, probes = MF._choke_cuts(walk, sides, n)
+    cut, _radii, probes, _barrier = MF._choke_cuts(walk, sides, n)
     for i, (ch, cp, _near) in enumerate(sides):
         assert _locally_separated(walk, cut, cp, probes[i], n), (ch["areas"], probes[i], cp)
 
 
 def test_sunset_site_side_has_no_entry_pixels():
-    """不変条件2：サイト側の区画（A Site / B Site）に入口エリアのコールアウト画素が入らないこと。"""
+    """不変条件2：サイト側の区画（A Site / B Site）に入口エリアのコールアウト画素が入らないこと。
+
+    2026-11-11 のモデル変更：C10 より北はサイト側なので、B Main コールアウトは B Site に
+    入る（B Site の callouts に追加）。したがって入口エリアの判定は B Lobby・B Market で見る。
+    B Main コールアウトは B Site に入っていることをあわせて固定する。"""
     from vreplay import kb as K
     from vreplay import mapfig as MF
 
@@ -298,10 +302,11 @@ def test_sunset_site_side_has_no_entry_pixels():
     cs = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]} for v in ar.values()]
     reg = MF.area_regions(_sunset_base(), cs, kbm, k=0)
     for site, entries in (("A Site", ("A Main", "A Lobby")),
-                          ("B Site", ("B Main", "B Lobby", "B Market"))):
+                          ("B Site", ("B Lobby", "B Market"))):
         assert site in reg
         for e in entries:
             assert not MF.contains(reg[site], ar[e]["x"], ar[e]["y"]), (site, e)
+    assert MF.contains(reg["B Site"], ar["B Main"]["x"], ar["B Main"]["y"])       # C10 より北はサイト側
 
 
 def test_sunset_forward_point_is_not_entry_area():
@@ -372,3 +377,56 @@ def test_split_vital_areas_do_not_reach_into_the_site():
         assert not MF.contains(reg["MID"], ar[c]["x"], ar[c]["y"]), ("MID", c)
     for c in ("A Site", "A Tower", "A Screens", "A Main"):
         assert not MF.contains(reg["A Ramps"], ar[c]["x"], ar[c]["y"]), ("A Ramps", c)
+
+
+# ====================================================================== C10 境界と Elbow の境界（2026-11-11）
+def test_sunset_b_site_region_stays_north_of_c10_on_the_west():
+    """受け入れ条件1：C10（0.1134, 0.5867）を境に、B Site の領域が西側（u < 0.17）で
+    C10 の緯度（v = 0.5867）より南に出ないこと。C10 は西端の細い通路を伝う回り込みを
+    止める断面バリアで切る。"""
+    import numpy as np
+
+    from vreplay import kb as K
+    from vreplay import mapfig as MF
+
+    kbm = K.load({}).map("Sunset")
+    ar = _sunset_areas()
+    cs = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]} for v in ar.values()]
+    reg = MF.area_regions(_sunset_base(), cs, kbm, k=0)
+    assert "B Site" in reg
+    m = MF._fill(reg["B Site"])
+    ys, xs = np.nonzero(m)
+    u = (xs + 0.5) / MF.SIZE
+    v = (ys + 0.5) / MF.SIZE
+    south_west = (u < 0.17) & (v > 0.5867)
+    assert not south_west.any(), int(south_west.sum())
+
+
+def test_sunset_elbow_choke_makes_a_straight_alley_site_boundary():
+    """受け入れ条件2：追加した A Elbow のチョーク（0.918, 0.345）で A Site と A Alley の
+    境界が通路を横切る直線になっている。チョーク両側 0.04 のプローブは別区画で、北側の
+    プローブのエリアが A Alley か A Link、南側が A Site になる。"""
+    from vreplay import kb as K
+    from vreplay import mapfig as MF
+
+    kbm = K.load({}).map("Sunset")
+    chokes = [c for c in K.chokes(kbm) if len(c.get("areas") or []) >= 2 and c["areas"][0] != c["areas"][1]]
+    walk, n, sides = _sunset_sides(chokes)
+    cut, _radii, probes, _barrier = MF._choke_cuts(walk, sides, n)
+    i = next(k for k, (ch, _cp, _near) in enumerate(sides)
+             if abs(ch["x"] - 0.918) < 1e-6 and abs(ch["y"] - 0.345) < 1e-6)
+    assert _locally_separated(walk, cut, sides[i][1], probes[i], n), (sides[i][0]["areas"], probes[i])
+
+    ar = _sunset_areas()
+    cs = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]} for v in ar.values()]
+    reg = MF.area_regions(_sunset_base(), cs, kbm, k=0)
+
+    def area_at(u, v):
+        return next((nm for nm, ps in reg.items() if MF.contains(ps, u, v)), None)
+
+    north = area_at(0.918, 0.345 - 0.04)          # 北側のプローブ（A Alley 側）
+    south = area_at(0.918, 0.345 + 0.04)          # 南側のプローブ（A Site 側）
+    assert north in ("A Alley", "A Link"), north
+    assert south == "A Site", south
+    assert north != south
+

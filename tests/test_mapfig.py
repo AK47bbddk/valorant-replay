@@ -208,7 +208,7 @@ def test_kb_chokes_are_read():
     """kb がマップのチョーク（点と、その点で切り替わる 2 エリア）を読める。形式は 4 要素のリストと辞書。"""
     kbm = K.load({}).map("Sunset")
     ch = K.chokes(kbm)
-    assert len(ch) == 7
+    assert len(ch) == 8
     assert all({"x", "y", "areas"} == set(c) for c in ch)
     assert all(len(c["areas"]) == 2 for c in ch)
     assert K.chokes({"chokes": [{"x": 0.1, "y": 0.2, "between": ["Mid", "B Site"]}]}) == \
