@@ -11,10 +11,10 @@ entry_callouts:
 - B Lobby
 # チョークポイント（2026-11-10 青木が Tactival 上に赤丸で示した 7 点）。
 # [x, y, エリアA, エリアB]：x, y は displayIcon の 0..1（CALLOUT_FIX 補正後の空間）。
-# エリアA と エリアB の境目がこの点を通る。A Lobby→A Main は同じエリア（A Main）内の
-# チョークなので両側とも A Main（境界検査では対象外）。
+# エリアA と エリアB の境目がこの点を通る。B Lobby→B Main と A Lobby→A Main は
+# 同じエリア内の入口のチョークなので両側とも同じエリア名（局所分離の検査では対象外）。
 chokes:
-- [0.1134, 0.5867, B Main, B Site]      # B Main → B Site の入口
+- [0.1134, 0.5867, B Main, B Main]      # B Lobby → B Main の入口（同一エリア内。2026-11-10 訂正）
 - [0.3846, 0.4585, Mid, B Market]        # Mid → B Market の境
 - [0.2441, 0.5116, B Market, B Site]     # B Market → B Site のドア
 - [0.4994, 0.3620, Mid, Mid Top]         # Mid → Mid Top（上段）の境

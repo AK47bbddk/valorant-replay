@@ -204,8 +204,8 @@ def _sunset_base():
     return _flat_base()
 
 
-def _choke_components(chokes):
-    """各チョークの「切れ目」で割った区画の番号を返す（表示の向き、実マップの下地）。"""
+def _sunset_sides(chokes):
+    """Sunset の実マップ下地（256px）で、チョークと両側の最近コールアウトを返す。"""
     import cv2
     import numpy as np
 
@@ -221,23 +221,29 @@ def _choke_components(chokes):
     cs = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]} for v in ar.values()]
     pts = [MF.to_view(float(c["x"]), float(c["y"]), 0) for c in cs]
     names = [MF.area_groups(kbm).get(MF.norm(MF.callout_area(c)), MF.callout_area(c)) for c in cs]
-    sides = MF._choke_sides(chokes, pts, names, 0)
-    radii = MF._choke_radii(walk, sides, n)
-    cut = MF._choke_cut_mask(walk, [s[1] for s in sides], radii, n)
-    seg = walk & ~cut
-    lab = cv2.connectedComponents(seg.astype(np.uint8), connectivity=8)[1]
-    out = []
-    for ch, _cp, near in sides:
-        comps = []
-        for p in near:
-            if p is None:
-                comps.append(None)
-                continue
-            q = MF._nearest_walkable(seg, min(n - 1, max(0, int(p[0] * n))),
-                                     min(n - 1, max(0, int(p[1] * n))))
-            comps.append(int(lab.ravel()[q]) if q >= 0 else None)
-        out.append((ch.get("areas") or [], comps, radii))
-    return out
+    return walk, n, MF._choke_sides(chokes, pts, names, 0)
+
+
+def _locally_separated(walk, cut, cp, probes, n, radius=None):
+    """局所分離の検査（テスト側の実装）。チョーク点の近くだけを見て、両プローブが別の区画か。"""
+    import cv2
+    import numpy as np
+
+    from vreplay import mapfig as MF
+
+    radius = MF.CHOKE_LOCAL if radius is None else radius
+    src = MF._nearest_walkable(walk, min(n - 1, max(0, int(round(cp[0] * n)))),
+                               min(n - 1, max(0, int(round(cp[1] * n)))))
+    if src < 0:
+        return False
+    dist, _ = MF._dijkstra(walk, [src], n)
+    local = (walk & ~cut) & (dist.reshape(n, n) <= radius * n)
+    lab = cv2.connectedComponents(local.astype(np.uint8), connectivity=8)[1]
+    comps = []
+    for q in probes:
+        qq = MF._nearest_walkable(local, *divmod(q, n)[::-1]) if q is not None and q >= 0 else -1
+        comps.append(int(lab.ravel()[qq]) if qq >= 0 else None)
+    return len(comps) == 2 and comps[0] is not None and comps[1] is not None and comps[0] != comps[1]
 
 
 def _area_near(reg, name, x, y, r=0.03):
@@ -252,11 +258,10 @@ def _area_near(reg, name, x, y, r=0.03):
     return bool(m[y0:y1, x0:x1].any())
 
 
-# 青木が Tactival に示した Sunset のチョーク 7 点（config/kb/maps/sunset.yaml の chokes と同じ）。
-# A Lobby→A Main（0.766, 0.630）は同じエリア（A Main）内のチョークなので、
-# 両側が同じエリアになり、ここではペア検査の対象外にする。
+# 青木が Tactival に示した Sunset のチョークのうち、異なるエリアの境目。
+# B Lobby→B Main（0.113, 0.587）と A Lobby→A Main（0.766, 0.630）は同じエリア内の
+# チョークなので、ここではペア検査の対象外にする。
 SUNSET_CHOKES = [
-    ((0.1134, 0.5867), "B Main", "B Site"),
     ((0.2441, 0.5116), "B Market", "B Site"),
     ((0.3846, 0.4585), "Mid", "B Market"),
     ((0.4994, 0.3620), "Mid", "Mid Top"),
@@ -265,22 +270,22 @@ SUNSET_CHOKES = [
 ]
 
 
-def test_sunset_chokes_are_area_boundaries():
-    """不変条件1：各チョークの両側のコールアウトが「切れ目で別の区画」に分かれていること。
-    切れ目が効いていなければ落ちる（切れ目の効果の検査）。実マップの下地で確認する。
-    B Main/B Site と A Alley/A Site は既知の未解決（choke 位置が境界からずれている）なので、
-    ここでは対象外にして残課題として報告する。"""
+def test_sunset_chokes_are_locally_separated():
+    """不変条件1（局所分離）：異なるエリアの各チョークで、チョーク点から両側へ約 0.04 離した
+    プローブが、全ての切れ目（円＋断面バリア）を入れた状態で別々の局所区画に入ること。
+    同一エリアのチョーク（B Lobby→B Main・A Lobby→A Main）は分離を要求しない。
+    既知の未解決としての除外はしない（分離できなければ落ちる）。"""
     from vreplay import kb as K
+    from vreplay import mapfig as MF
 
     kbm = K.load({}).map("Sunset")
     chokes = [c for c in K.chokes(kbm)
               if len(c.get("areas") or []) >= 2 and c["areas"][0] != c["areas"][1]]
-    known = (["B Main", "B Site"], ["A Alley", "A Site"])
-    for areas, comps, radii in _choke_components(chokes):
-        if areas in known:
-            continue
-        assert comps[0] is not None and comps[1] is not None and comps[0] != comps[1], \
-            (areas, comps, [round(r, 4) for r in radii])
+    assert len(chokes) == 5
+    walk, n, sides = _sunset_sides(chokes)
+    cut, _radii, probes = MF._choke_cuts(walk, sides, n)
+    for i, (ch, cp, _near) in enumerate(sides):
+        assert _locally_separated(walk, cut, cp, probes[i], n), (ch["areas"], probes[i], cp)
 
 
 def test_sunset_site_side_has_no_entry_pixels():
@@ -310,11 +315,7 @@ def test_sunset_forward_point_is_not_entry_area():
     ar = _sunset_areas()
     cs = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]} for v in ar.values()]
     reg = MF.area_regions(_sunset_base(), cs, kbm, k=0)
-    # B Main/B Site は既知の未解決（B Main の飛び地がサイト側へ食い込む）なので対象外。
-    known = {("B Main", "B Site")}
     for (x, y), entry, site in SUNSET_CHOKES:
-        if (entry, site) in known:
-            continue
         sx, sy = ar[site]["x"], ar[site]["y"]
         d = math.hypot(sx - x, sy - y) or 1.0
         fx, fy = x + (sx - x) / d * 0.03, y + (sy - y) / d * 0.03
