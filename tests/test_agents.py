@@ -61,6 +61,18 @@ def test_agent_setups_override_dot_shape():
     assert su["who"]["A"] == ["Jett", "Omen", "Sova", "Viper"]
 
 
+def test_agent_setups_callouts_are_real_callout_names():
+    """アイコン照合で上書きした setup の callouts も、データのコールアウト表記そのまま（エリア名ではない）。"""
+    rt = {"side1": TT.ATTACK, "setups": {"1": {"name": "x", "shape": "A4 B1"}}}
+    ents = [{"agent": a, "team": 1, "zone": z, "callout": c} for a, z, c in
+            [("Sova", "A", "A Elbow"), ("Jett", "A", "A Elbow"), ("Omen", "A", "A Elbow"),
+             ("Viper", "A", "A Elbow"), ("Killjoy", "B", "B Boba")]]
+    TT._agent_setups({"3": {"1:15": ents}}, {3: rt})
+    su = rt["setups"]["1"]
+    assert su["callouts"] == ["A Elbow", "A Elbow", "A Elbow", "A Elbow", "B Boba"]
+    assert su["areas"] == {"A Elbow": 4, "B Boba": 1}
+
+
 def test_region_labels_follow_floor_not_straight_line():
     # 2 本の廊下（左右）を上だけでつなぐ U 字。右の廊下の下端は、直線では左のコールアウトに近いが歩くと右
     mask = np.zeros((100, 100), np.uint8)

@@ -850,13 +850,15 @@ def setup_of(ps: list, start: float, side: str | None, ranks: dict | None = None
         return None
     zones = Counter(p[6] for p in arr if p[6] in CORE_ZONES)
     areas = Counter(a for p in arr if (a := area_name(p[6], p[7] if len(p) > 7 else None)))
+    # callouts はエリア名（areas）ではなく、データのコールアウト表記そのまま（"A Elbow" など）
+    calls = Counter(str(p[7]) for p in arr if len(p) > 7 and p[7] and p[7] != "?")
     shape = " ".join(f"{z}{zones[z]}" for z in CORE_ZONES if zones.get(z))
     code = shape_code(shape)
     area = key_area(areas, side, ranks)
     az = next((p[6] for p in arr if area_name(p[6], p[7] if len(p) > 7 else None) == area), None)
     return {"name": setup_name(zones, side, area=area, ranks=ranks, code=code), "shape": shape, "code": code,
             "zones": dict(zones), "areas": dict(areas), "area": area, "area_zone": az,
-            "callouts": sorted(areas.elements()),
+            "callouts": sorted(calls.elements()),
             "t": round(t - start, 1), "side": side, "n": len(arr)}
 
 
@@ -1005,6 +1007,8 @@ def _agent_setups(agent_info: dict | None, round_tac: dict, ranks: dict | None =
                     who_area.setdefault(a, []).append(e["agent"])
             old_su = (rt.get("setups") or {}).get(str(tm)) or {}
             areas = Counter(a for e in ents if (a := area_name(e.get("zone"), e.get("callout"))))
+            # callouts はエリア名（areas）ではなく、データのコールアウト表記そのまま（"A Elbow" など）
+            calls = Counter(str(e.get("callout")) for e in ents if e.get("callout") and e.get("callout") != "?")
             shape = " ".join(f"{z}{zones[z]}" for z in CORE_ZONES if zones.get(z))
             code = shape_code(shape)
             area = key_area(areas, side, ranks)
@@ -1014,7 +1018,7 @@ def _agent_setups(agent_info: dict | None, round_tac: dict, ranks: dict | None =
                 **old_su, "name": setup_name(zones, side, area=area, ranks=ranks, code=code),
                 "shape": shape, "code": code,
                 "zones": dict(zones), "areas": dict(areas), "area": area, "area_zone": az,
-                "callouts": sorted(areas.elements()),
+                "callouts": sorted(calls.elements()),
                 "side": side, "n": len(ents), "source": "agents", "mark": label,
                 "who": {z: v for z, v in who.items() if z in CORE_ZONES},
                 "who_area": who_area,           # 誰がどのエリアに立つか（5 人の担当）
