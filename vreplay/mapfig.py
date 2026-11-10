@@ -268,12 +268,75 @@ def _polys(mask: np.ndarray) -> list[list[list[float]]]:
     return out
 
 
+GEO_TAG = "geodesic-choke-v1"    # 方式が変わったら上げる（キャッシュのキーに入る）
+CHOKE_EPS = 0.004                # チョークの種を境目の両側へずらす量（表示 0..1 の座標）
+
+
+def _nearest_walkable(walk: np.ndarray, ix: int, iy: int) -> int:
+    """(ix, iy) がいちばん近い通路画素の番号（y * n + x）。通路が無ければ -1。"""
+    n = walk.shape[0]
+    if walk[iy, ix]:
+        return int(iy) * n + int(ix)
+    ys, xs = np.nonzero(walk)
+    if not len(ys):
+        return -1
+    k = ((ys - iy) ** 2 + (xs - ix) ** 2).argmin()
+    return int(ys[k]) * n + int(xs[k])
+
+
+def _dijkstra(walk: np.ndarray, srcs: list[int], n: int) -> tuple[np.ndarray, np.ndarray]:
+    """通路画素（n×n の bool）について、複数の種（番号）からの最短経路距離（測地距離）と、
+    その距離を与えた種の番号を返す。8 近傍で、対角は √2。"""
+    import heapq
+    dist = np.full(n * n, np.inf, np.float64)
+    own = np.full(n * n, -1, np.int32)
+    h = []
+    flat = walk.ravel()
+    for i, s in enumerate(srcs):
+        if s < 0 or not flat[s]:
+            continue
+        dist[s] = 0.0
+        own[s] = i
+        h.append((0.0, s, i))
+    heapq.heapify(h)
+    diag = math.sqrt(2.0)
+    while h:
+        d, node, i = heapq.heappop(h)
+        if d > dist[node]:
+            continue
+        y, x = divmod(node, n)
+        for dy in (-1, 0, 1):
+            yy = y + dy
+            if yy < 0 or yy >= n:
+                continue
+            for dx in (-1, 0, 1):
+                if dx == 0 and dy == 0:
+                    continue
+                xx = x + dx
+                if xx < 0 or xx >= n or not walk[yy, xx]:
+                    continue
+                nb = yy * n + xx
+                nd = d + (diag if dx and dy else 1.0)
+                if nd < dist[nb]:
+                    dist[nb] = nd
+                    own[nb] = i
+                    heapq.heappush(h, (nd, nb, i))
+    return dist, own
+
+
 def area_regions(base: np.ndarray, callouts: list[dict], kb_map: dict | None, *, k: int = 0,
                  cache_dir: Path | None = None, map_name: str = "") -> dict[str, list[list[list[float]]]]:
     """エリア名 → 多角形のリスト（表示の向きの 0..1）。
-    通路のマスク（下地のアルファ > 0）の画素を、いちばん近いコールアウトに割り当て（ボロノイ・256×256 で計算。
-    バイタルは距離を VITAL_SHRINK 倍で測って、サイトの奥まで伸びないようにする）、
-    kb の areas[].callouts でまとめる。通路の画素はすべてどれかのエリアに入る（スポーンがいちばん近い画素だけ外す）。"""
+
+    通路のマスク（下地のアルファ > 0）の画素を、各コールアウトからの**経路距離**（256×256 の
+    測地距離。多始点ダイクストラ）でいちばん近いコールアウトに割り当て、kb の areas[].callouts で
+    まとめる。直線距離のボロノイと違い、境界が狭い通路（チョーク）へ寄る。
+    kb の `chokes`（チョーク点と、その点で切り替わる 2 エリア）は、境目がその点を通るように、
+    両側のエリアの種を点のすぐ両脇へ足して固定する。重み（バイタルの VITAL_SHRINK、`shrink`
+    指定）は距離に掛けて、大きいほど狭くする。通路の画素はすべてどれかのエリアに入る
+    （スポーンがいちばん近い画素だけ外す）。"""
+    from . import kb as K
+
     cs = [c for c in callouts if not _is_spawn_callout(c) and callout_area(c)]
     sp = [c for c in callouts if _is_spawn_callout(c)]
     groups = area_groups(kb_map)
@@ -281,11 +344,13 @@ def area_regions(base: np.ndarray, callouts: list[dict], kb_map: dict | None, *,
     pts = [to_view(float(c["x"]), float(c["y"]), k) for c in cs]
     sp_pts = [to_view(float(c["x"]), float(c["y"]), k) for c in sp]
     names = [groups.get(norm(callout_area(c)), callout_area(c)) for c in cs]
-    wts = area_weights(kb_map)
-    W = np.array([wts.get(n, 1.0) for n in names] + [1.0] * len(sp_pts), dtype=np.float64)
-    key = _sha(view.tobytes(), json.dumps([[round(p[0], 4), round(p[1], 4), n] for p, n in zip(pts, names)]),
-               json.dumps([[round(p[0], 4), round(p[1], 4)] for p in sp_pts]), k, "all-pixels",
-               json.dumps(W.round(3).tolist()))
+    wts = dict(area_weights(kb_map))
+    chokes = K.chokes(kb_map)
+    key = _sha(view.tobytes(), GEO_TAG,
+               json.dumps([[round(p[0], 4), round(p[1], 4), n] for p, n in zip(pts, names)]),
+               json.dumps([[round(p[0], 4), round(p[1], 4)] for p in sp_pts]), k,
+               json.dumps([[round(c["x"], 4), round(c["y"], 4), c["areas"]] for c in chokes]),
+               json.dumps(sorted((n, round(w, 4)) for n, w in wts.items())))
     cp = None
     if cache_dir is not None and map_name:
         cp = Path(cache_dir) / "map_areas" / f"{norm(map_name)}_{int(k) % 4}.json"
@@ -298,22 +363,68 @@ def area_regions(base: np.ndarray, callouts: list[dict], kb_map: dict | None, *,
             pass
     if not cs:
         return {}
-    n = 256
-    gx = (np.arange(n) + 0.5) / n
-    px, py = np.meshgrid(gx, gx)
-    P = np.stack([px.ravel(), py.ravel()], 1)
-    C = np.array(pts + sp_pts, dtype=np.float64)
-    d2 = ((P[:, None, :] - C[None, :, :]) ** 2).sum(2)
-    spawn = d2.argmin(1) >= len(pts)       # スポーンのコールアウトがいちばん近い画素だけ外す（重みなしの距離で）
-    idx = (d2[:, :len(pts)] * (W[None, :len(pts)] ** 2)).argmin(1)
-    idx[spawn] = -1
-    lab = cv2.resize(idx.reshape(n, n).astype(np.int16), (SIZE, SIZE), interpolation=cv2.INTER_NEAREST)
-    walk = view[:, :, 3] > 0
+    # 種：コールアウト＋チョークの両脇＋スポーン
+    seeds: list[tuple[tuple[float, float], str | None]] = [(p, nm) for p, nm in zip(pts, names)]
+    for ch in chokes:
+        cp_pt = to_view(float(ch["x"]), float(ch["y"]), k)
+        near = []                                   # 各エリアで、チョークにいちばん近いコールアウト
+        for nm in ch["areas"]:
+            best, bd = None, 9.0
+            for p, nm2 in zip(pts, names):
+                if nm2 == nm:
+                    dd = math.hypot(p[0] - cp_pt[0], p[1] - cp_pt[1])
+                    if dd < bd:
+                        bd, best = dd, p
+            near.append((nm, best))
+        for i, (nm, ci) in enumerate(near):
+            if ci is None:                          # エリアのコールアウトが無い名前は無視
+                continue
+            others = [c for j, (_n2, c) in enumerate(near) if j != i and c is not None]
+            if others:                              # 反対側のエリアのコールアウトから遠ざかる向きへずらす
+                ox = sum(c[0] for c in others) / len(others)
+                oy = sum(c[1] for c in others) / len(others)
+                ux, uy = ci[0] - ox, ci[1] - oy
+                dn = math.hypot(ux, uy)
+                ux, uy = (ux / dn, uy / dn) if dn > 1e-9 else (0.0, 0.0)
+            else:
+                ux, uy = ci[0] - cp_pt[0], ci[1] - cp_pt[1]
+                dn = math.hypot(ux, uy) or 1.0
+                ux, uy = ux / dn, uy / dn
+            seeds.append(((cp_pt[0] + ux * CHOKE_EPS, cp_pt[1] + uy * CHOKE_EPS), nm))
+    for p in sp_pts:
+        seeds.append((p, None))
     order = list(dict.fromkeys(names))
+    name_id = {nm: i for i, nm in enumerate(order)}
+    n = 256
+    walk = cv2.resize((view[:, :, 3] > 0).astype(np.uint8), (n, n), interpolation=cv2.INTER_NEAREST) > 0
+    by_w: dict[float, list[tuple[tuple[float, float], str | None]]] = {}
+    for p, nm in seeds:
+        by_w.setdefault(round(wts.get(nm, 1.0) if nm else 1.0, 4), []).append((p, nm))
+    best = np.full(n * n, np.inf, np.float64)
+    best_id = np.full(n * n, -1, np.int32)
+    for w, group in by_w.items():
+        srcs = [_nearest_walkable(walk, min(n - 1, max(0, int(p[0] * n))), min(n - 1, max(0, int(p[1] * n))))
+                for p, _nm in group]
+        dist, own = _dijkstra(walk, srcs, n)
+        val = dist * w
+        upd = val < best
+        best[upd] = val[upd]
+        own_ids = np.array([name_id.get(nm, -1) if nm else -1 for _p, nm in group], np.int32)
+        ids = own_ids[np.where(own >= 0, own, 0)]
+        best_id[upd] = np.where(own >= 0, ids, -1)[upd]
+    unreach = walk.ravel() & (best_id < 0)              # 分断された通路は直線距離で埋める
+    if unreach.any() and seeds:
+        gx = (np.arange(n) + 0.5) / n
+        P = np.stack(np.meshgrid(gx, gx), -1).reshape(-1, 2)[unreach]
+        C = np.array([p for p, _nm in seeds], dtype=np.float64)
+        idsC = np.array([name_id.get(nm, -1) if nm else -1 for _p, nm in seeds], np.int32)
+        best_id[unreach] = idsC[((P[:, None, :] - C[None, :, :]) ** 2).sum(2).argmin(1)]
+    lab = cv2.resize(best_id.reshape(n, n).astype(np.int16), (SIZE, SIZE), interpolation=cv2.INTER_NEAREST)
+    walk_full = view[:, :, 3] > 0
     regions = {}
     for nm in order:
-        ids = [i for i, x in enumerate(names) if x == nm]
-        m = (np.isin(lab, ids) & walk).astype(np.uint8)
+        i = name_id[nm]
+        m = ((lab == i) & walk_full).astype(np.uint8)
         polys = _polys(m)
         if polys:
             regions[nm] = polys

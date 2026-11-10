@@ -41,6 +41,9 @@ SITE_SUPERS = {"A", "B", "C"}
 # Sunset は係数が仮の値（0.5 / 0.515625）らしく、スポーンが床の外・サイトが通路に落ちていた。
 # TactiVal で 4 点（両スポーン・A・B）に駒を置いたボードと、TactiVal の絵＝displayIcon という対応から出した。
 CALLOUT_FIX = {"sunset": (1.0029, -0.0801, 0.1319, 0.1005, 1.0385, -0.1653)}
+# CALLOUT_FIX の残差で displayIcon の床から外れる地点だけ、個別の確定値で置き直す（補正後と同じ 0..1 の空間）。
+# Sunset の B Boba：補正後 (0.230, 0.205) は床の外（最寄りまで 0.044）。B Site の領域アンカーなので元座標に戻す。
+CALLOUT_OVERRIDE = {"sunset": {"B Boba": (0.1256, 0.3440)}}
 
 
 # ---------------------------------------------------------------- API メタデータ
@@ -89,15 +92,22 @@ def load_map(name: str, cfg: dict, log=None) -> dict | None:
     xm, ym = float(m.get("xMultiplier") or 0), float(m.get("yMultiplier") or 0)
     xa, ya = float(m.get("xScalarToAdd") or 0), float(m.get("yScalarToAdd") or 0)
     raw = []
+    key_map = _norm(m.get("displayName", ""))
+    fix = CALLOUT_FIX.get(key_map)
+    ov = CALLOUT_OVERRIDE.get(key_map) or {}
     for c in m["callouts"]:
         loc = c.get("location") or {}
         x, y = float(loc.get("x") or 0), float(loc.get("y") or 0)
+        region = c.get("regionName") or ""
+        super_ = c.get("superRegionName") or ""
         # valorant-api の変換は x と y が入れ替わる：画像の横 = ゲームの y、画像の縦 = ゲームの x
         nx, ny = (y * xm + xa, x * ym + ya) if xm or ym else (x, y)
-        fix = CALLOUT_FIX.get(_norm(m.get("displayName", "")))
         if fix and (xm or ym):
             nx, ny = (fix[0] * nx + fix[1] * ny + fix[2], fix[3] * nx + fix[4] * ny + fix[5])
-        raw.append((nx, ny, c.get("regionName") or "", c.get("superRegionName") or ""))
+        label = f"{super_} {region}" if super_ in SITE_SUPERS else region
+        if label in ov:                       # 補正しきれない地点だけ、個別の確定値で置き直す
+            nx, ny = ov[label]
+        raw.append((nx, ny, region, super_))
     xs = [p[0] for p in raw]
     ys = [p[1] for p in raw]
     inside = all(-0.25 <= v <= 1.25 for v in xs + ys)

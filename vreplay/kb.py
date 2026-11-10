@@ -76,6 +76,31 @@ def choke_crossings(kb_map: dict | None) -> list[dict]:
     return out
 
 
+def chokes(kb_map: dict | None) -> list[dict]:
+    """マップのチョークポイント（`config/kb/maps/<map>.yaml` の `chokes`）を正規化して返す。
+
+    各要素は `{x, y, areas}`。`areas` はそのチョークで切り替わる 2 つのエリア名
+    （2026-11-10 青木の 7 点。境目はこの点を通る、という意味。A Lobby→A Main のように
+    同じエリア内のチョークは両側とも同じ名前になる）。
+    書ける形は 2 つ：`[x, y, エリアA, エリアB]`（座標だけの `[x, y]` も可）か、
+    `{x: .., y: .., between: [エリアA, エリアB]}`。座標は displayIcon の 0..1（CALLOUT_FIX 補正後）。"""
+    out = []
+    for c in (kb_map or {}).get("chokes") or []:
+        if isinstance(c, dict):
+            x, y = c.get("x"), c.get("y")
+            areas = c.get("between") or c.get("areas") or []
+        else:
+            try:
+                x, y = c[0], c[1]
+                areas = list(c[2:])
+            except (TypeError, IndexError):
+                continue
+        if x is None or y is None:
+            continue
+        out.append({"x": float(x), "y": float(y), "areas": [str(a) for a in areas]})
+    return out
+
+
 def _merge(a, b):
     """dict は再帰的に、hands・areas などの名前つきリストは name で重ねる。"""
     if isinstance(a, dict) and isinstance(b, dict):

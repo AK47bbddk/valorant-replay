@@ -57,6 +57,45 @@ def test_load_map_offline(tmp_path, monkeypatch):
     assert all(0 <= c["x"] <= 1 and 0 <= c["y"] <= 1 for c in m["callouts"])
 
 
+def test_sunset_b_boba_override_sits_on_the_floor(tmp_path, monkeypatch):
+    """B Boba だけ個別の確定値に置き直す。補正と同じ 0..1 空間の床（displayIcon）に乗り、他のコールアウトは変わらない。"""
+    from pathlib import Path
+
+    from vreplay import minimap as M
+
+    fx = Path(__file__).parent / "fixtures"
+    d = json.loads((fx / "sunset_callouts.json").read_text("utf-8"))
+    fake = [{"displayName": "Sunset", "displayIcon": "",
+             "xMultiplier": d["xMultiplier"], "yMultiplier": d["yMultiplier"],
+             "xScalarToAdd": d["xScalarToAdd"], "yScalarToAdd": d["yScalarToAdd"],
+             "callouts": [{"regionName": n, "superRegionName": s, "location": {"x": x, "y": y}}
+                          for n, s, x, y in d["callouts"]]}]
+    monkeypatch.setattr(tactics, "_fetch_maps", lambda cfg, log=None: fake)
+    got = tactics.load_map("Sunset", {"output": {"dir": str(tmp_path)}})
+    by_name = {(c["super"], c["name"]): c for c in got["callouts"]}
+
+    assert tactics.CALLOUT_OVERRIDE["sunset"]["B Boba"] == (0.1256, 0.3440)
+    boba = by_name[("B", "Boba")]
+    assert (round(boba["x"], 4), round(boba["y"], 4)) == (0.1256, 0.3440)
+    # 床：放送のミニマップの床は displayIcon と同じ 0..1（test_minimap と同じ作り方）
+    mask = M.map_mask(cv2.imread(str(fx / "minimap_sunset_riot.jpg")))
+    assert mask is not None
+    h, w = mask.shape
+    dist = cv2.distanceTransform((~mask).astype(np.uint8), cv2.DIST_L2, 3) / h
+    xi, yi = int(boba["x"] * w), int(boba["y"] * h)
+    assert mask[yi, xi] or dist[yi, xi] <= 0.01
+
+    # B Boba 以外は CALLOUT_FIX のまま（個別上書きが他へ漏れていない）
+    fix = tactics.CALLOUT_FIX["sunset"]
+    for n, s, x, y in d["callouts"]:
+        if n == "Boba" and s == "B":
+            continue
+        rx, ry = y * d["xMultiplier"] + d["xScalarToAdd"], x * d["yMultiplier"] + d["yScalarToAdd"]
+        ex, ey = fix[0] * rx + fix[1] * ry + fix[2], fix[3] * rx + fix[4] * ry + fix[5]
+        c = by_name[(s, n)]
+        assert abs(c["x"] - ex) < 1e-9 and abs(c["y"] - ey) < 1e-9, (s, n)
+
+
 def test_calibrate_rotation_color(tmp_path):
     spawns = {tactics.ATTACK: (0.2, 0.2), tactics.DEFENSE: (0.8, 0.8)}
     early = [{"side1": "攻撃", "warm": (0.8, 0.2), "cool": (0.2, 0.8)} for _ in range(5)]

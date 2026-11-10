@@ -168,20 +168,94 @@ def test_show_stab_needs_two_shows_then_a_win_elsewhere():
     assert len(PB.stabs({"items": dd}, "防衛")) == 1
 
 
-def test_sunset_vital_area_does_not_reach_into_the_site():
-    """規則2：A Main（バイタル）の色はチョークの先（A Elbow・A Site）へ広がらない。
-    実マップのコールアウト座標（tests/fixtures）でエリアの多角形を作って確認する。"""
+def _sunset_areas():
+    """Sunset のコールアウトを CALLOUT_FIX 補正後の座標で返す（チョークと揃う空間）。
+    素の deckfx.areas() は補正前の座標なので、そのまま使うとチョークと必ずズレる。"""
+    from vreplay import tactics as T
+
+    ar = FX.areas("sunset")
+    fx = T.CALLOUT_FIX["sunset"]
+    for v in ar.values():
+        x, y = v["x"], v["y"]
+        v["x"], v["y"] = fx[0] * x + fx[1] * y + fx[2], fx[3] * x + fx[4] * y + fx[5]
+    return ar
+
+
+def _flat_base():
     import numpy as np
 
+    base = np.zeros((1024, 1024, 4), np.uint8)
+    base[:, :, 3] = 255                       # 全面が通路（アルファ > 0）
+    return base
+
+
+def _area_near(reg, name, x, y, r=0.03):
+    """エリア name の多角形が、点 (x, y) の半径 r 以内の画素を持つか。"""
+    from vreplay import mapfig as MF
+
+    m = MF._fill(reg.get(name, []))
+    ix, iy = int(x * MF.SIZE), int(y * MF.SIZE)
+    rr = int(r * MF.SIZE)
+    y0, y1 = max(0, iy - rr), min(MF.SIZE, iy + rr + 1)
+    x0, x1 = max(0, ix - rr), min(MF.SIZE, ix + rr + 1)
+    return bool(m[y0:y1, x0:x1].any())
+
+
+# 青木が Tactival に示した Sunset のチョーク 7 点（config/kb/maps/sunset.yaml の chokes と同じ）。
+# A Lobby→A Main（0.766, 0.630）は同じエリア（A Main）内のチョークなので、
+# 両側が同じエリアになり、ここではペア検査の対象外にする。
+SUNSET_CHOKES = [
+    ((0.1134, 0.5867), "B Main", "B Site"),
+    ((0.2441, 0.5116), "B Market", "B Site"),
+    ((0.3846, 0.4585), "Mid", "B Market"),
+    ((0.4994, 0.3620), "Mid", "Mid Top"),
+    ((0.6979, 0.4743), "A Main", "A Site"),
+    ((0.8988, 0.3192), "A Alley", "A Site"),
+]
+
+
+def test_sunset_chokes_are_area_boundaries():
+    """エリアはチョークを跨がない（2026-11-10 規則）：Sunset の各チョークの近傍（半径 0.03）に、
+    境目の両側のエリアの画素が両方あること。座標は CALLOUT_FIX 補正後でチョークと揃える。"""
     from vreplay import kb as K
     from vreplay import mapfig as MF
 
     kbm = K.load({}).map("Sunset")
-    ar = FX.areas("sunset")
+    ar = _sunset_areas()
     cs = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]} for v in ar.values()]
-    base = np.zeros((1024, 1024, 4), np.uint8)
-    base[:, :, 3] = 255                       # 全面が通路（アルファ > 0）
-    reg = MF.area_regions(base, cs, kbm, k=0)
+    reg = MF.area_regions(_flat_base(), cs, kbm, k=0)
+    assert {"B Main", "B Site", "B Market", "Mid", "Mid Top", "A Main", "A Site", "A Alley"} <= set(reg)
+    for (x, y), a, b in SUNSET_CHOKES:
+        assert _area_near(reg, a, x, y), (a, (x, y))
+        assert _area_near(reg, b, x, y), (b, (x, y))
+
+
+def test_sunset_main_regions_stop_before_the_site_and_plant_band():
+    """規則2：Main 系エリアはチョークで止まり、サイト側（サイトのコールアウト・プラント帯域の
+    A Elbow / B Boba）に入らない。main-region-fix（プラントのアンカー）の検査をここに吸収する。"""
+    from vreplay import kb as K
+    from vreplay import mapfig as MF
+
+    kbm = K.load({}).map("Sunset")
+    ar = _sunset_areas()
+    cs = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]} for v in ar.values()]
+    reg = MF.area_regions(_flat_base(), cs, kbm, k=0)
+    for main, pts in (("A Main", ("A Site", "A Elbow")), ("B Main", ("B Site", "B Boba"))):
+        assert main in reg
+        for c in pts:
+            assert not MF.contains(reg[main], ar[c]["x"], ar[c]["y"]), (main, c)
+
+
+def test_sunset_vital_area_does_not_reach_into_the_site():
+    """規則2：A Main（バイタル）の色はチョークの先（A Elbow・A Site）へ広がらない。
+    実マップのコールアウト座標（tests/fixtures、CALLOUT_FIX 補正後）で確認する。"""
+    from vreplay import kb as K
+    from vreplay import mapfig as MF
+
+    kbm = K.load({}).map("Sunset")
+    ar = _sunset_areas()
+    cs = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]} for v in ar.values()]
+    reg = MF.area_regions(_flat_base(), cs, kbm, k=0)
     assert "A Main" in reg
     for c in ("A Elbow", "A Site", "A Link", "A Alley"):
         assert not MF.contains(reg["A Main"], ar[c]["x"], ar[c]["y"]), c

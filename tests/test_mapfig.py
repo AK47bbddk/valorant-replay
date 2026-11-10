@@ -201,3 +201,44 @@ def test_vital_shrinks_so_it_does_not_reach_into_the_site():
     assert sum(size(a, v) for v in vit) < sum(size(b, v) for v in vit)
     assert MF.area_weights(kbm)[vit[0]] == MF.VITAL_SHRINK
     assert MF.area_weights({"areas": [{"name": "X", "shrink": 1.1}]}) == {"X": 1.1}
+
+
+# ====================================================================== チョーク境界モデル（2026-11-10）
+def test_kb_chokes_are_read():
+    """kb がマップのチョーク（点と、その点で切り替わる 2 エリア）を読める。形式は 4 要素のリストと辞書。"""
+    kbm = K.load({}).map("Sunset")
+    ch = K.chokes(kbm)
+    assert len(ch) == 7
+    assert all({"x", "y", "areas"} == set(c) for c in ch)
+    assert all(len(c["areas"]) == 2 for c in ch)
+    assert K.chokes({"chokes": [{"x": 0.1, "y": 0.2, "between": ["Mid", "B Site"]}]}) == \
+        [{"x": 0.1, "y": 0.2, "areas": ["Mid", "B Site"]}]
+    assert K.chokes({"chokes": [[0.3, 0.4, "A Main", "A Site"]]})[0]["areas"] == ["A Main", "A Site"]
+
+
+def test_geodesic_distance_takes_the_path():
+    """測地距離は壁を回る：コの字の通路で、直線距離ではなく実際の道のりを返す。"""
+    n = 64
+    walk = np.zeros((n, n), bool)
+    walk[8, 10:51] = True            # 上辺（左 → 右）
+    walk[8:41, 50] = True            # 右の縦
+    walk[40, 20:51] = True           # 下辺（右 → 左）
+    src = 8 * n + 10
+    dist, own = MF._dijkstra(walk, [src], n)
+    straight = ((40 - 8) ** 2 + (20 - 10) ** 2) ** 0.5
+    path = (50 - 10) + (40 - 8) + (50 - 20)
+    assert straight < dist[40 * n + 20] < path      # 直線ではなくコの字の道のり
+    assert dist[40 * n + 20] > 0.97 * path          # 角の対角のぶんだけ短い程度
+    assert (own[walk.ravel()] >= 0).all()            # 通路はすべてどの種からかの距離を持つ
+    assert not np.isfinite(dist[0])                  # 通路の外は到達できない
+
+
+def test_area_regions_ignores_cache_from_another_method(tmp_path):
+    """キャッシュ（map_areas）は方式が変わると使わない：古い方式のキーのファイルは無視する。"""
+    import json
+    d = tmp_path / "map_areas"
+    d.mkdir()
+    (d / "split_0.json").write_text(json.dumps({"key": "old-euclidean", "regions": {"WRONG": []}}), "utf-8")
+    reg = MF.area_regions(FX.syn_base(1024), FX.syn_meta()["callouts"], K.load({}).map("Split"),
+                          k=0, cache_dir=tmp_path, map_name="Split")
+    assert "WRONG" not in reg and "MID" in reg
