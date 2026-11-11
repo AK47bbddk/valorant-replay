@@ -271,7 +271,20 @@ def test_setup_of_ignores_spawn_and_prefers_115():
     assert su["t"] == 25.0 and su["n"] == 5                 # スポーンの点ではなく 1:15 を使う
     assert su["shape"] == "A1 Mid2 B2" and su["code"] == "1-2-2"
     assert su["area"] == "B Link" and su["name"] == "B Link テイクデフォ"
-    assert "Spawn" not in su["callouts"] and "Mid Bottom" in su["callouts"]
+    assert "Spawn" not in su["callouts"] and "Bottom" in su["callouts"]     # callouts はデータの表記そのまま
+    assert su["areas"] == {"A Main": 1, "B Link": 2, "Mid Bottom": 1, "Mid Top": 1}   # areas はエリア名のまま
+
+
+def test_setup_of_callouts_are_real_callout_names():
+    """setup の callouts はエリア名（area_name）ではなく、データの callout 表記そのままを入れる。"""
+    ps = [_sp(1, 125.0, 1, "攻撃", z, c) for z, c in
+          (("A", "A Elbow"), ("A", "A Elbow"), ("B", "B Boba"), ("B", "B Main"), ("Mid", "Bottom"))]
+    su = tactics.setup_of(ps, 100.0, "攻撃")
+    assert "A Elbow" in su["callouts"] and "B Boba" in su["callouts"]
+    assert "Bottom" in su["callouts"] and "Mid Bottom" not in su["callouts"]   # エリア名は callouts に入れない
+    # areas と zones の意味は変えない（area_name と人数）
+    assert su["areas"] == {"A Elbow": 2, "B Boba": 1, "B Main": 1, "Mid Bottom": 1}
+    assert su["zones"] == {"A": 2, "B": 2, "Mid": 1}
 
 
 def test_setup_name_follows_the_coach():

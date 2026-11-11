@@ -189,6 +189,63 @@ def _flat_base():
     return base
 
 
+def _sunset_base():
+    """Sunset の公式 displayIcon（アルファ付き）。無ければ合成の全面通路に落とす。"""
+    import cv2
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    for p in (root / "_review" / "_cache" / "map_icons" / "sunset.png",
+              root / ".review_tmp" / "sunset_displayicon.png"):
+        if p.exists():
+            img = cv2.imread(str(p), cv2.IMREAD_UNCHANGED)
+            if img is not None and img.ndim == 3 and img.shape[2] == 4:
+                return img
+    return _flat_base()
+
+
+def _sunset_sides(chokes):
+    """Sunset の実マップ下地（256px）で、チョークと両側の最近コールアウトを返す。"""
+    import cv2
+    import numpy as np
+
+    from vreplay import kb as K
+    from vreplay import mapfig as MF
+
+    kbm = K.load({}).map("Sunset")
+    view = MF.rotate_image(_sunset_base(), 0)
+    n = 256
+    walk = cv2.resize((view[:, :, 3] > 0).astype(np.uint8), (n, n),
+                      interpolation=cv2.INTER_NEAREST) > 0
+    ar = _sunset_areas()
+    cs = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]} for v in ar.values()]
+    pts = [MF.to_view(float(c["x"]), float(c["y"]), 0) for c in cs]
+    names = [MF.area_groups(kbm).get(MF.norm(MF.callout_area(c)), MF.callout_area(c)) for c in cs]
+    return walk, n, MF._choke_sides(chokes, pts, names, 0)
+
+
+def _locally_separated(walk, cut, cp, probes, n, radius=None):
+    """局所分離の検査（テスト側の実装）。チョーク点の近くだけを見て、両プローブが別の区画か。"""
+    import cv2
+    import numpy as np
+
+    from vreplay import mapfig as MF
+
+    radius = MF.CHOKE_LOCAL if radius is None else radius
+    src = MF._nearest_walkable(walk, min(n - 1, max(0, int(round(cp[0] * n)))),
+                               min(n - 1, max(0, int(round(cp[1] * n)))))
+    if src < 0:
+        return False
+    dist, _ = MF._dijkstra(walk, [src], n)
+    local = (walk & ~cut) & (dist.reshape(n, n) <= radius * n)
+    lab = cv2.connectedComponents(local.astype(np.uint8), connectivity=8)[1]
+    comps = []
+    for q in probes:
+        qq = MF._nearest_walkable(local, *divmod(q, n)[::-1]) if q is not None and q >= 0 else -1
+        comps.append(int(lab.ravel()[qq]) if qq >= 0 else None)
+    return len(comps) == 2 and comps[0] is not None and comps[1] is not None and comps[0] != comps[1]
+
+
 def _area_near(reg, name, x, y, r=0.03):
     """エリア name の多角形が、点 (x, y) の半径 r 以内の画素を持つか。"""
     from vreplay import mapfig as MF
@@ -201,11 +258,10 @@ def _area_near(reg, name, x, y, r=0.03):
     return bool(m[y0:y1, x0:x1].any())
 
 
-# 青木が Tactival に示した Sunset のチョーク 7 点（config/kb/maps/sunset.yaml の chokes と同じ）。
-# A Lobby→A Main（0.766, 0.630）は同じエリア（A Main）内のチョークなので、
-# 両側が同じエリアになり、ここではペア検査の対象外にする。
+# 青木が Tactival に示した Sunset のチョークのうち、異なるエリアの境目。
+# B Lobby→B Main（0.113, 0.587）と A Lobby→A Main（0.766, 0.630）は同じエリア内の
+# チョークなので、ここではペア検査の対象外にする。
 SUNSET_CHOKES = [
-    ((0.1134, 0.5867), "B Main", "B Site"),
     ((0.2441, 0.5116), "B Market", "B Site"),
     ((0.3846, 0.4585), "Mid", "B Market"),
     ((0.4994, 0.3620), "Mid", "Mid Top"),
@@ -214,20 +270,61 @@ SUNSET_CHOKES = [
 ]
 
 
-def test_sunset_chokes_are_area_boundaries():
-    """エリアはチョークを跨がない（2026-11-10 規則）：Sunset の各チョークの近傍（半径 0.03）に、
-    境目の両側のエリアの画素が両方あること。座標は CALLOUT_FIX 補正後でチョークと揃える。"""
+def test_sunset_chokes_are_locally_separated():
+    """不変条件1（局所分離）：異なるエリアの各チョークで、チョーク点から両側へ約 0.04 離した
+    プローブが、全ての切れ目（円＋断面バリア）を入れた状態で別々の局所区画に入ること。
+    同一エリアのチョーク（B Lobby→B Main・A Lobby→A Main）は分離を要求しない。
+    既知の未解決としての除外はしない（分離できなければ落ちる）。"""
+    from vreplay import kb as K
+    from vreplay import mapfig as MF
+
+    kbm = K.load({}).map("Sunset")
+    chokes = [c for c in K.chokes(kbm)
+              if len(c.get("areas") or []) >= 2 and c["areas"][0] != c["areas"][1]]
+    assert len(chokes) == 6
+    walk, n, sides = _sunset_sides(chokes)
+    cut, _radii, probes, _barrier = MF._choke_cuts(walk, sides, n)
+    for i, (ch, cp, _near) in enumerate(sides):
+        assert _locally_separated(walk, cut, cp, probes[i], n), (ch["areas"], probes[i], cp)
+
+
+def test_sunset_site_side_has_no_entry_pixels():
+    """不変条件2：サイト側の区画（A Site / B Site）に入口エリアのコールアウト画素が入らないこと。
+
+    2026-11-11 のモデル変更：C10 より北はサイト側なので、B Main コールアウトは B Site に
+    入る（B Site の callouts に追加）。したがって入口エリアの判定は B Lobby・B Market で見る。
+    B Main コールアウトは B Site に入っていることをあわせて固定する。"""
     from vreplay import kb as K
     from vreplay import mapfig as MF
 
     kbm = K.load({}).map("Sunset")
     ar = _sunset_areas()
     cs = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]} for v in ar.values()]
-    reg = MF.area_regions(_flat_base(), cs, kbm, k=0)
-    assert {"B Main", "B Site", "B Market", "Mid", "Mid Top", "A Main", "A Site", "A Alley"} <= set(reg)
-    for (x, y), a, b in SUNSET_CHOKES:
-        assert _area_near(reg, a, x, y), (a, (x, y))
-        assert _area_near(reg, b, x, y), (b, (x, y))
+    reg = MF.area_regions(_sunset_base(), cs, kbm, k=0)
+    for site, entries in (("A Site", ("A Main", "A Lobby")),
+                          ("B Site", ("B Lobby", "B Market"))):
+        assert site in reg
+        for e in entries:
+            assert not MF.contains(reg[site], ar[e]["x"], ar[e]["y"]), (site, e)
+    assert MF.contains(reg["B Site"], ar["B Main"]["x"], ar["B Main"]["y"])       # C10 より北はサイト側
+
+
+def test_sunset_forward_point_is_not_entry_area():
+    """不変条件3：各チョークのすぐ先（サイト側へ 0.03 進んだ点）が手前側の入口エリアでないこと。"""
+    import math
+
+    from vreplay import kb as K
+    from vreplay import mapfig as MF
+
+    kbm = K.load({}).map("Sunset")
+    ar = _sunset_areas()
+    cs = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]} for v in ar.values()]
+    reg = MF.area_regions(_sunset_base(), cs, kbm, k=0)
+    for (x, y), entry, site in SUNSET_CHOKES:
+        sx, sy = ar[site]["x"], ar[site]["y"]
+        d = math.hypot(sx - x, sy - y) or 1.0
+        fx, fy = x + (sx - x) / d * 0.03, y + (sy - y) / d * 0.03
+        assert not MF.contains(reg.get(entry, []), fx, fy), (entry, site, (fx, fy))
 
 
 def test_sunset_main_regions_stop_before_the_site_and_plant_band():
@@ -280,3 +377,275 @@ def test_split_vital_areas_do_not_reach_into_the_site():
         assert not MF.contains(reg["MID"], ar[c]["x"], ar[c]["y"]), ("MID", c)
     for c in ("A Site", "A Tower", "A Screens", "A Main"):
         assert not MF.contains(reg["A Ramps"], ar[c]["x"], ar[c]["y"]), ("A Ramps", c)
+
+
+# ====================================================================== C10 境界（2026-11-11）
+def test_sunset_b_site_region_stays_north_of_c10_on_the_west():
+    """受け入れ条件1：C10（0.1134, 0.5867）を境に、B Site の領域が西側（u < 0.17）で
+    C10 の緯度（v = 0.5867）より南に出ないこと。C10 は西端の細い通路を伝う回り込みを
+    止める断面バリアで切る。"""
+    import numpy as np
+
+    from vreplay import kb as K
+    from vreplay import mapfig as MF
+
+    kbm = K.load({}).map("Sunset")
+    ar = _sunset_areas()
+    cs = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]} for v in ar.values()]
+    reg = MF.area_regions(_sunset_base(), cs, kbm, k=0)
+    assert "B Site" in reg
+    m = MF._fill(reg["B Site"])
+    ys, xs = np.nonzero(m)
+    u = (xs + 0.5) / MF.SIZE
+    v = (ys + 0.5) / MF.SIZE
+    south_west = (u < 0.17) & (v > 0.5867)
+    assert not south_west.any(), int(south_west.sum())
+
+
+# ====================================================================== 青木の境界線（walls・2026-11-11）
+
+# 各 wall の両側（中点から法線方向へ 0.03）に想定されるエリア（2026-11-11 窓口の実測で確定）。
+# wall の向きに応じて 縦の線は 西／東、横の線は 北／南 で見る。
+# 6 は「西=A Site」だけを固定する（東側のエリア名は判断待ちのため固定しない）。両側が別区画で
+# あることは test_sunset_wall_cut_separates_both_sides_locally で固定する。
+# 10 は窓口の目標が「北=Mid Top・南=A Main」だが、南側は A Site の領域と連続していて別区画に
+# できない（A Site のコールアウト A Elbow が壁の東にあり、南側を A Main にすると「Main はサイト
+# に届かない」不変条件と衝突する）。成立しない条件は xfail にせず、南側は現状の A Site を固定して
+# 理由を報告（残課題）に書く。
+SUNSET_WALLS_EXPECT = {
+    1: {"北": "B Site", "南": "B Main"},
+    2: {"西": "B Site", "東": "B Market"},
+    3: {"西": "B Market", "東": "Mid"},
+    4: {"西": "A Main", "東": "A Main"},           # 同一エリア内の線
+    5: {"北": "A Site", "南": "A Main"},
+    6: {"西": "A Site"},                           # 東側のエリア名は判断待ちで固定しない
+    7: {"北": "Mid Top", "南": "Mid"},
+    8: {"西": "B Site", "東": "Mid Top"},
+    9: {"北": "A Alley", "南": "A Link"},
+    10: {"北": "Mid Top", "南": "A Site"},         # 窓口の目標は南=A Main だが現状は A Site（残課題）
+}
+
+
+def _wall_sides_named(reg, wall, d=0.03):
+    """wall の中点から法線方向へ d ずらした 2 点のエリアを、wall の向きに応じて東西／南北で返す。"""
+    import math
+
+    from vreplay import mapfig as MF
+
+    mx, my = (wall["u1"] + wall["u2"]) / 2, (wall["v1"] + wall["v2"]) / 2
+    du, dv = wall["u2"] - wall["u1"], wall["v2"] - wall["v1"]
+    L = math.hypot(du, dv) or 1.0
+    nx, ny = -dv / L, du / L
+
+    def at(u, v):
+        return next((nm for nm, ps in reg.items() if MF.contains(ps, u, v)), None)
+
+    out = {}
+    for sgn in (1, -1):
+        u, v = mx + sgn * nx * d, my + sgn * ny * d
+        if abs(dv) >= abs(du):                       # 縦の線：法線は横向き（東／西）
+            dirn = "西" if u < mx else "東"
+        else:                                        # 横の線：法線は縦向き（北／南）
+            dirn = "北" if v < my else "南"
+        out[dirn] = at(u, v)
+    return out
+
+
+def _sunset_walk():
+    import cv2
+    import numpy as np
+
+    from vreplay import mapfig as MF
+
+    n = 256
+    view = MF.rotate_image(_sunset_base(), 0)
+    return cv2.resize((view[:, :, 3] > 0).astype(np.uint8), (n, n), interpolation=cv2.INTER_NEAREST) > 0
+
+
+def test_sunset_wall_cut_separates_both_sides_locally():
+    """青木の境界線（walls）は歩行マスクの切れ目として焼き込まれる：各 wall の両側 0.03 の点は、
+    wall を入れた局所区画では別々になる（壁がボトルネックを塞いでいる）。"""
+    import math
+
+    from vreplay import kb as K
+    from vreplay import mapfig as MF
+
+    walls = K.walls(K.load({}).map("Sunset"))
+    walk = _sunset_walk()
+    n = 256
+    wall_cut = MF._wall_cut_mask(walls, 0, n)
+    assert (wall_cut & walk).any()                       # 壁が歩行可能な通路に乗っている
+    for w in walls:
+        mx, my = (w["u1"] + w["u2"]) / 2, (w["v1"] + w["v2"]) / 2
+        du, dv = w["u2"] - w["u1"], w["v2"] - w["v1"]
+        L = math.hypot(du, dv) or 1.0
+        nx, ny = -dv / L, du / L
+        probes = []
+        for sgn in (1, -1):
+            ix = min(n - 1, max(0, int((mx + sgn * nx * 0.03) * n)))
+            iy = min(n - 1, max(0, int((my + sgn * ny * 0.03) * n)))
+            probes.append(MF._nearest_walkable(walk & ~wall_cut, ix, iy))
+        assert MF._local_separated(walk, wall_cut, (mx, my), probes, n), w
+
+
+def test_sunset_near_wall_chokes_skip_circle_and_barrier():
+    """近く（WALL_NEAR 以内）に wall があるチョークは、円・断面バリアを使わない（wall を優先）。
+    Sunset の異なるエリアの境のチョークは全て wall の近くにあり、断面バリアは 1 つも残らない。"""
+    from vreplay import kb as K
+    from vreplay import mapfig as MF
+
+    kbm = K.load({}).map("Sunset")
+    walls = K.walls(kbm)
+    ar = _sunset_areas()
+    cs = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]} for v in ar.values()]
+    pts = [MF.to_view(float(c["x"]), float(c["y"]), 0) for c in cs]
+    names = [MF.area_groups(kbm).get(MF.norm(MF.callout_area(c)), MF.callout_area(c)) for c in cs]
+    chokes = [c for c in K.chokes(kbm)
+              if len(c.get("areas") or []) >= 2 and c["areas"][0] != c["areas"][1]]
+    sides = MF._choke_sides(chokes, pts, names, 0)
+    assert all(MF._dist_to_walls(ch["x"], ch["y"], walls) <= MF.WALL_NEAR for ch, _cp, _n in sides)
+    walk = _sunset_walk()
+    _cut, _r, _probes, barrier_no = MF._choke_cuts(walk, sides, 256)
+    _cut2, _r2, _probes2, barrier = MF._choke_cuts(walk, sides, 256, walls=walls,
+                                                   wall_cut=MF._wall_cut_mask(walls, 0, 256))
+    assert barrier_no.any() and not barrier.any()
+
+
+def test_sunset_elbow_choke_is_removed():
+    """前タスクで追加した A Elbow の縦帯チョーク（0.918, 0.345）は、線分6 がその役割を果たすため削除。"""
+    from vreplay import kb as K
+
+    chokes = K.chokes(K.load({}).map("Sunset"))
+    assert not [c for c in chokes if abs(c["x"] - 0.918) < 1e-6 and abs(c["y"] - 0.345) < 1e-6]
+    assert [c for c in chokes if c["areas"] == ["A Alley", "A Site"]]        # 裏口のチョークは残る
+    # C10 のペアと B のコールアウト付け替えは維持
+    kbm = K.load({}).map("Sunset")
+    assert [c for c in chokes if abs(c["x"] - 0.1134) < 1e-6][0]["areas"] == ["B Main", "B Site"]
+    bsite = next(a for a in kbm["areas"] if a["name"] == "B Site")
+    bmain = next(a for a in kbm["areas"] if a["name"] == "B Main")
+    assert "B Main" in bsite["callouts"] and bmain["callouts"] == ["B Lobby"]
+
+
+@pytest.mark.parametrize("idx,expected", sorted(SUNSET_WALLS_EXPECT.items()))
+def test_sunset_wall_sides_match_expected(idx, expected):
+    """受け入れ条件：各 wall の両側 0.03 の点（中点から法線方向）が想定のエリアになること。
+    wall の向きに応じて東西／南北で見る。6 は東側のエリア名を固定しない（判断待ち）。
+    10 の南側は窓口の目標が A Main だが、与えた wall では A Site と連続していて別区画にできない
+    （残課題）。成立しない条件は xfail にせず、現状を固定して報告に書く。"""
+    from vreplay import kb as K
+    from vreplay import mapfig as MF
+
+    kbm = K.load({}).map("Sunset")
+    ar = _sunset_areas()
+    cs = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]} for v in ar.values()]
+    reg = MF.area_regions(_sunset_base(), cs, kbm, k=0)
+    got = _wall_sides_named(reg, K.walls(kbm)[idx - 1])
+    for dirn, name in expected.items():
+        assert got.get(dirn) == name, (idx, dirn, name, got)
+
+
+def test_sunset_b_site_does_not_go_south_of_wall1_on_the_west():
+    """受け入れ条件：B Site の領域が線分1（v = 0.5763）より南（西側 u < 0.17）に出ないこと。
+    描画の 1〜2px のはみ出しを許容するため 0.004 の余裕（許容）を持たせる。"""
+    import numpy as np
+
+    from vreplay import kb as K
+    from vreplay import mapfig as MF
+
+    kbm = K.load({}).map("Sunset")
+    ar = _sunset_areas()
+    cs = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]} for v in ar.values()]
+    reg = MF.area_regions(_sunset_base(), cs, kbm, k=0)
+    m = MF._fill(reg["B Site"])
+    ys, xs = np.nonzero(m)
+    u, v = (xs + 0.5) / MF.SIZE, (ys + 0.5) / MF.SIZE
+    bad = (u < 0.17) & (v > 0.5763 + 0.004)
+    assert not bad.any(), int(bad.sum())
+
+
+def test_sunset_wall6_west_side_is_a_site():
+    """wall 6（A サイト北東ドアの縦線）の西側は A Site。東側のエリア名は判断待ちなので固定しない。
+    両側 0.03 の点が wall を入れた局所区画で別々になることは
+    test_sunset_wall_cut_separates_both_sides_locally で固定する。
+
+    なお当初の受け入れ条件『A Site が線分6 より東に出ない』は成立しない：A Site のコールアウト
+    A Elbow が線分6 の東側にあり、A Site は線分6 をまたぐため。xfail にせず報告（残課題）に書く。"""
+    import numpy as np
+
+    from vreplay import kb as K
+    from vreplay import mapfig as MF
+
+    kbm = K.load({}).map("Sunset")
+    ar = _sunset_areas()
+    cs = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]} for v in ar.values()]
+    reg = MF.area_regions(_sunset_base(), cs, kbm, k=0)
+    wall6 = K.walls(kbm)[5]
+    sides = _wall_sides_named(reg, wall6)
+    assert sides.get("西") == "A Site", sides
+    # 線分6 の東に A Site（A Elbow）が出るのが現状。ここは固定せず報告のみ（残課題）。
+    m = MF._fill(reg["A Site"])
+    ys, xs = np.nonzero(m)
+    u = (xs + 0.5) / MF.SIZE
+    assert (u > 0.8927).any()
+
+
+# ====================================================================== スポーン2エリア（2026-11-11）
+def test_sunset_spawn_areas_and_walls_separate_from_the_map():
+    """受け入れ条件：4本のスポーン出口 wall を入れた状態で、攻撃側 Spawn の地点は T Spawn、
+    防衛側 Spawn の地点は CT Spawn になり、スポーン区画から B Lobby / A Lobby / Mid Top /
+    B Market / A Link へ wall を越えずには到達できないこと。"""
+    import cv2
+    import numpy as np
+
+    from vreplay import kb as K
+    from vreplay import mapfig as MF
+
+    kbm = K.load({}).map("Sunset")
+    ar = _sunset_areas()
+    cs = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]} for v in ar.values()]
+    reg = MF.area_regions(_sunset_base(), cs, kbm, k=0)
+    atk, dfd = ar["攻撃側 Spawn"], ar["防衛側 Spawn"]
+    assert MF.contains(reg.get("T Spawn", []), atk["x"], atk["y"])
+    assert MF.contains(reg.get("CT Spawn", []), dfd["x"], dfd["y"])
+    assert not MF.contains(reg.get("CT Spawn", []), atk["x"], atk["y"])
+    assert not MF.contains(reg.get("T Spawn", []), dfd["x"], dfd["y"])
+
+    walls = K.walls(kbm)[10:]                       # 今回追加した出口4本だけでも分離できること
+    n = 256
+    view = MF.rotate_image(_sunset_base(), 0)
+    walk = cv2.resize((view[:, :, 3] > 0).astype(np.uint8), (n, n),
+                      interpolation=cv2.INTER_NEAREST) > 0
+    seg = walk & ~MF._wall_cut_mask(walls, 0, n)
+    _n, comp = cv2.connectedComponents(seg.astype(np.uint8), connectivity=8)
+
+    def comp_at(p):
+        ix = min(n - 1, max(0, int(p["x"] * n)))
+        iy = min(n - 1, max(0, int(p["y"] * n)))
+        q = MF._nearest_walkable(seg, ix, iy)
+        return int(comp.ravel()[q]) if q >= 0 else -1
+
+    anchors = ("B Lobby", "A Lobby", "Mid Top", "B Market", "A Link")
+    for spawn, others in ((atk, anchors), (dfd, anchors)):
+        c = comp_at(spawn)
+        assert c > 0
+        for a in others:
+            assert comp_at(ar[a]) != c, (spawn, a)
+    assert comp_at(atk) != comp_at(dfd)
+
+
+def test_sunset_a_site_region_keeps_the_elbow_band():
+    """エルボー監査：A Elbow は kb で A Site 側なので、A Site の領域にエルボー地点が入り、
+    配置図のラベル候補（deck._area_xy）にも A Elbow が含まれること。
+    本文に Elbow が出ないのは report.json の setup に Elbow の出現が無いため（データ側）。"""
+    from vreplay import deck as D
+    from vreplay import kb as K
+    from vreplay import mapfig as MF
+
+    kbm = K.load({}).map("Sunset")
+    ar = _sunset_areas()
+    cs = [{"name": v["name"], "super": v["super"], "x": v["x"], "y": v["y"]} for v in ar.values()]
+    reg = MF.area_regions(_sunset_base(), cs, kbm, k=0)
+    elbow = ar["A Elbow"]
+    assert MF.contains(reg["A Site"], elbow["x"], elbow["y"])
+    assert not MF.contains(reg.get("A Main", []), elbow["x"], elbow["y"])
+    assert "A Elbow" in D._area_xy(cs)

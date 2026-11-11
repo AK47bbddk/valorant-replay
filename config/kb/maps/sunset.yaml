@@ -7,20 +7,45 @@ entry_callouts:
 - A Main
 - A Lobby
 - B Market
-- B Main
 - B Lobby
 # チョークポイント（2026-11-10 青木が Tactival 上に赤丸で示した 7 点）。
 # [x, y, エリアA, エリアB]：x, y は displayIcon の 0..1（CALLOUT_FIX 補正後の空間）。
 # エリアA と エリアB の境目がこの点を通る。A Lobby→A Main は同じエリア（A Main）内の
-# チョークなので両側とも A Main（境界検査では対象外）。
+# チョークなので両側とも A Main（局所分離の検査では対象外）。C10 は B Main|B Site の境で、
+# C10 より北の通路（B Main コールアウトの位置）はサイト側（2026-11-11 青木のモデル）。
+# そのため entry_callouts から B Main を外す（B Main コールアウトはサイト側の呼び方になった）。
+# 2026-11-11 の walls（青木の線分10本）を導入したので、近くに wall があるチョークは
+# 円・断面バリアを使わず wall で切る（mapfig の WALL_NEAR）。A Elbow の縦帯チョーク
+# [0.9180, 0.3450, A Site, A Alley] は wall 6 がその役割を果たすため削除した。
 chokes:
-- [0.1134, 0.5867, B Main, B Site]      # B Main → B Site の入口
+- [0.1134, 0.5867, B Main, B Site]      # C10：B の境界（C10 より北の通路はサイト側＝B Site。2026-11-11 青木の決定）
 - [0.3846, 0.4585, Mid, B Market]        # Mid → B Market の境
 - [0.2441, 0.5116, B Market, B Site]     # B Market → B Site のドア
 - [0.4994, 0.3620, Mid, Mid Top]         # Mid → Mid Top（上段）の境
 - [0.7657, 0.6295, A Main, A Main]       # A Lobby → A Main の入口（同一エリア内）
 - [0.6979, 0.4743, A Main, A Site]       # A Main → A Site の入口
 - [0.8988, 0.3192, A Alley, A Site]      # A Alley → A Site の裏口
+# 青木の境界線10本（2026-11-11）。[u1, v1, u2, v2] は displayIcon の 0..1（CALLOUT_FIX 補正後）。
+# 全て通路のボトルネックに壁から壁まで引かれている。mapfig はこの線分を歩行マスクの切れ目として
+# 焼き込み（256グリッドで太さ WALL_THICK）、近くに wall があるチョークでは円・バリアを使わない。
+walls:
+- [0.0853, 0.5763, 0.1525, 0.5763]      # 1 B Main 通路（C10 の境界線。チョーク点より少し北）
+- [0.2429, 0.4884, 0.2441, 0.5348]      # 2 B サイト前面の縦線（C12）
+- [0.3797, 0.4408, 0.3821, 0.4786]      # 3 Mid | B Market（C11）
+- [0.7461, 0.5996, 0.7461, 0.6631]      # 4 A Lobby → A Main（C14）
+- [0.6741, 0.4725, 0.7535, 0.4737]      # 5 A Main | A Site（C15）
+- [0.8915, 0.2783, 0.8927, 0.3553]      # 6 A サイト北東ドアの縦線（C16＋エルボー対策。出入口の高さ全体を塞ぐ）
+- [0.4713, 0.3601, 0.5446, 0.3601]      # 7 Mid | Mid Top（C13）
+- [0.3198, 0.2490, 0.3198, 0.2868]      # 8 B Market 北の通路
+- [0.7828, 0.2355, 0.8451, 0.2355]      # 9 Mid Top | A Link
+- [0.6777, 0.3382, 0.7388, 0.3382]      # 10 Mid Top 南東の通路
+# 2026-11-11 のスポーン出口4本。指示書の初期値（各出口のボトルネック中点を通る短い線分）では
+# 通路幅を塞げずスポーン区画が外とつながったままだったので、同じ向きのまま両端を
+# 最初の歩行不可画素まで延長した（端点の調整は指示書で許容）。
+- [0.4644, 0.7904, 0.5338, 0.7148]      # 11 T 北出口
+- [0.6009, 0.8239, 0.6492, 0.8722]      # 12 T 東出口
+- [0.4155, 0.1430, 0.3392, 0.1158]      # 13 CT 南西出口
+- [0.6593, 0.1414, 0.5899, 0.2169]      # 14 CT 東出口
 areas:
 - name: A Main
   callouts:
@@ -123,6 +148,7 @@ areas:
   callouts:
   - B Site
   - B Boba
+  - B Main
   vital: false
   choke: false
   dry: false
@@ -132,10 +158,9 @@ areas:
     branch: あり
     long: なし
     hold: 容易
-  note: サイト内。Boba はサイト側で固定（2026-11-10 青木の決定。線の引き方の問題として扱い、チョーク検査では例外登録済み）
+  note: サイト内。Boba はサイト側で固定（2026-11-10 青木の決定。線の引き方の問題として扱い、チョーク検査では例外登録済み）。B Main コールアウトは C10 より北（サイト側）なのでここに入れる（2026-11-11 青木のモデル）
 - name: B Main
   callouts:
-  - B Main
   - B Lobby
   vital: false
   choke: true
@@ -146,8 +171,34 @@ areas:
     branch: なし
     long: あり
     hold: 容易
-  note: B 攻めの正面。取りやすいが単独では浅く、Market との挟みで真価
+  note: C10 より手前（B Lobby 側）の通路。C10 は B Main と B Site の境（2026-11-11 青木の決定）。B 攻めの正面で、取りやすいが単独では浅く、Market との挟みで真価
   card: true
+- name: T Spawn
+  callouts:
+  - 攻撃側 Spawn
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 低
+    branch: なし
+    long: なし
+    hold: 容易
+  note: 攻め側スポーン（暫定）。出口4本の wall で外と区切る。評価は暫定で、プレイの判断には使わない
+- name: CT Spawn
+  callouts:
+  - 防衛側 Spawn
+  vital: false
+  choke: false
+  dry: false
+  eval:
+    distance: 近
+    take: 低
+    branch: なし
+    long: なし
+    hold: 容易
+  note: 守り側スポーン（暫定）。出口4本の wall で外と区切る。評価は暫定で、プレイの判断には使わない
 
 hands:
   defense:

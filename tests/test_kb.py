@@ -57,6 +57,16 @@ def test_documented_choke_exceptions_are_honored():
     assert any(b["area"] == "A Short" for b in bad)
 
 
+def test_sunset_spawn_areas_are_defined():
+    """スポーン2エリア：T Spawn / CT Spawn はバイタルでなく、スポーンのコールアウトを持つ。"""
+    m = _map("Sunset")
+    areas = {a["name"]: a for a in m["areas"]}
+    assert areas["T Spawn"]["callouts"] == ["攻撃側 Spawn"]
+    assert areas["CT Spawn"]["callouts"] == ["防衛側 Spawn"]
+    assert not areas["T Spawn"]["vital"] and not areas["CT Spawn"]["vital"]
+    assert "暫定" in areas["T Spawn"]["note"] and "暫定" in areas["CT Spawn"]["note"]
+
+
 def test_all_kb_maps_have_no_choke_crossings():
     """許可リスト方式の固定（2026-11-10）：kb のある全マップでチョーク跨ぎはゼロ。"""
     kb = K.load({})

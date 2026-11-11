@@ -83,6 +83,15 @@ def test_setup_clusters_merge_by_name_and_shape():
     assert "B Link 寄りデフォ" in merged["merged"]
 
 
+def test_default_line_shows_real_callouts():
+    """「よく映る場所」は setup.callouts の実コールアウト名（エリア名でなく）を出す。"""
+    rows = [_row("A Elbow テイクデフォ", ["A Elbow", "B Boba"], {"A": 2, "B": 2}),
+            _row("A Elbow テイクデフォ", ["A Elbow", "B Boba"], {"A": 2, "B": 2})]
+    g = next(x for x in deck.setup_clusters(rows) if x["name"] == "A Elbow テイクデフォ")
+    assert "A Elbow" in g["callouts"] and "B Boba" in g["callouts"]
+    assert any(x.startswith("よく映る場所") and "A Elbow" in x for x in deck._lines_default(g, deck.ATTACK))
+
+
 def test_pistol_and_eco_are_separate_rows(tmp_path, monkeypatch):
     """ピストル・エコはデフォルトから外し、Pistol／Anti eco の行にする。購入に Pistol を混ぜない。"""
     monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
