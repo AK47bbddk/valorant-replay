@@ -369,3 +369,104 @@ def test_llm_daily_limit_and_order(monkeypatch, tmp_path):
     assert calls == ["gemini-3.8-flash", "x/y:free"] and not sleeps
     cfg["llm"]["order"] = "openrouter,gemini"
     assert [c[0] for c in llm._chain(cfg)][0] == "openrouter"
+
+
+# ---------------------------------------------------------------- 出さないための確かめ（strict）
+def _paste(img, icon, x, y, color, D):
+    """アイコンを貼り、チーム色（または黄色）の縁の輪を描く。"""
+    t = cv2.resize(icon, (D, D))
+    m = np.zeros((D, D), np.uint8)
+    cv2.circle(m, (D // 2, D // 2), D // 2 - 1, 255, -1)
+    x0, y0 = int(x * img.shape[1]) - D // 2, int(y * img.shape[0]) - D // 2
+    roi = img[y0:y0 + D, x0:x0 + D]
+    roi[m > 0] = t[m > 0]
+    rim = {"warm": (40, 40, 230), "cool": (200, 190, 30), "yellow": (40, 220, 235)}[color]
+    cv2.circle(img, (int(x * img.shape[1]), int(y * img.shape[0])), int(D * 0.52), rim, 3)
+
+
+def test_match_drops_filled_disc_and_flat_face():
+    """塗りつぶしの丸と、中が一様な輪だけの丸には名前を付けない（理由 filled / flat）。"""
+    icons = {"Sova": _icon(0), "Jett": _icon(1)}
+    H = W = 400
+    frac = 0.05
+    D = int(frac * H)
+    img = np.full((H, W, 3), 70, np.uint8)
+    cv2.circle(img, (100, 100), int(0.56 * D), (40, 40, 230), -1)     # 暖色の塗りつぶしの丸
+    cv2.circle(img, (300, 300), int(0.5 * D), (40, 40, 230), 3)       # 暖色の輪だけ・中は一様
+    teams = {1: ["Sova", "Jett"], 2: []}
+    dbg: list = []
+    assert AG.match(img, icons, teams, {"warm": 1, "cool": 2}, icon_frac=frac, debug=dbg) == []
+    reasons = {d["reason"] for d in dbg}
+    assert "filled" in reasons and "flat" in reasons
+
+
+def test_match_drops_close_second_name_by_margin():
+    """同じチームに 2 人いるとき、2 番目に似た顔との差が小さければ名前を付けない（理由 margin）。"""
+    jett, sova = _icon(1), _icon(2)
+    icons = {"Jett": jett, "Sova": sova}
+    H = W = 400
+    frac = 0.05
+    D = int(frac * H)
+    blend = np.clip(0.5 * jett.astype(np.float32) + 0.5 * sova.astype(np.float32), 0, 255).astype(np.uint8)
+    img = np.full((H, W, 3), 70, np.uint8)
+    _paste(img, jett, 0.25, 0.3, "warm", D)      # 本物の Jett
+    _paste(img, blend, 0.75, 0.7, "warm", D)     # Jett と Sova を混ぜた顔
+    dbg: list = []
+    found = AG.match(img, icons, {1: ["Sova", "Jett"], 2: []}, {"warm": 1, "cool": 2},
+                     icon_frac=frac, debug=dbg)
+    got = {f["agent"]: f for f in found}
+    assert "Sova" not in got
+    assert "Jett" in got and abs(got["Jett"]["x"] - 0.25) < 0.05 and abs(got["Jett"]["y"] - 0.3) < 0.05
+    assert any(d["reason"] == "margin" for d in dbg)
+
+
+def test_match_marks_overlapping_icons():
+    """中心間 0.7D で重なる 2 つは overlap が真。名前が付くなら正しい名前だけ（別人を付けない）。"""
+    jett, omen = _icon(1), _icon(3)
+    icons = {"Jett": jett, "Omen": omen}
+    H = W = 400
+    frac = 0.05
+    D = int(frac * H)
+    img = np.full((H, W, 3), 70, np.uint8)
+    x1, x2 = 0.5 - 0.7 * frac / 2, 0.5 + 0.7 * frac / 2
+    _paste(img, jett, x1, 0.5, "warm", D)
+    _paste(img, omen, x2, 0.5, "cool", D)
+    found = AG.match(img, icons, {1: ["Jett"], 2: ["Omen"]}, {"warm": 1, "cool": 2}, icon_frac=frac)
+    assert found and all(f["overlap"] for f in found)
+    for f in found:
+        assert (f["team"], f["agent"]) in {(1, "Jett"), (2, "Omen")}
+        tx = x1 if f["agent"] == "Jett" else x2
+        assert abs(f["x"] - tx) < 0.08 and abs(f["y"] - 0.5) < 0.08
+
+
+def test_match_strict_false_keeps_candidates():
+    """strict=False なら、filled / flat / margin で捨てる候補も今までどおり返る。"""
+    sova, jett = _icon(0), _icon(1)
+    icons = {"Sova": sova, "Jett": jett}
+    H = W = 400
+    frac = 0.05
+    D = int(frac * H)
+    img1 = np.full((H, W, 3), 70, np.uint8)
+    cv2.circle(img1, (100, 100), int(0.56 * D), (40, 40, 230), -1)
+    cv2.circle(img1, (300, 300), int(0.5 * D), (40, 40, 230), 3)
+    teams = {1: ["Sova", "Jett"], 2: []}
+    assert AG.match(img1, icons, teams, {"warm": 1, "cool": 2}, icon_frac=frac, thr=0.0) == []
+    assert len(AG.match(img1, icons, teams, {"warm": 1, "cool": 2}, icon_frac=frac, thr=0.0, strict=False)) == 2
+
+    blend = np.clip(0.5 * jett.astype(np.float32) + 0.5 * sova.astype(np.float32), 0, 255).astype(np.uint8)
+    img2 = np.full((H, W, 3), 70, np.uint8)
+    _paste(img2, jett, 0.25, 0.3, "warm", D)
+    _paste(img2, blend, 0.75, 0.7, "warm", D)
+    strict = {f["agent"] for f in AG.match(img2, icons, teams, {"warm": 1, "cool": 2}, icon_frac=frac)}
+    loose = {f["agent"] for f in AG.match(img2, icons, teams, {"warm": 1, "cool": 2}, icon_frac=frac,
+                                          strict=False)}
+    assert "Sova" not in strict and "Sova" in loose
+
+
+def test_consensus_drops_lone_overlap_detection():
+    """重なりの検出は顔がよく似ていても、ほかのフレームで近くに見つからない 1 枚だけなら残さない。"""
+    e = lambda s, ov: {"agent": "Sova", "team": 1, "x": 0.5, "y": 0.5, "score": s, "overlap": ov}
+    assert AG.consensus([(0.0, [e(0.7, True)])]) == []
+    got = AG.consensus([(0.0, [e(0.7, True)]), (1.0, [e(0.71, True)])])
+    assert len(got) == 1 and got[0]["agent"] == "Sova"
+

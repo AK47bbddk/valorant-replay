@@ -182,7 +182,8 @@ def estimate_icon_frac(imgs: list[np.ndarray], mask=None, fracs=None, icons: dic
             for img in imgs:
                 per = []
                 for ct in ({"warm": 1, "cool": 2}, {"warm": 2, "cool": 1}):
-                    r = match(img, icons, teams, ct, icon_frac=f, mask=mask, thr=0.0, background=background)
+                    r = match(img, icons, teams, ct, icon_frac=f, mask=mask, thr=0.0, background=background,
+                              strict=False)
                     per.append([e["score"] for e in r])
                 vals += max(per, key=lambda v: sum(v))
             if len(vals) < 3:
@@ -238,6 +239,41 @@ def _face_score(img: np.ndarray, px: tuple[int, int], tpl: np.ndarray, D: float)
     return best
 
 
+def _disc(shape, x: float, y: float, r: float):
+    """(x, y) を中心とする半径 r の円の内側を切り出す：(x0, y0, x1, y1, 真偽マスク)。"""
+    H, W = shape[:2]
+    x0, x1 = max(0, int(math.floor(x - r))), min(W, int(math.ceil(x + r)) + 1)
+    y0, y1 = max(0, int(math.floor(y - r))), min(H, int(math.ceil(y + r)) + 1)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    return x0, y0, x1, y1, ((xx - x) ** 2 + (yy - y) ** 2 <= r * r)
+
+
+def _filled_ratio(img: np.ndarray, x: float, y: float, color: str, D: float) -> float:
+    """中心から半径 0.28D の内側で、候補の色（warm / cool）が占める割合。塗りつぶしの丸は 1 に近い。"""
+    got = _disc(img.shape, x, y, 0.28 * D)
+    if got is None:
+        return 0.0
+    x0, y0, x1, y1, disc = got
+    if not disc.any():
+        return 0.0
+    m = _color_mask(img[y0:y1, x0:x1], RANGES[color])
+    return float(m[disc].mean())
+
+
+def _face_std(img: np.ndarray, x: float, y: float, D: float) -> float:
+    """中心から半径 0.30D の内側のグレースケールの標準偏差。床だけ・一様な面は小さい。"""
+    got = _disc(img.shape, x, y, 0.30 * D)
+    if got is None:
+        return 0.0
+    x0, y0, x1, y1, disc = got
+    if not disc.any():
+        return 0.0
+    g = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    return float(g[disc].std())
+
+
 def _assign(scores: np.ndarray) -> list[tuple[int, int]]:
     """行（アイコンの候補）と列（エージェント）の、合計が最大になる 1 対 1 の組。"""
     n, m = scores.shape
@@ -262,8 +298,10 @@ def _assign(scores: np.ndarray) -> list[tuple[int, int]]:
 
 
 def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[str]], color_team: dict[str, int],
-          icon_frac: float = 0.058, thr: float = 0.45, mask: np.ndarray | None = None,
-          alive: dict[int, int] | None = None, background: np.ndarray | None = None) -> list[dict]:
+          icon_frac: float = 0.058, thr: float = 0.58, mask: np.ndarray | None = None,
+          alive: dict[int, int] | None = None, background: np.ndarray | None = None,
+          margin: float = 0.06, min_face_std: float = 12.0, crowded_margin: float = 0.10,
+          strict: bool = True, debug: list | None = None) -> list[dict]:
     """ミニマップ 1 枚で、誰がどこにいるか。
     ① 縁の輪（暖色・寒色・観戦中の黄色）から、アイコンらしい場所の候補を多めに拾う（重なったアイコンも
        拾えるよう、近い候補も残す）
@@ -271,8 +309,16 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
        縁がチーム色の候補はそのチームにしか割り当てない（両チームに同じエージェントがいても分けられる）。
        黄色の縁（観戦中の選手）は顔だけで決める
     ③ 顔が似ていない候補（スキルの円・線・設置位置の印）は捨てる。誰か分からない丸は出さない
+    strict=True（既定）では、さらに「出さない」ための確かめを行う：
+       a. 塗りつぶしの丸（中心の同じ色の割合が 0.5 以上）は捨てる（理由 filled。黄色の縁には使わない）
+       b. 顔の中身が無い（中心の標準偏差が min_face_std 未満）場所は捨てる（理由 flat）
+       c. ほかの候補が 1.0D 以内にあれば crowded（重なりの印）
+       d. 割り当てた組の点が、同じチーム（黄色なら全員）の 2 番目の顔より margin（crowded なら
+          crowded_margin）以上強くなければ捨てる（理由 margin。そのチームの照合先が 1 人だけなら飛ばす）
+    strict=False なら a〜d を行わない（今までと同じ動き。アイコンの大きさの見積もりで使う）。
     teams: {1: [5 人のエージェント], 2: [...]}、color_team: {"warm": 1 or 2, "cool": ...}、alive: {1: 生存人数, 2: ...}
-    返り値 [{"agent", "team", "x", "y"（正規化）, "score", "ring", "guess", "color"}]"""
+    返り値 [{"agent", "team", "x", "y"（正規化）, "score", "ring", "guess", "color", "overlap", "margin"}]。
+    debug にリストを渡すと、捨てた候補を {"x", "y", "color", "agent", "score", "second", "ring", "reason"} で足す。"""
     if img is None or img.size == 0:
         return []
     H, W = img.shape[:2]
@@ -289,7 +335,8 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
             for f in find_icons(img, icon_frac, mask, per_color=caps[team], thr=0.3, background=background,
                                 colors=(color,)):
                 out.append({"agent": None, "team": team, "x": f["x"], "y": f["y"], "score": 0.0,
-                            "ring": f["ring"], "guess": None, "color": color})
+                            "ring": f["ring"], "guess": None, "color": color,
+                            "overlap": False, "margin": 0.0})
         return out
     cands = find_icons(img, icon_frac, mask, per_color=12, thr=0.15, background=background,
                        colors=("warm", "cool", "yellow"), nms=0.8)
@@ -298,6 +345,51 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
     ags = list(dict.fromkeys(a for _, a in slots))
     face = np.array([[_face_score(img, f["px"], icons[a], D) for a in ags] for f in cands])
     S = np.array([[face[i, ags.index(a)] for t, a in slots] for i in range(len(cands))])
+
+    def team_agents(f) -> list[str]:
+        """その候補を照合してよいエージェント（縁がチーム色なら同じチーム、黄色なら 10 人全員）。"""
+        if f["color"] == "yellow":
+            return ags
+        t = color_team.get(f["color"])
+        if t is None:
+            return ags
+        return [a for a in dict.fromkeys(teams.get(t) or []) if a in icons]
+
+    def best(i):
+        """候補 i でいちばん似ているエージェントと、その点・2 番目の点。"""
+        ks = [ags.index(a) for a in team_agents(cands[i]) if a in ags]
+        if not ks:
+            return None, -1.0, -1.0
+        k = max(ks, key=lambda kk: face[i, kk])
+        others = [face[i, kk] for kk in ks if kk != k]
+        return ags[k], float(face[i, k]), float(max(others) if others else -1.0)
+
+    def second_for(i, a) -> float:
+        """候補 i で、a 以外の照合先の顔の点の最大。"""
+        ks = [ags.index(a2) for a2 in team_agents(cands[i]) if a2 != a and a2 in ags]
+        return float(max((face[i, kk] for kk in ks), default=-1.0))
+
+    # c. 重なりの印：ほかの候補（色は問わない）の中心が 1.0D 以内
+    crowded = [False] * len(cands)
+    for i in range(len(cands)):
+        xi, yi = cands[i]["px"]
+        crowded[i] = any(k != i and math.hypot(cands[k]["px"][0] - xi, cands[k]["px"][1] - yi) <= D
+                         for k in range(len(cands)))
+
+    # a. 塗りつぶしの丸 / b. 顔の中身が無い場所 を、割り当ての前に捨てる
+    reasons: dict[int, str] = {}
+    ok_rows = list(range(len(cands)))
+    if strict:
+        ok_rows = []
+        for i, f in enumerate(cands):
+            x, y = f["px"]
+            if f["color"] != "yellow" and _filled_ratio(img, x, y, f["color"], D) >= 0.5:
+                reasons[i] = "filled"
+            elif _face_std(img, x, y, D) < min_face_std:
+                reasons[i] = "flat"
+            else:
+                ok_rows.append(i)
+
     total = S + 0.2 * np.array([f["ring"] for f in cands])[:, None]
     for i, f in enumerate(cands):
         for j, (t, _) in enumerate(slots):
@@ -305,17 +397,40 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
             if f["color"] == "yellow" or tc is None:
                 continue
             total[i, j] += 0.1 if f["color"] == tc else -9.0     # 縁の色が相手チーム → 割り当てない
-    pairs = [(i, j) for i, j in _assign(total) if total[i, j] > -1.0 and S[i, j] >= thr]
+    sub = total[ok_rows] if ok_rows else np.zeros((0, len(slots)))
+    pairs = []
+    for li, j in _assign(sub):
+        i = ok_rows[li]
+        if total[i, j] > -1.0 and S[i, j] >= thr:
+            pairs.append((i, j))
     pairs.sort(key=lambda ij: -S[ij[0], ij[1]])
-    out, used = [], {1: 0, 2: 0}
+    out, used, decided = [], {1: 0, 2: 0}, set()
     for i, j in pairs:
         t, a = slots[j]
-        if used[t] >= caps[t]:
+        if used[t] >= caps[t]:              # 生存人数の上限で落ちる
+            reasons[i] = "cap"
             continue
+        # d. 差の確かめ（そのチームに照合できるエージェントが 1 人だけなら飛ばす）
+        if strict and len(team_agents(cands[i])) > 1:
+            sec = second_for(i, a)
+            lim = crowded_margin if crowded[i] else margin
+            if float(S[i, j]) - sec < lim:
+                reasons[i] = "margin"
+                continue
         used[t] += 1
         f = cands[i]
         out.append({"agent": a, "team": t, "x": f["x"], "y": f["y"], "score": round(float(S[i, j]), 2),
-                    "ring": f["ring"], "guess": a, "color": team_color.get(t, f["color"])})
+                    "ring": f["ring"], "guess": a, "color": team_color.get(t, f["color"]),
+                    "overlap": bool(crowded[i]), "margin": round(float(S[i, j]) - second_for(i, a), 2)})
+        decided.add(i)
+    if debug is not None:
+        for i, f in enumerate(cands):
+            if i in decided:
+                continue
+            ag, sc, sec = best(i)
+            debug.append({"x": round(f["x"], 4), "y": round(f["y"], 4), "color": f["color"],
+                          "agent": ag, "score": round(sc, 2), "second": round(sec, 2),
+                          "ring": f["ring"], "reason": reasons.get(i, "thr")})
     return out
 
 
@@ -324,7 +439,8 @@ def consensus(frames: list[tuple[float, list[dict]]], max_move: float = 0.08, st
     """節目の前後の何枚か（[(節目からの秒数の差, match の結果)]）から、エージェントごとの位置を 1 つに決める。
     1 枚だけだと、アイコンの重なり・スモーク・観戦画面の切り替えで見落としたり、スキルの印を誤って拾ったりする。
     ほかのフレームでも近く（max_move 以内）に見つかった検出か、顔がよく似た（strong 以上の）検出だけを残し、
-    その中で節目にいちばん近い時刻のものを使う。"""
+    その中で節目にいちばん近い時刻のものを使う。重なり（overlap）の検出は顔がよく似ていても、ほかのフレームの
+    近くの検出があるときだけ残す（1 枚だけの高得点は重なりの誤りであることが多い）。"""
     by: dict = {}
     for k, (dt, found) in enumerate(sorted(frames, key=lambda x: abs(x[0]))):
         for e in found:
@@ -335,7 +451,7 @@ def consensus(frames: list[tuple[float, list[dict]]], max_move: float = 0.08, st
         ok = []
         for k, dt, e in dets:
             sup = sum(1 for k2, _, e2 in dets if k2 != k and math.hypot(e["x"] - e2["x"], e["y"] - e2["y"]) <= max_move)
-            if sup >= 1 or e["score"] >= strong:
+            if sup >= 1 or (e["score"] >= strong and not e.get("overlap")):
                 ok.append((dt, -e["score"], e))
         if ok:
             ok.sort(key=lambda x: (x[0], x[1]))
