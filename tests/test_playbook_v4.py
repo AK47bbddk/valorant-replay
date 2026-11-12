@@ -232,11 +232,24 @@ def _flat_base():
 
 
 def _sunset_base():
-    """Sunset の公式 displayIcon（アルファ付き）。無ければ合成の全面通路に落とす。"""
+    """Sunset の公式 displayIcon（アルファ付き）。追跡フィクスチャを優先し、
+    無ければ従来のキャッシュ、最後に合成の全面通路に落とす。
+
+    追跡フィクスチャは `tests/fixtures/sunset_displayicon.png.b64`（公式 displayIcon の
+    PNG バイト列を base64 化し、76桁で折り返したテキスト。Python なら
+    `base64.encodebytes(open("sunset_displayicon.png", "rb").read())` で作る）。"""
+    import base64
     import cv2
+    import numpy as np
     from pathlib import Path
 
     root = Path(__file__).resolve().parent.parent
+    b64 = root / "tests" / "fixtures" / "sunset_displayicon.png.b64"
+    if b64.exists():
+        raw = base64.b64decode(b64.read_bytes())
+        img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_UNCHANGED)
+        if img is not None and img.ndim == 3 and img.shape[2] == 4:
+            return img
     for p in (root / "_review" / "_cache" / "map_icons" / "sunset.png",
               root / ".review_tmp" / "sunset_displayicon.png"):
         if p.exists():
