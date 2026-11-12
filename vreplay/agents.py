@@ -318,7 +318,8 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
     strict=False なら a〜d を行わない（今までと同じ動き。アイコンの大きさの見積もりで使う）。
     teams: {1: [5 人のエージェント], 2: [...]}、color_team: {"warm": 1 or 2, "cool": ...}、alive: {1: 生存人数, 2: ...}
     返り値 [{"agent", "team", "x", "y"（正規化）, "score", "ring", "guess", "color", "overlap", "margin"}]。
-    debug にリストを渡すと、捨てた候補を {"x", "y", "color", "agent", "score", "second", "ring", "reason"} で足す。"""
+    debug にリストを渡すと、捨てた候補を {"x", "y", "color", "agent", "score", "second", "second_agent",
+    "faces", "ring", "reason"} で足す（faces はその候補を照合してよいエージェント全員の点の dict）。"""
     if img is None or img.size == 0:
         return []
     H, W = img.shape[:2]
@@ -368,6 +369,18 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
         """候補 i で、a 以外の照合先の顔の点の最大。"""
         ks = [ags.index(a2) for a2 in team_agents(cands[i]) if a2 != a and a2 in ags]
         return float(max((face[i, kk] for kk in ks), default=-1.0))
+
+    def faces_of(i) -> dict:
+        """候補 i を照合してよいエージェント全員の点（debug 用。チーム色の縁ならそのチーム、黄色なら全員）。"""
+        return {a: float(face[i, ags.index(a)]) for a in team_agents(cands[i]) if a in ags}
+
+    def second_agent_of(i):
+        """候補 i で 2 番目に似ているエージェント名（いなければ None。debug 用）。"""
+        ks = [ags.index(a) for a in team_agents(cands[i]) if a in ags]
+        if len(ks) < 2:
+            return None
+        ks.sort(key=lambda kk: face[i, kk], reverse=True)
+        return ags[ks[1]]
 
     # c. 重なりの印：ほかの候補（色は問わない）の中心が 1.0D 以内
     crowded = [False] * len(cands)
@@ -430,6 +443,7 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
             ag, sc, sec = best(i)
             debug.append({"x": round(f["x"], 4), "y": round(f["y"], 4), "color": f["color"],
                           "agent": ag, "score": round(sc, 2), "second": round(sec, 2),
+                          "second_agent": second_agent_of(i), "faces": faces_of(i),
                           "ring": f["ring"], "reason": reasons.get(i, "thr")})
     return out
 
