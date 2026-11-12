@@ -70,6 +70,19 @@ def test_glossary_replaces_internal_terms_without_abbrev():
     assert "正しい戦略の模索" not in "".join(PB.GLOSSARY.values())
 
 
+def test_defense_type_names_exclude_attack_only_phrases():
+    # 守りの型名・手札名に攻め専用の言い回しが残らない
+    for nid in PB.DEFENSE_NODES:
+        word = PB.glossary_word_side(nid, PB.DEFENSE)
+        assert word
+        for ph in PB.ATTACK_ONLY_PHRASES:
+            assert ph not in word, (nid, word)
+    name = PB.pattern_name(Counter({"B": 3}), PB.glossary_word_side("fast_deep", PB.DEFENSE), PB.DEFENSE)
+    assert "置いて" in name and "深くまで早く入って" not in name
+    # 攻め側は元の言い回しのまま
+    assert PB.glossary_word_side("fast_deep", PB.ATTACK) == PB.GLOSSARY["fast_deep"]
+
+
 # ---------------------------------------------------------------- VODカード
 def test_vod_card_has_id_thumbnail_and_no_escaped_anchor():
     card = PB.vod_card("https://youtu.be/wX7SJF9xoCM?t=79", "LOUD R5○")

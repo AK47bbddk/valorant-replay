@@ -89,12 +89,38 @@ ABBREV = ("DC", "PrP", "PoC", "BP", "BTP")
 ROLE_JA = {"duelist": "デュエリスト", "controller": "コントローラー", "initiator": "イニシエーター",
            "sentinel": "センチネル"}
 
+# 守り側で使う動作語。攻め専用の言い回しを守りの型名・手札名に残さない。
+DEF_ACTION_WORD = {
+    "fast_deep": "前に出て間合いを詰める",
+}
+# 攻め専用の言い回し（守りの表示では使わない）
+ATTACK_ONLY_PHRASES = ("深くまで早く入って", "バイタルでキルが出たらサイトへ飛び込む",
+                       "デュエリストが奥に入り全員で続く", "1人で裏を取り別の場所")
+# 守りの局面判定が返しうるノード（守りの表示に攻め専用の表現が混ざらないことの検査対象）
+DEFENSE_NODES = ("fast_deep", "bu_counter", "hold", "v_occupy", "v_reaction", "v_counter", "solo",
+                 "timing_push", "one_man", "reaction_def", "stack", "choke_def", "back_def",
+                 "fast", "surround", "slow", "save", "up2", "down1", "anti_eco")
+
 
 def glossary_word(nid: str | None) -> str:
     """内部ノード ID → プレイヤーの言葉。知らない ID はそのまま返す（略号は含まれない）。"""
     if not nid:
         return ""
     return GLOSSARY.get(str(nid), str(nid))
+
+
+def glossary_word_side(nid: str | None, side: str) -> str:
+    """側に合わせた動作語。守りでは攻め専用の言い回しを使わない。"""
+    if not nid:
+        return ""
+    if side == DEFENSE:
+        if nid in DEF_ACTION_WORD:
+            return DEF_ACTION_WORD[nid]
+        word = glossary_word(nid)
+        if any(ph in word for ph in ATTACK_ONLY_PHRASES):
+            return "その場で構える"
+        return word
+    return glossary_word(nid)
 
 
 def has_abbrev(text: str) -> bool:
@@ -527,7 +553,7 @@ def build_patterns(items: list[dict], model, k: int, side: str,
         med_it = pool[med]
         zones = Counter(GM.zone_of(a) for _u, _v, a in med_it["su"].values() if GM.zone_of(a))
         bu = Counter(it["cls"].get("buildup") for it in members if it["cls"].get("buildup"))
-        action = glossary_word(bu.most_common(1)[0][0]) if bu else None
+        action = glossary_word_side(bu.most_common(1)[0][0], side) if bu else None
         name = unique_name(pattern_name(zones, action, side), _pattern_suffix(med_it), used_names)
         used_names.add(name)
         out.append({"side": side, "name": name, "n": len(grp), "w": sum(it["r"]["win"] for it in members),
@@ -538,7 +564,8 @@ def build_patterns(items: list[dict], model, k: int, side: str,
         it = pool[i]
         zones = Counter(GM.zone_of(a) for _u, _v, a in it["su"].values() if GM.zone_of(a))
         action = next((v for ph, v in it["cls"].items() if ph != "setup" and v), None)
-        name = unique_name(pattern_name(zones, glossary_word(action), side), _pattern_suffix(it), used_names)
+        name = unique_name(pattern_name(zones, glossary_word_side(action, side), side),
+                           _pattern_suffix(it), used_names)
         used_names.add(name)
         singles.append({"side": side, "name": name, "n": 1, "item": it})
     return out, singles
@@ -558,7 +585,7 @@ def hand_nodes(items: list[dict], side: str) -> list[dict]:
     out = []
     for nid, (n, w) in nodes.items():
         if n >= HAND_MIN_N and (w / n) >= HAND_MIN_WINRATE:
-            out.append({"id": nid, "n": n, "w": w, "rate": w / n, "name": glossary_word(nid)})
+            out.append({"id": nid, "n": n, "w": w, "rate": w / n, "name": glossary_word_side(nid, side)})
     out.sort(key=lambda x: (-x["n"], x["name"]))
     return out[:5]
 
@@ -723,10 +750,10 @@ def _why_slide(ctx, claims) -> str:
     return _slide("なぜこの構成か", "なぜこの構成か", f'<div class="claims">{"".join(cols)}</div>', ctx["map"])
 
 
-def _hand_slide(ctx, side_label, item, motion, hand) -> str:
+def _hand_slide(ctx, side_label, item, motion, hand, reason: str = "") -> str:
     eyebrow = f"{side_label} / 手札（{hand['n']} 回・{hand['rate']:.0%}）"
     if not item:
-        body = _s(f"{hand['name']}：1:40 に5人そろった見本ラウンドがありません。動く図は出せません。")
+        body = _s(reason or f"{hand['name']}：1:40 に5人そろった見本ラウンドがありません。動く図は出せません。")
         return _slide(eyebrow, hand["name"], body, ctx["map"])
     eyebrow += f" 見本 {sample_label(item['r'])}"
     lines = _agent_lines(item, ctx["model"])
@@ -767,6 +794,7 @@ def _placement_slide(ctx, side, patterns, items, used) -> tuple[str, dict]:
     chosen, avoid = choose_placement(patterns, avg)
     pool_n = sum(1 for it in items if it["r"]["side"] == side and not it["r"]["pistol"] and is_full5(it))
     item, motion, reason = None, "", ""
+    reason_kind = ""
     if chosen:
         item, motion = _pick_motion(chosen["members"], used, ctx["model"], ctx["k"], ctx["walk"], ctx["bg"],
                                     f"{label}の基本配置", allow_used=True)
@@ -774,20 +802,29 @@ def _placement_slide(ctx, side, patterns, items, used) -> tuple[str, dict]:
             used.add(sample_key(item))
     texts = []
     if chosen and motion:
+        reason_kind = "rendered"
         rate = chosen["w"] / chosen["n"] if chosen["n"] else 0.0
         zones = "・".join(f"{z}{n}枚" for z, n in sorted(chosen["zones"].items(), key=lambda kv: -kv[1]))
         texts.append(_s(f"基本配置：{chosen['name']}（{_wl(chosen['w'], chosen['n'])}・勝率 {rate:.0%}、"
                         f"この側の平均 {avg:.0%}）。"))
         texts.append(_s(f"1:40 の人数は {zones or '-'}。1:30・1:20 の動きを同じ駒でつないでいる。"))
     elif chosen:
+        reason_kind = "no_motion"
         reason = (f"{label}の基本配置は {chosen['name']}（{_wl(chosen['w'], chosen['n'])}）だが、"
                   f"動く図にできる見本ラウンドがない。")
         texts.append(_s(reason))
+    elif not patterns and pool_n < PATTERN_MIN:
+        reason_kind = "no_rounds"
+        reason = (f"{label}の基本配置は出せません（1:40 に5人そろった非ピストルラウンドが {pool_n} 件で、"
+                  f"型の成立に必要な {PATTERN_MIN} 件に届きません）。")
+        texts.append(_s(reason))
     elif not patterns:
-        reason = (f"{label}の基本配置は出せません（1:40 に5人そろった非ピストルラウンドが {pool_n} 件。"
-                  f"型の成立に {PATTERN_MIN} 件必要）。")
+        reason_kind = "distance"
+        reason = (f"{label}の基本配置は出せません（1:40 に5人そろった非ピストルラウンドは {pool_n} 件あるが、"
+                  f"同じ形とみなせるまとまりが {PATTERN_MIN} 件に届きません）。")
         texts.append(_s(reason))
     else:
+        reason_kind = "winrate"
         reason = f"{label}の基本配置は出せません（この側の平均勝率 {avg:.0%} を上回る型がない）。"
         texts.append(_s(reason))
     if avoid:
@@ -802,6 +839,7 @@ def _placement_slide(ctx, side, patterns, items, used) -> tuple[str, dict]:
             "rate": round(chosen["w"] / chosen["n"], 4) if chosen and chosen["n"] else None,
             "avg": round(avg, 4) if avg is not None else None,
             "meets_winrate": bool(chosen) and (avg is None or chosen["w"] / chosen["n"] >= avg),
+            "pool_n": pool_n, "reason_kind": reason_kind,
             "avoid": [{"name": p["name"], "n": p["n"], "w": p["w"]} for p in avoid],
             "rendered": bool(motion), "sample_round": sample_key(item) if item else None, "reason": reason}
     return _slide(f"{label} / 配置", f"{label}の基本配置", body, ctx["map"]), meta
@@ -842,8 +880,8 @@ def _role_table(ctx, comp, items, side) -> str:
 
 
 def _role_slide(ctx, comp, items) -> str:
-    body = (f'<h3>守り</h3>{_role_table(ctx, comp, items, DEFENSE)}'
-            f'<h3>攻め</h3>{_role_table(ctx, comp, items, ATTACK)}')
+    body = (f'<div class="rolewrap"><div><h3>守り</h3>{_role_table(ctx, comp, items, DEFENSE)}</div>'
+            f'<div><h3>攻め</h3>{_role_table(ctx, comp, items, ATTACK)}</div></div>')
     return _slide("真似る手順", "役割表", body, ctx["map"])
 
 
@@ -899,12 +937,20 @@ def build_page(ctx, comp: str, rounds: list[dict], items: list[dict], stat: dict
             if item:
                 used_samples.add(sample_key(item))
                 sample_keys.add(item["r"]["comp_key"])
-            slides.append(_hand_slide(ctx, label, item, motion, h))
+                status, reason = "ok", ""
+            elif not src:
+                status = "no_full5"
+                reason = f"{h['name']}：1:40 に5人そろった見本ラウンドがありません。動く図は出せません。"
+            else:
+                status = "no_motion"
+                reason = (f"{h['name']}：5人そろった見本ラウンドは {len(src)} 件ありますが、"
+                          f"動く図にできるラウンドがありませんでした。")
+            slides.append(_hand_slide(ctx, label, item, motion, h, reason))
             r = item["r"] if item else None
             hands_meta.append({
                 "side": side, "id": h["id"], "name": h["name"], "n": h["n"], "w": h["w"],
                 "rate": round(h["rate"], 4), "sample_round": sample_key(item) if item else None,
-                "sample_full5": bool(item),
+                "sample_full5": bool(item), "sample_status": status,
                 "sample_team": (r.get("tag") or r.get("team")) if r else None,
                 "sample_opp": r.get("opp_tag") if r else None,
                 "sample_label": sample_label(r) if r else "",

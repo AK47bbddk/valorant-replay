@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 
 BANNED = ["マップ画像がありません", "場所不明", "None", "形だけ", "推定", "&lt;a ", "正しい戦略の模索", "略号"]
+ATTACK_ONLY_PHRASES = ("深くまで早く入って", "バイタルでキルが出たらサイトへ飛び込む",
+                       "デュエリストが奥に入り全員で続く", "1人で裏を取り別の場所")
 PATTERN_MIN = 3
 DEFENSE, ATTACK = "防衛", "攻撃"
 
@@ -110,33 +112,55 @@ def check_page(name: str, page: str, manifest_entry: dict, results: list, fail: 
                 label_bad.append(f"{h.get('name')}:missing")
             if not h.get("sample_full5"):
                 full5_bad.append(h.get("name"))
-        elif "見本ラウンドがありません" not in text:
-            no_sample_bad.append(h.get("name"))
+        elif h.get("sample_full5") is False:
+            status = h.get("sample_status")
+            if status == "no_full5":
+                expect = "5人そろった見本ラウンドがありません"
+            elif status == "no_motion":
+                expect = "動く図にできるラウンドがありませんでした"
+            else:
+                expect = ""
+            if not expect or expect not in text:
+                no_sample_bad.append(f"{h.get('name')}:{status}")
     rec(not label_bad, "見本ラベルのチーム照合",
         str(label_bad) if label_bad else f"{len(sample_rounds)} 件")
     rec(len(sample_rounds) == len(set(sample_rounds)), "見本ラウンドの重複なし",
         f"{len(sample_rounds)} 件 / 一意 {len(set(sample_rounds))}")
     rec(not full5_bad, "見本は full5", str(full5_bad) if full5_bad else "")
-    rec(not no_sample_bad, "見本なしの表示", str(no_sample_bad) if no_sample_bad else "")
+    rec(not no_sample_bad, "見本なしの表示（書き分け）", str(no_sample_bad) if no_sample_bad else "")
 
     # 10. 基本配置の勝率条件・避けるべき型・守り攻め両側
     placements = m.get("placements") or []
     sides = {p.get("side") for p in placements}
-    placement_bad, avoid_bad = [], []
+    placement_bad, avoid_bad, reason_bad = [], [], []
     for p in placements:
         if p.get("name"):
             if not p.get("meets_winrate"):
                 placement_bad.append(f"{p.get('side')}:{p.get('name')}")
         elif not p.get("reason"):
             placement_bad.append(f"{p.get('side')}:理由なし")
+        else:
+            kind = p.get("reason_kind")
+            reason = p.get("reason") or ""
+            expect = {"no_rounds": "型の成立に必要な", "distance": "同じ形とみなせる",
+                      "winrate": "平均勝率", "no_motion": "動く図にできる"}.get(kind)
+            if not expect or expect not in reason:
+                reason_bad.append(f"{p.get('side')}:{kind}")
         if p.get("avoid") and "避けるべき型" not in text:
             avoid_bad.append(p.get("side"))
     hand_sides_ok = "守り / 手札" in text and "攻め / 手札" in text
     rec(not placement_bad, "基本配置の勝率条件",
         str(placement_bad) if placement_bad else f"{len(placements)} 側")
     rec(not avoid_bad, "避けるべき型の明示", str(avoid_bad) if avoid_bad else "")
+    rec(not reason_bad, "基本配置なし理由の書き分け",
+        str(reason_bad) if reason_bad else "")
     rec(DEFENSE in sides and ATTACK in sides and hand_sides_ok, "守り・攻め両側の節",
         f"sides={sorted(sides)} 手札={hand_sides_ok}")
+
+    # 11. 守りの型名に攻め専用の言い回しが残っていない
+    atk_bad = [p["name"] for p in m.get("patterns") or []
+               if p.get("side") == DEFENSE and any(ph in p["name"] for ph in ATTACK_ONLY_PHRASES)]
+    rec(not atk_bad, "守りの型名に攻め専用表現なし", str(atk_bad) if atk_bad else "")
 
 
 def main(argv=None):
