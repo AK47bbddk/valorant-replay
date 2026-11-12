@@ -30,8 +30,7 @@ DOMINANCE_MIN = 2             # ゾーンを支配というのに必要な人数
 ENTRY_MIN = 2                 # サイトへ入った（エントリー）とみなす人数
 PUSH_MIN = 2                  # 前進（プッシュ）とみなす人数
 REGROUP_MIN = 3               # リグループ（1 ゾーンに集まり直し）とみなす人数
-RUSH_SECONDS = 15.0           # 開幕からこの秒以内のエントリーはラッシュ
-RUSH_PLAYERS = 4              # 開幕のラッシュとみなす、サイト側ゾーンへの攻撃人数
+RUSH_SECONDS = 15.0           # 開幕からこの秒以内にサイトへエントリーしたらラッシュ
 FREEZE_SECONDS = 10.0         # ピック後に動きが無いままこの秒数でフリーズ区間
 ROTATE_REVERT_SECONDS = 10.0  # ローテート後にこの秒以内に元のゾーンへ戻ったら取り消す
 
@@ -406,9 +405,10 @@ def _pick_events(round_dict: dict) -> list[Event]:
 
 
 def _rush_events(frames: list[dict], atk: int | None) -> list[Event]:
-    """ラッシュ：開幕 RUSH_SECONDS 以内のサイトエントリー、またはサイト側ゾーンへの 4 人以上の侵入。
+    """ラッシュ：開幕 RUSH_SECONDS 以内にサイトへエントリー（サイトのコールアウトに 2 人以上）した場合のみ。
 
-    人数の重心（最頻ゾーン）が変わっただけではラッシュにしない（開幕の移動だけで発火しない）。
+    人数の重心（最頻ゾーン）が変わっただけ、サイト側のゾーンに 4 人以上入っただけでは
+    ラッシュにしない（エントリーしなければ、開幕の配分に応じたデフォルトになる）。
     """
     if atk is None:
         return []
@@ -416,16 +416,6 @@ def _rush_events(frames: list[dict], atk: int | None) -> list[Event]:
     for ent in _entry_events(frames, atk):
         if ent.t <= RUSH_SECONDS + 1e-9:
             out.append(Event(ent.t, "ラッシュ", ent.zone, ATTACK))
-    if out:
-        return out
-    for f in frames:
-        if f["e"] > RUSH_SECONDS + 1e-9:
-            break
-        zones = f["zones"].get(atk) or {}
-        for z in SITES:
-            if int(zones.get(z, 0)) >= RUSH_PLAYERS:
-                out.append(Event(float(f["e"]), "ラッシュ", z, ATTACK))
-                return out
     return out
 
 
@@ -512,10 +502,10 @@ def _early_type(frames: list[dict], events: list[Event], early_end: float, atk: 
             if z in ZONES:
                 used[z] += int(n)
     used = {z: n for z, n in used.items() if n}
-    if len(used) >= 2:
+    if used:
         main = _main_zone(used)
         return {"type": f"{main} デフォルト", "zone": main, "candidates": sorted(used)}
-    return {"type": "詰め待ち", "zone": _main_zone(used) if used else None, "candidates": sorted(used)}
+    return {"type": "詰め待ち", "zone": None, "candidates": []}
 
 
 def _freeze_at(events: list[Event], mid_end: float) -> float | None:

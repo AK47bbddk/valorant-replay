@@ -164,6 +164,20 @@ def test_rush_boundary_15s():
     assert entry_at(16.0)["phases"]["early"]["type"] != "A ラッシュ"
 
 
+def test_fast_group_without_entry_is_default():
+    """4 人が速くサイト側のゾーンへ寄っても、サイトへエントリーしなければラッシュにしない（寄った先のデフォルト）。"""
+    tr = tracks({
+        "Jett": [(0, "攻撃側"), (5, "A", "A Main"), (10, "A", "A Main"), (15, "A", "A Main"), (20, "A", "A Main")],
+        "Omen": [(0, "攻撃側"), (5, "A", "A Main"), (10, "A", "A Main"), (15, "A", "A Main"), (20, "A", "A Main")],
+        "Sova": [(0, "攻撃側"), (5, "A", "A Main"), (10, "A", "A Main"), (15, "A", "A Main"), (20, "A", "A Main")],
+        "Viper": [(0, "攻撃側"), (5, "A", "A Main"), (10, "A", "A Main"), (15, "A", "A Main"), (20, "A", "A Main")],
+        "Cypher": [(0, "攻撃側"), (5, "攻撃側"), (10, "攻撃側"), (15, "攻撃側"), (20, "攻撃側")],
+    }, {ag: [(0, "防衛側")] for ag in ("Raze", "Sage", "Fade", "Killjoy", "Skye")})
+    res = P.classify_flow(rnd(tr))
+    assert res["phases"]["early"]["type"] == "A デフォルト", res["phases"]["early"]
+    assert not any(e["kind"] == "ラッシュ" for e in res["events"]), res["events"]
+
+
 def test_slow_default_is_not_rush():
     """開幕にゾーンへ散っただけ（サイトエントリーも 4 人集結もない）のラウンドはラッシュにしない。"""
     tr = tracks({
