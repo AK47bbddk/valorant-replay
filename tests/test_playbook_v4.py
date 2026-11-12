@@ -66,6 +66,48 @@ def test_no_map_image_gives_text_only(tmp_path, monkeypatch):
     assert "マップ画像がありません" in page and "<image" not in page and "data:image" not in page
 
 
+# ---------------------------------------------------------------- チーム照合は完全一致（2026-11-11）
+def test_match_is_exact_team_or_tag():
+    """短いタグが正式名の部分文字列に当たって他チームを拾わない（部分一致の回帰）。"""
+    r = {"team": "100 Thieves", "tag": "100T"}
+    assert not PB._match(r, "TH")                 # `Thieves` に `th` が含まれる、の回帰
+    assert PB._match(r, "100 Thieves") and PB._match(r, "100T") and PB._match(r, "100t")
+    assert not PB._match({"team": "Dragon Ranger Gaming", "tag": "DRG"}, "RA")   # `Ranger` の `ra`
+    assert not PB._match({"team": "Gentle Mates", "tag": "M8"}, "GE")            # `Gentle` の `ge`
+    assert PB._match({"team": "Team Heretics", "tag": "TH"}, "TH")               # 正式タグは拾う
+    assert not PB._match({"team": "Team Heretics", "tag": "TH"}, "T")            # 正式タグの部分一致もしない
+
+
+def _tagged_report(monkeypatch, t1, tag1, t2, tag2, seed=1):
+    """deckfx の合成 report に、正式名と違う短いタグを入れて返す（実データの形を再現）。"""
+    for t in (t1, t2):
+        monkeypatch.setitem(FX._SYN_AG, t, ["Jett", "Omen", "Sova", "Viper", "Cypher"])
+        monkeypatch.setitem(FX._SYN_PL, t, [f"{t[:3]}p{i}" for i in range(5)])
+    rep = FX.report_v4("m1", t1, t2, seed)
+    rep["tag1"], rep["tag2"] = tag1, tag2
+    return rep
+
+
+def test_prepare_does_not_mix_short_tag_teams(tmp_path, monkeypatch):
+    """100 Thieves / 100T のラウンドが --team TH の冊子に混ざらない（部分一致の回帰）。"""
+    FX.syn_patch(monkeypatch)
+    rep = _tagged_report(monkeypatch, "100 Thieves", "100T", "Team Heretics", "TH")
+    cfg = {"output": {"dir": str(tmp_path)}}
+    d = PB.prepare([rep], "TH", "Split", cfg, log=lambda *a: None)
+    assert d["mine"] and all(r["team"] == "Team Heretics" for r in d["mine"])
+    d2 = PB.prepare([rep], "100T", "Split", cfg, log=lambda *a: None)
+    assert d2["mine"] and all(r["team"] == "100 Thieves" for r in d2["mine"])
+
+
+def test_build_filename_uses_requested_team(tmp_path, monkeypatch):
+    """出力ファイル名は mine[0] のタグではなく、要求チーム（--team）に合わせる。"""
+    FX.syn_patch(monkeypatch)
+    rep = _tagged_report(monkeypatch, "100 Thieves", "100T", "Team Heretics", "TH")
+    cfg = {"output": {"dir": str(tmp_path)}}
+    p = PB.build([rep], "TH", "Split", tmp_path / "TH", cfg, log=lambda *a: None)
+    assert p.name == "playbook_v4_TH_Split.html"
+
+
 # ---------------------------------------------------------------- 2 回目の直し
 from . import test_gamemodel as TG
 

@@ -104,7 +104,8 @@ def test_range_download_matches_source(tmp_path, monkeypatch):
     src = tmp_path / "src.mp4"
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
                     "nullsrc=s=160x120:r=30,geq=lum='mod(N\\,200)+20':cb=128:cr=128", "-t", "90",
-                    "-c:v", "libx264", "-preset", "veryfast", "-g", "150", "-sc_threshold", "0", "-pix_fmt", "yuv420p",
+                    "-c:v", "libx264", "-preset", "veryfast", "-g", "150", "-sc_threshold", "0", "-qp", "0",
+                    "-pix_fmt", "yuv420p",
                     "-movflags", "+frag_keyframe+empty_moov+global_sidx+default_base_moof", "-f", "mp4", str(src)],
                    check=True)
     data = src.read_bytes()

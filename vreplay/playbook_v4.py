@@ -63,7 +63,7 @@ def _media(d: dict) -> str:
 # ============================================================== データ
 def _match(r: dict, team: str) -> bool:
     t = team.lower()
-    return t in (r.get("team") or "").lower() or t == (r.get("tag") or "").lower()
+    return t == (r.get("team") or "").lower() or t == (r.get("tag") or "").lower()
 
 
 def prepare(reports: list[dict], team: str, map_name: str, cfg: dict, log=print) -> dict:
@@ -782,7 +782,7 @@ def build(reports: list[dict], team: str, map_name: str, out, cfg: dict, log=pri
             f'<p>{_e(title)}</p><p>印刷（PDF 保存）すると 1 スライド 1 ページになります</p></div>{body}</main></body></html>')
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    f = out / f"playbook_v4_{re.sub(r'[^A-Za-z0-9]+', '-', d['tag'])}_{re.sub(r'[^A-Za-z0-9]+', '-', map_name)}.html"
+    f = out / f"playbook_v4_{re.sub(r'[^A-Za-z0-9]+', '-', team)}_{re.sub(r'[^A-Za-z0-9]+', '-', map_name)}.html"
     f.write_text(page, encoding="utf-8")
     log(f"プレイブック v4: {f}")
     return f
