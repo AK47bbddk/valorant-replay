@@ -13,6 +13,7 @@ from pathlib import Path
 
 BANNED = ["マップ画像がありません", "場所不明", "None", "形だけ", "推定", "&lt;a ", "正しい戦略の模索", "略号"]
 PATTERN_MIN = 3
+DEFENSE, ATTACK = "防衛", "攻撃"
 
 
 def strip_tags(h: str) -> str:
@@ -89,6 +90,53 @@ def check_page(name: str, page: str, manifest_entry: dict, results: list, fail: 
     small = [x for x in re.findall(r"font-size\s*:\s*([0-9.]+)px", page) if float(x) < 14]
     small += [x for x in re.findall(r'font-size="([0-9.]+)"', page) if float(x) < 14]
     rec(not small, "font-size 14px 以上", str(small[:5]) if small else "")
+
+    # 9. 見本ラベルのチーム照合・重複なし・full5・見本なし表示
+    hands = m.get("hands") or []
+    teams = set(m.get("teams") or [])
+    label_bad, full5_bad, no_sample_bad = [], [], []
+    sample_rounds = []
+    for h in hands:
+        rk = h.get("sample_round")
+        if rk:
+            sample_rounds.append(rk)
+            team = h.get("sample_team")
+            label = h.get("sample_label") or ""
+            if team not in teams:
+                label_bad.append(f"{h.get('name')}:team={team}")
+            if not label.startswith(f"{team} vs "):
+                label_bad.append(f"{h.get('name')}:label={label}")
+            if label and label not in text:
+                label_bad.append(f"{h.get('name')}:missing")
+            if not h.get("sample_full5"):
+                full5_bad.append(h.get("name"))
+        elif "見本ラウンドがありません" not in text:
+            no_sample_bad.append(h.get("name"))
+    rec(not label_bad, "見本ラベルのチーム照合",
+        str(label_bad) if label_bad else f"{len(sample_rounds)} 件")
+    rec(len(sample_rounds) == len(set(sample_rounds)), "見本ラウンドの重複なし",
+        f"{len(sample_rounds)} 件 / 一意 {len(set(sample_rounds))}")
+    rec(not full5_bad, "見本は full5", str(full5_bad) if full5_bad else "")
+    rec(not no_sample_bad, "見本なしの表示", str(no_sample_bad) if no_sample_bad else "")
+
+    # 10. 基本配置の勝率条件・避けるべき型・守り攻め両側
+    placements = m.get("placements") or []
+    sides = {p.get("side") for p in placements}
+    placement_bad, avoid_bad = [], []
+    for p in placements:
+        if p.get("name"):
+            if not p.get("meets_winrate"):
+                placement_bad.append(f"{p.get('side')}:{p.get('name')}")
+        elif not p.get("reason"):
+            placement_bad.append(f"{p.get('side')}:理由なし")
+        if p.get("avoid") and "避けるべき型" not in text:
+            avoid_bad.append(p.get("side"))
+    hand_sides_ok = "守り / 手札" in text and "攻め / 手札" in text
+    rec(not placement_bad, "基本配置の勝率条件",
+        str(placement_bad) if placement_bad else f"{len(placements)} 側")
+    rec(not avoid_bad, "避けるべき型の明示", str(avoid_bad) if avoid_bad else "")
+    rec(DEFENSE in sides and ATTACK in sides and hand_sides_ok, "守り・攻め両側の節",
+        f"sides={sorted(sides)} 手札={hand_sides_ok}")
 
 
 def main(argv=None):

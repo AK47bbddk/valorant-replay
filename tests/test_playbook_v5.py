@@ -8,6 +8,14 @@ def _rec(comp_key, win=True, side="攻撃", date="2026-10-01", n=1, pistol=False
     return {"comp_key": comp_key, "win": win, "side": side, "date": date, "n": n, "pistol": pistol}
 
 
+def _item(*, win=True, su=5, n=1, match_id="m", order=1, tag="LOUD", opp_tag="PRX",
+          side="攻撃", pistol=False, cls=None):
+    setup = {f"A{i}": (0.1 * i, 0.1 * i, "A") for i in range(su)} if su else None
+    r = {"match_id": match_id, "order": order, "n": n, "win": win, "tag": tag, "opp_tag": opp_tag,
+         "side": side, "pistol": pistol, "comp_key": "x"}
+    return {"r": r, "su": setup, "cls": cls or {}, "opp": {}}
+
+
 # ---------------------------------------------------------------- 構成グルーピング
 def test_group_by_comp_keeps_keys_apart():
     a = "Fade|Neon|Omen|Viper|Yoru"
@@ -83,3 +91,74 @@ def test_gate_rejects_under_thresholds_with_reason():
     assert not ok and "setup" in reason
     ok, reason = PB.gate_ok({"total": 44, "used": 44, "full5": 20})
     assert ok and reason == ""
+
+
+# ---------------------------------------------------------------- 見本の選び方
+def test_sample_label_uses_team_then_opponent():
+    it = _item(tag="LOUD", opp_tag="PRX", n=3, win=True)
+    assert PB.sample_label(it["r"]) == "LOUD vs PRX R3○"
+    it = _item(tag="GE", opp_tag="NS", n=5, win=False)
+    assert PB.sample_label(it["r"]) == "GE vs NS R5✕"
+
+
+def test_sample_candidates_prefers_full5_and_skips_used():
+    full_win = _item(match_id="a", n=1, su=5, win=True)
+    full_loss = _item(match_id="b", n=2, su=5, win=False)
+    not_full = _item(match_id="c", n=3, su=4, win=True)
+    pool = PB.sample_candidates([not_full, full_loss, full_win], set())
+    assert [PB.sample_key(it) for it in pool] == ["a:1:1", "b:1:2"]
+    pool = PB.sample_candidates([full_win, full_loss], {PB.sample_key(full_win)})
+    assert [PB.sample_key(it) for it in pool] == ["b:1:2"]
+    assert PB.sample_candidates([full_loss], {PB.sample_key(full_loss)}) == []
+
+
+def test_same_round_is_not_reused_across_hands():
+    a = _item(match_id="m", n=1)
+    b = _item(match_id="m", n=2)
+    used = {PB.sample_key(a)}
+    assert [PB.sample_key(it) for it in PB.sample_candidates([a, b], used)] == ["m:1:2"]
+
+
+# ---------------------------------------------------------------- 基本配置の勝率条件
+def test_side_avg_winrate_excludes_pistol_and_splits_sides():
+    items = [
+        _item(side="防衛", win=True, pistol=False),
+        _item(side="防衛", win=False, pistol=False),
+        _item(side="防衛", win=True, pistol=True),
+        _item(side="攻撃", win=True, pistol=False),
+    ]
+    assert PB.side_avg_winrate(items, PB.DEFENSE) == 0.5
+    assert PB.side_avg_winrate(items, PB.ATTACK) == 1.0
+
+
+def test_choose_placement_skips_below_average_and_lists_avoid():
+    top = {"name": "多いが弱い", "n": 8, "w": 2}
+    good = {"name": "少ないが平均以上", "n": 4, "w": 2}
+    chosen, avoid = PB.choose_placement([top, good], avg=0.4)
+    assert chosen is good and avoid == [top]
+    chosen, avoid = PB.choose_placement([good], avg=0.4)
+    assert chosen is good and avoid == []
+    chosen, avoid = PB.choose_placement([top], avg=0.4)
+    assert chosen is None and avoid == [top]
+
+
+# ---------------------------------------------------------------- 型名
+def test_pattern_name_is_side_aware():
+    zones = Counter({"A": 3})
+    atk = PB.pattern_name(zones, "構えて待つ", PB.ATTACK)
+    dfn = PB.pattern_name(zones, "構えて待つ", PB.DEFENSE)
+    assert "集めて" in atk
+    assert "置いて" in dfn and "集めて" not in dfn
+
+
+def test_unique_name_makes_collisions_distinct():
+    used = set()
+    base = "Aに3枚置いて構えて待つ"
+    a = PB.unique_name(base, "A3 Long", used)
+    used.add(a)
+    b = PB.unique_name(base, "A3 Long", used)
+    used.add(b)
+    c = PB.unique_name(base, "A3 Long", used)
+    assert a == base
+    assert len({a, b, c}) == 3
+    assert all(x.startswith(base) for x in (a, b, c))
