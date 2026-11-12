@@ -31,7 +31,9 @@ ENTRY_MIN = 2                 # サイトへ入った（エントリー）とみ
 PUSH_MIN = 2                  # 前進（プッシュ）とみなす人数
 REGROUP_MIN = 3               # リグループ（1 ゾーンに集まり直し）とみなす人数
 RUSH_SECONDS = 15.0           # 開幕からこの秒以内のエントリーはラッシュ
+RUSH_PLAYERS = 4              # 開幕のラッシュとみなす、サイト側ゾーンへの攻撃人数
 FREEZE_SECONDS = 10.0         # ピック後に動きが無いままこの秒数でフリーズ区間
+ROTATE_REVERT_SECONDS = 10.0  # ローテート後にこの秒以内に元のゾーンへ戻ったら取り消す
 
 # 流れ要約に出すイベント（ラッシュ・フリーズは型として出すので、要約には入れない）
 FLOW_KINDS = ("プッシュ", "テイク", "取り返し", "ローテート", "エントリー", "ピック")
@@ -270,18 +272,30 @@ def _centroid_zone(counter) -> str | None:
 
 
 def _rotate_events(frames: list[dict], sides: dict[int, str]) -> list[Event]:
-    """ローテート：チームの人数の重心ゾーンが変わり、次のサンプルも維持される。"""
+    """ローテート：チームの人数の重心ゾーンが変わり、2 サンプル続いた場合だけ拾う。
+
+    変化のあと ROTATE_REVERT_SECONDS 以内に元のゾーンへ戻ったら、そのローテートは取り消す。
+    """
     out: list[Event] = []
     if not frames:
         return out
     for team in (1, 2):
-        prev = _centroid_zone(frames[0]["zones"].get(team))
-        for i in range(1, len(frames)):
-            cur = _centroid_zone(frames[i]["zones"].get(team))
+        series = [(_centroid_zone(f["zones"].get(team)), float(f["e"])) for f in frames]
+        prev = series[0][0]
+        for i in range(1, len(series)):
+            cur, t = series[i]
             if cur and prev and cur != prev:
-                nxt = _centroid_zone(frames[i + 1]["zones"].get(team)) if i + 1 < len(frames) else None
-                if nxt == cur:
-                    out.append(Event(float(frames[i]["e"]), "ローテート", cur, sides.get(team)))
+                nxt = series[i + 1][0] if i + 1 < len(series) else None
+                if nxt == cur:                   # 次のサンプルも同じゾーン（2 サンプル続く）
+                    reverted = False
+                    for z2, t2 in series[i + 1:]:
+                        if t2 - t > ROTATE_REVERT_SECONDS + 1e-9:
+                            break
+                        if z2 == prev:           # 10 秒以内に元のゾーンへ逆戻り
+                            reverted = True
+                            break
+                    if not reverted:
+                        out.append(Event(t, "ローテート", cur, sides.get(team)))
             prev = cur or prev
     return out
 
@@ -392,21 +406,37 @@ def _pick_events(round_dict: dict) -> list[Event]:
 
 
 def _rush_events(frames: list[dict], atk: int | None) -> list[Event]:
-    """ラッシュ：開幕 RUSH_SECONDS 以内のサイトエントリー（または重心の急な寄り）。"""
+    """ラッシュ：開幕 RUSH_SECONDS 以内のサイトエントリー、またはサイト側ゾーンへの 4 人以上の侵入。
+
+    人数の重心（最頻ゾーン）が変わっただけではラッシュにしない（開幕の移動だけで発火しない）。
+    """
     if atk is None:
         return []
     out: list[Event] = []
     for ent in _entry_events(frames, atk):
         if ent.t <= RUSH_SECONDS + 1e-9:
             out.append(Event(ent.t, "ラッシュ", ent.zone, ATTACK))
-    if not out:
-        for f in frames:
-            if f["e"] > RUSH_SECONDS + 1e-9:
-                break
-            z = _centroid_zone(f["zones"].get(atk))
-            if z in SITES:
+    if out:
+        return out
+    for f in frames:
+        if f["e"] > RUSH_SECONDS + 1e-9:
+            break
+        zones = f["zones"].get(atk) or {}
+        for z in SITES:
+            if int(zones.get(z, 0)) >= RUSH_PLAYERS:
                 out.append(Event(float(f["e"]), "ラッシュ", z, ATTACK))
-                break
+                return out
+    return out
+
+
+def _merge_events(events: list[Event]) -> list[Event]:
+    """同じ側・同じゾーン・同じ種別の連続イベントを 1 つにまとめる（ゾーン無しのピックはまとめない）。"""
+    out: list[Event] = []
+    for e in events:
+        if (out and e.zone is not None and out[-1].zone == e.zone
+                and out[-1].kind == e.kind and out[-1].side == e.side):
+            continue
+        out.append(e)
     return out
 
 
@@ -430,7 +460,7 @@ def round_events(round_dict: dict, ranks: dict | None = None) -> list[Event]:
     ev += _pick_events(round_dict)
     ev += _rush_events(frames, atk)
     ev.sort(key=lambda x: (round(float(x.t), 3), KIND_ORDER.get(x.kind, 99), x.zone or ""))
-    return ev
+    return _merge_events(ev)
 
 
 # ---------------------------------------------------------------- 区間
@@ -598,10 +628,28 @@ def flow_text(events: list[Event]) -> str:
     return "→".join(steps)
 
 
+def _segment_flow(events: list[Event], segs: dict) -> dict:
+    """区間ごとの流れ要約。各イベントはその時刻が入る区間の要約にだけ出す。"""
+    early_end = float(segs["early"]["end"])
+    mid = segs["mid"]
+    late = segs["late"]
+    groups: dict[str, list[Event]] = {"early": [], "mid": [], "late": []}
+    for e in events:
+        if e.t <= early_end + 1e-9:
+            groups["early"].append(e)
+        if float(mid["start"]) - 1e-9 <= e.t <= float(mid["end"]) + 1e-9:
+            groups["mid"].append(e)
+        if late["start"] is not None and late["end"] is not None:
+            if float(late["start"]) - 1e-9 <= e.t <= float(late["end"]) + 1e-9:
+                groups["late"].append(e)
+    return {seg: flow_text(evs) for seg, evs in groups.items()}
+
+
 def classify_flow(round_dict: dict, ranks: dict | None = None) -> dict | None:
-    """1 ラウンドの型（区間ごと）・イベント列・流れ要約。tracks が無ければ None。
+    """1 ラウンドの型（区間ごと）・イベント列・区間ごとの流れ要約。tracks が無ければ None。
 
     ranks は `tactics.area_ranks(callouts_placed)` の形（あればプッシュ判定に使う）。
+    `flow` は {"early": 序盤, "mid": 中盤, "late": 終盤} の文字列で、その区間のイベントだけを含む。
     """
     norm = _norm_tracks(tracks_of(round_dict))
     if not norm:
@@ -617,4 +665,4 @@ def classify_flow(round_dict: dict, ranks: dict | None = None) -> dict | None:
         "late": _late_type(frames, segs["plant"], events, round_dict, atk, ranks),
     }
     return {"events": [e.to_dict() for e in events], "segments": segs, "phases": phases,
-            "flow": flow_text(events)}
+            "flow": _segment_flow(events, segs)}

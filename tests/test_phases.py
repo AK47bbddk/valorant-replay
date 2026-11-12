@@ -92,6 +92,38 @@ def test_rotate_event():
     assert any(e.kind == "ローテート" and e.zone == "B" and e.side == "攻撃" and e.t == 30 for e in ev), ev
 
 
+def test_rotate_needs_two_samples_and_cancels_revert():
+    def with_schedule(sched):
+        return tracks({ag: sched for ag in ("Jett", "Omen", "Sova", "Viper", "Cypher")},
+                      {ag: [(0, "防衛側")] for ag in ("Raze", "Sage")})
+
+    # 1 サンプルだけ B に寄ってもローテートにしない
+    one = with_schedule([(0, "攻撃側"), (10, "A"), (15, "B"), (20, "A")])
+    assert not [e for e in P.round_events(rnd(one)) if e.kind == "ローテート" and e.zone == "B"]
+
+    # 2 サンプル続いても、10 秒以内に元の A へ戻ったら取り消す
+    back = with_schedule([(0, "攻撃側"), (10, "A"), (15, "B"), (20, "B"), (25, "A"), (30, "A")])
+    rots = [e for e in P.round_events(rnd(back)) if e.kind == "ローテート"]
+    assert not any(e.zone == "B" for e in rots), rots
+
+
+def test_consecutive_same_zone_events_merged():
+    """同じゾーンのテイクが連続したら 1 つにまとめる。"""
+    tr = tracks({
+        "Jett": [(0, "攻撃側"), (10, "A"), (15, "A"), (20, "A"), (25, "A"), (30, "A")],
+        "Omen": [(0, "攻撃側"), (10, "A"), (15, "A"), (20, "A"), (25, "A"), (30, "A")],
+        "Sova": [(0, "攻撃側"), (10, "攻撃側"), (15, "攻撃側"), (20, "攻撃側"), (25, "攻撃側"), (30, "攻撃側")],
+        "Viper": [(0, "攻撃側"), (10, "攻撃側"), (15, "攻撃側"), (20, "攻撃側"), (25, "攻撃側"), (30, "攻撃側")],
+        "Cypher": [(0, "攻撃側"), (10, "攻撃側"), (15, "攻撃側"), (20, "攻撃側"), (25, "攻撃側"), (30, "攻撃側")],
+    }, {
+        "Raze": [(0, "防衛側"), (10, "防衛側"), (15, "防衛側"), (20, "A"), (25, "防衛側"), (30, "防衛側")],
+        "Sage": [(0, "防衛側"), (10, "防衛側"), (15, "防衛側"), (20, "A"), (25, "防衛側"), (30, "防衛側")],
+    })
+    ev = P.round_events(rnd(tr))
+    takes = [e for e in ev if e.kind == "テイク" and e.zone == "A"]
+    assert len(takes) == 1 and takes[0].t == 10, ev
+
+
 def test_entry_event():
     tr = tracks({"Jett": [(0, "攻撃側"), (10, "A", "A Site"), (15, "A", "A Site")],
                  "Omen": [(0, "攻撃側"), (10, "A", "A Site"), (15, "A", "A Site")],
@@ -130,6 +162,21 @@ def test_rush_boundary_15s():
 
     assert entry_at(15.0)["phases"]["early"]["type"] == "A ラッシュ"
     assert entry_at(16.0)["phases"]["early"]["type"] != "A ラッシュ"
+
+
+def test_slow_default_is_not_rush():
+    """開幕にゾーンへ散っただけ（サイトエントリーも 4 人集結もない）のラウンドはラッシュにしない。"""
+    tr = tracks({
+        "Jett": [(0, "攻撃側"), (5, "A"), (10, "A"), (15, "A"), (20, "A")],
+        "Omen": [(0, "攻撃側"), (5, "A"), (10, "A"), (15, "A"), (20, "A")],
+        "Sova": [(0, "攻撃側"), (5, "Mid"), (10, "Mid"), (15, "Mid"), (20, "Mid")],
+        "Viper": [(0, "攻撃側"), (5, "Mid"), (10, "Mid"), (15, "Mid"), (20, "Mid")],
+        "Cypher": [(0, "攻撃側"), (5, "B"), (10, "B"), (15, "B"), (20, "B")],
+    }, {ag: [(0, "防衛側")] for ag in ("Raze", "Sage", "Fade", "Killjoy", "Skye")})
+    res = P.classify_flow(rnd(tr))
+    early = res["phases"]["early"]["type"]
+    assert early == "A デフォルト", res["phases"]["early"]
+    assert not early.endswith("ラッシュ")
 
 
 def test_fake_vs_regroup_priority():
@@ -177,6 +224,10 @@ def test_late_deep_push():
     res = P.classify_flow(r, ranks=_ranks())
     assert res["phases"]["late"]["type"] == "プッシュ", res["phases"]["late"]
     assert any(e["kind"] == "プッシュ" and e["side"] == "攻撃" for e in res["events"]), res["events"]
+    flows = res["flow"]
+    assert isinstance(flows, dict) and set(flows) == {"early", "mid", "late"}, flows
+    assert "エントリー" in flows["early"], flows
+    assert "エントリー" not in flows["late"], flows
 
 
 def test_no_tracks_returns_none():
@@ -189,5 +240,7 @@ def test_no_tracks_returns_none():
 def test_flow_text_when_classified():
     tr = still(["攻撃側", "A", "A", "Mid", "Mid"])
     res = P.classify_flow(rnd(tr))
-    assert res is not None and isinstance(res["flow"], str)
+    assert res is not None
+    assert isinstance(res["flow"], dict) and set(res["flow"]) == {"early", "mid", "late"}
+    assert all(isinstance(v, str) for v in res["flow"].values())
     assert res["segments"]["early"]["label"] == "序盤"

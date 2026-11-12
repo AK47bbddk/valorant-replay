@@ -37,6 +37,7 @@ def collect(reports: list[dict], map_name: str) -> dict:
     target = str(map_name).lower()
     reps = [r for r in reports if str(r.get("map") or "").lower() == target]
     classified = skipped = 0
+    distribution: dict[str, Counter] = {s: Counter() for s, _ in SEGS}
     comps: dict = {}
     for rep in reps:
         comp = _comp_of(rep)
@@ -50,6 +51,10 @@ def collect(reports: list[dict], map_name: str) -> dict:
                 skipped += 1
                 continue
             classified += 1
+            for seg, _label in SEGS:
+                typ = res["phases"][seg]["type"]
+                if typ:
+                    distribution[seg][typ] += 1
             for no in (1, 2):
                 ck = comp.get(no)
                 if not ck or "?" in ck:
@@ -67,7 +72,8 @@ def collect(reports: list[dict], map_name: str) -> dict:
                     prev = b["reps"].get((seg, typ))
                     cand = {"match_id": str(rep.get("match_id")), "map": rep.get("map"),
                             "date": rep.get("date"), "team": _tag(rep, no),
-                            "round": rr.get("n"), "flow": res["flow"], "events": len(res["events"])}
+                            "round": rr.get("n"), "flow": res["flow"].get(seg, ""),
+                            "events": len(res["events"])}
                     if prev is None or cand["events"] > prev["events"]:
                         b["reps"][(seg, typ)] = cand
     out_comps = []
@@ -80,6 +86,7 @@ def collect(reports: list[dict], map_name: str) -> dict:
                           "types": {s: dict(b["types"][s]) for s, _ in SEGS},
                           "representatives": reps_out})
     return {"map": map_name, "reports": len(reps), "classified": classified, "skipped_no_tracks": skipped,
+            "distribution": {s: dict(distribution[s]) for s, _ in SEGS},
             "comps": out_comps}
 
 
@@ -89,6 +96,20 @@ def markdown(data: dict) -> str:
              f"- 分類できたラウンド: {data['classified']}",
              f"- tracks 無しで対象外: {data['skipped_no_tracks']}",
              f"- 構成: {len(data['comps'])}", ""]
+    lines.append("## 型の分布（全体）")
+    lines.append("")
+    for seg, label in SEGS:
+        types = (data.get("distribution") or {}).get(seg) or {}
+        lines.append(f"### {label}")
+        if not types:
+            lines.append("- 型なし")
+            lines.append("")
+            continue
+        lines.append("| 型 | 件数 |")
+        lines.append("| --- | --- |")
+        for typ, n in sorted(types.items(), key=lambda kv: (-kv[1], kv[0])):
+            lines.append(f"| {typ} | {n} |")
+        lines.append("")
     for b in data["comps"]:
         lines.append(f"## {' / '.join(b['agents'])}")
         lines.append(f"- ラウンド: {b['rounds']} ・チーム: {', '.join(b['teams']) or '-'}")
