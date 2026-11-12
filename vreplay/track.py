@@ -29,7 +29,7 @@ def _dist(a, b, aspect: float = 1.0) -> float:
 
 
 def best_chain(dets: list[tuple[float, float, float, float]], scale: float, agent: str | None = None,
-               aspect: float = 1.0, speed: float = SPEED, slack: float = SLACK, min_score: float = 0.45
+               aspect: float = 1.0, speed: float = SPEED, slack: float = SLACK, min_score: float = 0.58
                ) -> list[tuple[float, float, float, float]]:
     """dets: [(t, x, y, score)]（時刻順でなくてもよい）。走って届く点だけをつないだ、合計がいちばん大きい鎖。
     scale: スポーン間の距離（ミニマップの正規化座標）。"""

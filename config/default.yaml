@@ -100,6 +100,33 @@ tactics:
   # 1:40 から何秒ごとの配置（ゾーン・エリアの人数）を残すか。プレイブックの「手」の判定と時間の並びに使う
   snap_every: 10
   track_threads: 4     # 追跡の照合を何本のスレッドで並べるか
+  # エージェントの照合の厳しさ。数字は tools/agents_eval.py で実データを数えてから直す
+  agent_match:
+    thr: 0.58
+    margin: 0.06
+    crowded_margin: 0.10
+    min_face_std: 12
+    # 2 本目（agents-recall）。null / false / 今までの値 なら 1 本目と同じ動き
+    # 2026-11-12 計測（1 本目と同じ dump・ラベル 276、geom）: 既定は全部切のままにする。条件（geom の precision が
+    # all/overlap/clear すべて 95% 以上・wrong_id+ghost 6 以下・時間増 30% 以内）を満たす組が無かったため。
+    # いちばん近い組は filled_rescue 0.62＋tpl_fill_min 0.30＋margin_exclusive＋cand_per_color 16 で
+    # P 98.8/92.0/100・R 60.5（overlap の precision が 3.0pt、recall が目安 70% に 9.5pt 不足）。
+    # face_search を足すと R 68.1 まで上がるが、時間が約 1.4〜1.8 倍になり条件を超える。詳細は PROMPT.md
+    filled_rescue: null      # 例 0.66。顔そのものが縁と同じ色を含むエージェント（Chamber など）を filled で捨てない
+    tpl_fill_min: 0.35
+    margin_exclusive: false  # 同じフレームで残したエージェントを 2 番目の相手から外す
+    margin_pair: false       # 似た 2 人ほど必要な差を小さくする
+    gray_floor: null         # 例 0.52。thr 未満でも条件付きで残す下限
+    gray_margin: 0.12
+    gray_face_std: 18
+    gray_ring: 0.30
+    face_inner: 0.42
+    bg_mode: subtract        # subtract | flag
+    cand_nms: 0.8
+    cand_per_color: 12
+    face_search: false
+  # 確かめ用：1 マップにつき何枚のミニマップを _tactics/agents_dump/ に書き出すか（0 で書き出さない）
+  agents_dump: 0
 
 output:
   dir: /content/drive/MyDrive/valorant-replay

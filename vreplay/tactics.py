@@ -666,7 +666,8 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         try:
             _agent_tracks(cfg, keep_trk, keep, agent_teams, ct, mask, reg, placed, aspect, background,
                           round_tac, log, icons=icons, icon_frac=icon_frac, alive_fn=alive_fn,
-                          every=track_every or 5.0, cache=mcache, threads=int(tcfg.get("track_threads") or 4))
+                          every=track_every or 5.0, cache=mcache, threads=int(tcfg.get("track_threads") or 4),
+                          out_dir=out_dir)
         except Exception as e:                       # 追跡に失敗しても、ほかの結果は出す
             if log:
                 log(f"    エージェントの追跡はスキップしました（{e}）")
@@ -1150,6 +1151,16 @@ def board_png(base: np.ndarray, entries: list[dict], icons: dict, path: Path, to
     return path
 
 
+def _agent_match_params(cfg: dict) -> dict:
+    """config の tactics.agent_match から、agents.match に渡す厳しさの設定だけを取り出す。"""
+    am = (cfg.get("tactics") or {}).get("agent_match") or {}
+    keys = ("thr", "margin", "crowded_margin", "min_face_std",
+            "filled_rescue", "tpl_fill_min", "margin_exclusive", "margin_pair",
+            "gray_floor", "gray_margin", "gray_face_std", "gray_ring", "face_inner",
+            "bg_mode", "cand_nms", "cand_per_color", "face_search")
+    return {k: am[k] for k in keys if k in am}
+
+
 def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed, aspect, T, background,
                      out_dir, round_tac, log, icons=None, icon_frac=None, alive_fn=None, art=None, cache=None):
     """節目ごとのミニマップ（前後 1 秒の数枚）でエージェントのアイコンを照合し、位置・ゾーンと配置図を作る。"""
@@ -1160,6 +1171,7 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
     if not icons:
         return None
     icon_frac = icon_frac or ICON_FRAC
+    am = _agent_match_params(cfg)
     ct_fn = color_team if callable(color_team) else (lambda n_, _c=color_team: _c)
     base = board_base(background, mask, art=art)
     out = {}
@@ -1182,7 +1194,8 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
         for d_, t_, mm in frames:
             f_ = AG.match(mm, icons, agent_teams, color_team_n, icon_frac=icon_frac,
                           mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
-                          alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None)
+                          alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None,
+                          **am)
             per.append((t_ - frames[0][1] + d_, f_))
             if cache is not None:
                 cache[id(mm)] = f_
@@ -1243,9 +1256,109 @@ def spawn_scale(placed: list[dict], aspect: float = 1.0) -> float:
     return 0.75
 
 
+def _dump_sheets(tiles: list, d: Path, per: int = 12, cols: int = 3) -> None:
+    """書き出したフレームを 2 倍に拡大し、残した検出（緑の丸＋「名前 点」）と捨てた候補
+    （赤の ×＋理由）を重ねて並べる。1 枚に per フレームまで、あふれたら sheet_2.jpg…。"""
+    for page in range(0, len(tiles), per):
+        cells = []
+        for fname, mm, found, dbg in tiles[page:page + per]:
+            img = cv2.resize(mm, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+            h, w = img.shape[:2]
+            for f in found:
+                x, y = int(f["x"] * w), int(f["y"] * h)
+                cv2.circle(img, (x, y), 12, (0, 220, 0), 2, cv2.LINE_AA)
+                label = f"{f.get('agent')} {f['score']:.2f}"
+                cv2.putText(img, label, (x + 6, y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 3, cv2.LINE_AA)
+                cv2.putText(img, label, (x + 6, y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1, cv2.LINE_AA)
+            for r in dbg:
+                x, y = int(r["x"] * w), int(r["y"] * h)
+                cv2.drawMarker(img, (x, y), (0, 0, 255), cv2.MARKER_TILTED_CROSS, 14, 2)
+                cv2.putText(img, str(r["reason"]), (x + 6, y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                            (0, 0, 255), 1, cv2.LINE_AA)
+            cv2.putText(img, fname, (4, h - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+            cells.append(img)
+        cw = max(c.shape[1] for c in cells)
+        ch = max(c.shape[0] for c in cells)
+        padded = []
+        for c in cells:
+            p = np.full((ch, cw, 3), 30, np.uint8)
+            p[:c.shape[0], :c.shape[1]] = c
+            padded.append(p)
+        rows = []
+        for i in range(0, len(padded), cols):
+            row = padded[i:i + cols]
+            row += [np.full((ch, cw, 3), 30, np.uint8)] * (cols - len(row))
+            rows.append(np.hstack(row))
+        name = "sheet.jpg" if page == 0 else f"sheet_{page // per + 1}.jpg"
+        cv2.imwrite(str(d / name), np.vstack(rows), [cv2.IMWRITE_JPEG_QUALITY, 85])
+
+
+def _agents_dump(cfg, todo, out_dir, agent_teams, icons, icon_frac, params, ct_fn, alive_fn, mask,
+                 background, starts, log=None):
+    """確認用に、照合するフレーム（todo）をラウンドと時刻にまんべんなく散るよう等間隔に選び、
+    <out_dir>/_tactics/agents_dump/ に書き出す。meta.json・sheet.jpg から照合の良し悪しを実データで数える
+    （tools/agents_eval.py）。選んだフレームはキャッシュを使わず、debug を付けてもう一度照合する。"""
+    from . import agents as AG
+    n_dump = int((cfg.get("tactics") or {}).get("agents_dump") or 0)
+    if n_dump < 1 or not todo:
+        return
+    d = Path(out_dir) / "_tactics" / "agents_dump"
+    d.mkdir(parents=True, exist_ok=True)
+    step = max(1, len(todo) // n_dump)
+    picked = todo[::step][:n_dump]
+    icons_dir = d / "icons"
+    icons_dir.mkdir(parents=True, exist_ok=True)
+    for name, ic in icons.items():
+        if ic is not None and ic.size:
+            cv2.imwrite(str(icons_dir / f"{AG._norm(name)}.png"), ic)
+    if mask is not None and mask.size:
+        cv2.imwrite(str(d / "mask.png"), (np.asarray(mask).astype(np.uint8) * 255)
+                    if mask.dtype == bool else np.asarray(mask).astype(np.uint8))
+    if background is not None and background.size:
+        cv2.imwrite(str(d / "background.png"), background)
+    frames_meta, tiles = [], []
+    stat = Counter()
+    for n, (t, mm) in picked:
+        color_team_n = ct_fn(n)
+        alive = None
+        if alive_fn is not None:
+            try:
+                a1, a2 = alive_fn(t)
+                alive = {1: a1, 2: a2} if a1 is not None and a2 is not None else None
+            except Exception:
+                alive = None
+        dbg: list = []
+        found = AG.match(mm, icons, agent_teams, color_team_n, icon_frac=icon_frac,
+                         mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
+                         alive=alive,
+                         background=background if background is not None and background.shape[:2] == mm.shape[:2] else None,
+                         debug=dbg, **params)
+        sec = t - starts.get(n, t)
+        fname = f"r{n:02d}_t{max(0, int(round(sec))):03d}.png"
+        cv2.imwrite(str(d / fname), mm)
+        frames_meta.append({"file": fname, "round": int(n), "t": round(sec, 1),
+                            "color_team": {k: int(v) for k, v in color_team_n.items()},
+                            "alive": ({str(k): int(v) for k, v in alive.items()} if alive else None),
+                            "found": found, "rejected": dbg})
+        stat["cand"] += len(found) + len(dbg)
+        stat["kept"] += len(found)
+        for r in dbg:
+            stat[r["reason"]] += 1
+        tiles.append((fname, mm, found, dbg))
+    (d / "meta.json").write_text(json.dumps(
+        {"teams": {str(k): list(v) for k, v in agent_teams.items()},
+         "icon_frac": round(float(icon_frac), 4), "params": dict(params), "frames": frames_meta},
+        ensure_ascii=False), "utf-8")
+    _dump_sheets(tiles, d)
+    if log:
+        log(f"    エージェントの照合：候補 {stat['cand']}・残した {stat['kept']}・捨てた"
+            f"（filled {stat['filled']} / flat {stat['flat']} / margin {stat['margin']} / "
+            f"thr {stat['thr']} / cap {stat['cap']}）")
+
+
 def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, placed, aspect, background,
                   round_tac, log, icons=None, icon_frac=None, alive_fn=None, every: float = 5.0,
-                  cache: dict | None = None, threads: int = 4):
+                  cache: dict | None = None, threads: int = 4, out_dir=None):
     """track_every 秒ごと（＋節目の前後）のミニマップでアイコンを照合し、走れる速さの制約で
     エージェントごとの軌跡にする（vreplay.track）。rt["tracks"] = {"1": {"Jett": [[e, x, y, conf, src, zone, callout]]}}"""
     from . import agents as AG
@@ -1256,6 +1369,7 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
     if not icons:
         return
     icon_frac = icon_frac or ICON_FRAC
+    am = _agent_match_params(cfg)
     scale = spawn_scale(placed, aspect)
     frames_by_n: dict[int, list] = {}
     for (n, _g), (_d, t, mm) in keep_trk.items():
@@ -1281,11 +1395,15 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
                 alive = None
         return t, AG.match(mm, icons, agent_teams, ct_fn(n), icon_frac=icon_frac,
                            mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
-                           alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None)
+                           alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None,
+                           **am)
 
     # 照合（1 枚 0.1〜0.2 秒）は OpenCV が GIL を外すので、スレッドで並べる
     from concurrent.futures import ThreadPoolExecutor
     todo = [(n, it) for n, frs in sorted(frames_by_n.items()) for it in sorted(frs, key=lambda x: x[0])]
+    if out_dir and int((cfg.get("tactics") or {}).get("agents_dump") or 0) >= 1:
+        _agents_dump(cfg, todo, out_dir, agent_teams, icons, icon_frac, am, ct_fn, alive_fn, mask,
+                     background, {n: float(rt["start"]) for n, rt in round_tac.items()}, log)
     with ThreadPoolExecutor(max_workers=max(1, threads), thread_name_prefix="素材-追跡") as ex:
         res = list(ex.map(lambda x: (x[0], one(x[1], x[0])), todo))
     found_by_n: dict[int, list] = {}
