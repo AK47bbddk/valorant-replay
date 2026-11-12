@@ -209,7 +209,30 @@ vreplay playbook --sync --team G2 --map Split
   実データで照合の良し悪しを数えるには `tactics.agents_dump`（1 以上で有効）を設定し、`_tactics/agents_dump/` に
   ミニマップ（`rNN_tSSS.png`）・アイコン（`icons/`）・`meta.json`・確認用 `sheet.jpg`（残した検出は緑の丸、捨てた候補は赤の ×＋理由）を
   書き出し、`python tools/agents_eval.py <dump_dir>` で precision / recall / wrong_id / ghost を数える（`--init-labels` で
-  ラベルの下書き、`--thr` などで数値を変えてやり直せる）。
+  ラベルの下書き、`--thr` などで数値を変えてやり直せる）。重なりの組分けは位置から決める `--group geom` が既定
+  （`--group flag` で 1 本目と同じ組分け）。見落としの理由（`misses`）と設定の掃き出し（`--sweep`）・
+  背景なしの切り分け（`--no-background`、`ghosts_sheet.jpg`）も出せる。
+  2 本目（agents-recall）で、見落としを減らすスイッチを `tactics.agent_match` に足した（すべて既定は切で、
+  全部切なら 1 本目と出力が 1 つも変わらない）：`filled_rescue`（顔そのものが縁の色を多く含むエージェントは
+  filled で捨てない。救った検出に `"rescued": "filled"`）、`margin_exclusive`（同じフレームで残した
+  （チーム, エージェント）を 2 番目の相手から外して 2 周目をやり直す。`"margin_pass": 2`）、`margin_pair`
+  （アイコン同士の似ている度合い sim で必要な差を `margin × clip((1 − sim) / 0.6, 0.5, 1.0)` にする。
+  crowded のときは今までどおり）、`gray_floor`（thr 未満でも、crowded でなく縁がチーム色で、差・顔の中身・
+  輪の反応が足りれば残す。`"tier": "gray"`。consensus では overlap と同じ扱い）、`face_inner`
+  （顔の照合の円の内側。0.42 で今までどおり）、`bg_mode`（`flag` では背景を差し引かずに候補を拾い、
+  背景の反応が強い候補は顔がより強く似たときだけ残す）、`cand_nms` / `cand_per_color`（候補取得の
+  NMS と色ごとの上限）、`face_search`（残っていない枠を顔のテンプレートで全体から探す。`"source": "face"`）。
+  2026-11-12 に 1 本目と同じ dump＋labels.json（LOUD vs Vitality・Sunset・40 フレーム・276）で数えた結論：
+  **既定は全部切のまま**（条件「geom の precision が all・overlap・clear すべて 95% 以上、wrong_id＋ghost が
+  6 以下、時間増 30% 以内」を満たす組が無かった）。単独の効果は filled_rescue 0.62 が最大で R all 48.6→56.5%
+  （P は 98.7/91.3/100 に改善、wrong_id 0）。いちばん近い組は filled_rescue 0.62＋tpl_fill_min 0.30＋
+  margin_exclusive＋cand_per_color 16 で P 98.8/92.0/100・R 60.5/46.9/63.4・wrong_id 0・ghost 2・時間 +25% 以内
+  （overlap の precision が 95% に 3.0pt、recall が目安 70% に 9.5pt 不足。overlap の ghost 2 件は 1 本目から
+  ある検出で、どのスイッチでも消えなかった）。face_search を足した組は R 68.1/59.2/70.0・P 98.9/93.5/100
+  まで上がるが、照合時間が約 1.4〜1.8 倍で時間条件を超える。gray_floor は thr の見落としの 8 割が
+  重なり（crowded）で条件から外れ、効果が無かった（ghost +3 のみ）。margin_pair は sim の実測が最大でも
+  0.53 で補正がほぼ効かず、数字は変わらなかった。bg_mode flag は単独・組のどちらでも悪化した。
+  残った見落とし（最良の組でも 88 件）は thr 25・weak 23・color 9・bg 8・nms 8 が中心。
 - **公式のマップ画像で合わせる**（`minimap.register_art`）：valorant-api の displayIcon（透過つき、コールアウトと同じ 0..1 の座標）の
   床の縁の点を、放送のミニマップの白い縁の線の距離画像に重ね（chamfer）、回転・倍率・位置を粗→細で詰める（初期値はコールアウトと
   床で合わせた結果か、90 度ごとの向き＋縁の線の外接矩形）。縁の点の 50% 以上が 2px 以内に乗れば成功で、床の 2 値画像は公式の画像を

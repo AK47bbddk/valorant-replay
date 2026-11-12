@@ -11,6 +11,8 @@
       重なりの組分けに flag を使う（表示は geom と flag の両方を並べる）。
   python tools/agents_eval.py <dump_dir> --baseline
       1 本目と同じ動き（新しいスイッチは全部切）で照合し、flag の数字を並べて出す。
+  python tools/agents_eval.py <dump_dir> --no-background
+      背景（中央値）を渡さずに照合する（段階 1 の切り分け用）。増えた ghost は ghosts_sheet.jpg に書く。
   python tools/agents_eval.py <dump_dir> --sweep groups.yaml
       設定の組を並べた yaml を読み、組ごとに replay して geom の P/R・wrong_id・ghost・ms/フレームを
       <dump_dir>/eval/sweep.csv に書く。
@@ -36,7 +38,10 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vreplay import agents as AG  # noqa: E402
 
-PARAM_KEYS = ("thr", "margin", "crowded_margin", "min_face_std")
+PARAM_KEYS = ("thr", "margin", "crowded_margin", "min_face_std",
+              "filled_rescue", "tpl_fill_min", "margin_exclusive", "margin_pair",
+              "gray_floor", "gray_margin", "gray_face_std", "gray_ring", "face_inner",
+              "bg_mode", "cand_nms", "cand_per_color", "face_search")
 COLORS = ("warm", "cool", "yellow")
 # 見落としの理由。前の 5 つは捨てた候補の理由、後ろは候補が出なかった理由。
 MISS_REASONS = ("filled", "flat", "margin", "thr", "cap",
@@ -71,8 +76,9 @@ def _load(dump_dir: str):
     return meta, teams, icons, mask, background
 
 
-def replay(dump_dir: str, **params) -> list[dict]:
-    """meta.json・PNG・icons/・mask.png・background.png を読み、フレームごとに AG.match をやり直す。"""
+def replay(dump_dir: str, use_background: bool = True, **params) -> list[dict]:
+    """meta.json・PNG・icons/・mask.png・background.png を読み、フレームごとに AG.match をやり直す。
+    use_background=False なら背景を渡さない（段階 1 の切り分け用）。"""
     meta, teams, icons, mask, background = _load(dump_dir)
     base = {k: v for k, v in (meta.get("params") or {}).items() if k in PARAM_KEYS}
     base.update({k: v for k, v in params.items() if k in PARAM_KEYS and v is not None})
@@ -86,7 +92,8 @@ def replay(dump_dir: str, **params) -> list[dict]:
         alive = fr.get("alive")
         alive = {int(k): int(v) for k, v in alive.items()} if alive else None
         m = mask if mask is not None and mask.shape[:2] == img.shape[:2] else None
-        bg = background if background is not None and background.shape[:2] == img.shape[:2] else None
+        bg = background if (use_background and background is not None
+                            and background.shape[:2] == img.shape[:2]) else None
         dbg: list = []
         found = AG.match(img, icons, teams, ct, icon_frac=icon_frac, mask=m, alive=alive,
                          background=bg, debug=dbg, **base)
@@ -297,8 +304,14 @@ def misses(results: list[dict], labels: dict, dump_dir: str, **params) -> list[d
     icon_frac = next((float(r.get("icon_frac") or 0) for r in results if r.get("icon_frac")), 0.058)
     tol = 0.6 * icon_frac
     D = 1.0 * icon_frac
-    nms = float(params.get("nms", 0.8))
-    per_color = int(params.get("per_color", 12))
+    nms = params.get("cand_nms")
+    if nms is None:
+        nms = params.get("nms")
+    nms = float(nms if nms is not None else 0.8)
+    per_color = params.get("cand_per_color")
+    if per_color is None:
+        per_color = params.get("per_color")
+    per_color = int(per_color if per_color is not None else 12)
     d = Path(dump_dir)
     out = []
     for r in results:
@@ -349,6 +362,22 @@ def misses(results: list[dict], labels: dict, dump_dir: str, **params) -> list[d
                     "face_std": round(AG._face_std(img, px, py, Dpix), 2),
                 })
             out.append(row)
+    return out
+
+
+def ghosts(results: list[dict], labels: dict) -> list[dict]:
+    """ラベルに結べなかった検出（ghost / wrong_id）ごとに 1 行。ghosts_sheet.jpg 用。"""
+    icon_frac = next((float(r.get("icon_frac") or 0) for r in results if r.get("icon_frac")), 0.058)
+    tol = 0.6 * icon_frac
+    out = []
+    for r in results:
+        labs = list(labels.get(r["file"]) or [])
+        info, _used = _link(r.get("found") or [], labs, tol)
+        for d, (_mi, kind) in zip(r.get("found") or [], info):
+            if kind != "correct":
+                out.append({"file": r["file"], "round": r.get("round"), "t": r.get("t"),
+                            "agent": d.get("agent"), "team": d.get("team"),
+                            "x": d["x"], "y": d["y"], "reason": kind})
     return out
 
 
@@ -429,7 +458,7 @@ def _write_misses_csv(ms: list[dict], path: Path) -> None:
 
 
 def _misses_sheet(ms: list[dict], dump_dir: str, out_dir: Path, icon_frac: float,
-                  per: int = 24, cols: int = 4) -> int:
+                  per: int = 24, cols: int = 4, name: str = "misses_sheet") -> int:
     """見落としの場所を 2 倍で切り抜き、ラベルの名前と理由を書いたタイルを並べる。書いた枚数を返す。"""
     d = Path(dump_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -465,8 +494,8 @@ def _misses_sheet(ms: list[dict], dump_dir: str, out_dir: Path, icon_frac: float
             row = padded[i:i + cols]
             row += [np.full((ch, cw, 3), 30, np.uint8)] * (cols - len(row))
             rows.append(np.hstack(row))
-        name = "misses_sheet.jpg" if page == 0 else f"misses_sheet_{page // per + 1}.jpg"
-        cv2.imwrite(str(out_dir / name), np.vstack(rows), [cv2.IMWRITE_JPEG_QUALITY, 85])
+        fname = f"{name}.jpg" if page == 0 else f"{name}_{page // per + 1}.jpg"
+        cv2.imwrite(str(out_dir / fname), np.vstack(rows), [cv2.IMWRITE_JPEG_QUALITY, 85])
     return (len(tiles) + per - 1) // per
 
 
@@ -511,6 +540,7 @@ def main(argv=None) -> int:
     ap.add_argument("--group", choices=("geom", "flag"), default="geom",
                     help="重なりの組分け（表示は geom と flag の両方を並べる）")
     ap.add_argument("--baseline", action="store_true", help="1 本目と同じ動き（flag の数字）を並べる")
+    ap.add_argument("--no-background", action="store_true", help="背景を渡さずに照合する（段階 1 の切り分け）")
     ap.add_argument("--sweep", default=None, help="設定の組を並べた yaml。組ごとに数えて sweep.csv に書く")
     ap.add_argument("--thr", type=float, default=None)
     ap.add_argument("--margin", type=float, default=None)
@@ -524,7 +554,7 @@ def main(argv=None) -> int:
     params = {k: v for k, v in (("thr", a.thr), ("margin", a.margin),
                                 ("crowded_margin", a.crowded_margin), ("min_face_std", a.min_face_std))
               if v is not None}
-    results = replay(a.dump_dir, **params)
+    results = replay(a.dump_dir, use_background=not a.no_background, **params)
     labels_p = d / "labels.json"
     if a.init_labels:
         if labels_p.exists():
@@ -555,10 +585,14 @@ def main(argv=None) -> int:
         _write_misses_csv(ms, eval_dir / "misses.csv")
         icon_frac = next((float(r.get("icon_frac") or 0) for r in results if r.get("icon_frac")), 0.058)
         n_sheets = _misses_sheet(ms, a.dump_dir, eval_dir, icon_frac)
+        gh = ghosts(results, labels)
+        n_gh = _misses_sheet(gh, a.dump_dir, eval_dir, icon_frac, name="ghosts_sheet") if gh else 0
         _print_misses(ms, _label_stats(results, labels))
         wrote = f"{eval_dir / 'misses.csv'}"
         if n_sheets:
             wrote += f"・{eval_dir / 'misses_sheet.jpg'}" + (f"（{n_sheets} 枚）" if n_sheets > 1 else "")
+        if n_gh:
+            wrote += f"・{eval_dir / 'ghosts_sheet.jpg'}（ghost/wrong_id {len(gh)} 件）"
         print(f"書き出し: {wrote}")
     else:
         _print_counts(results)

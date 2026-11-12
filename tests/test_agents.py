@@ -470,3 +470,189 @@ def test_consensus_drops_lone_overlap_detection():
     got = AG.consensus([(0.0, [e(0.7, True)]), (1.0, [e(0.71, True)])])
     assert len(got) == 1 and got[0]["agent"] == "Sova"
 
+
+# ---------------------------------------------------------------- 2 本目（agents-recall）
+ALL_OFF = dict(filled_rescue=None, tpl_fill_min=0.35, margin_exclusive=False, margin_pair=False,
+               gray_floor=None, gray_margin=0.12, gray_face_std=18.0, gray_ring=0.30, face_inner=0.42)
+DET_KEYS = {"agent", "team", "x", "y", "score", "ring", "guess", "color", "overlap", "margin"}
+
+
+def _warm_center_icon(seed):
+    """中心が暖色の濃淡で埋まったアイコン。縁の色をそのまま顔も含む（Chamber などの代わり）。"""
+    rng = np.random.default_rng(seed)
+    img = np.zeros((64, 64, 3), np.uint8)
+    yy, xx = np.mgrid[:64, :64]
+    r = np.hypot(xx - 32, yy - 32)
+    base = np.zeros((64, 64, 3), np.float32)
+    base[:, :, 2] = 200 + 55 * np.sin(xx / 3.0) * np.cos(yy / 4.0)
+    base[:, :, 1] = 60 + 40 * ((xx + yy) % 17) / 17.0
+    base[:, :, 0] = 20 + 30 * ((xx * 2 + yy) % 13) / 13.0
+    disc = r <= 18
+    img[disc] = np.clip(base, 0, 255)[disc].astype(np.uint8)
+    for _ in range(4):
+        c = tuple(int(v) for v in rng.integers(0, 80, 3))
+        cv2.circle(img, tuple(int(v) for v in rng.integers(0, 64, 2)), int(rng.integers(3, 9)), c, -1)
+    return img
+
+
+def _gray(icon):
+    g = cv2.cvtColor(icon, cv2.COLOR_BGR2GRAY)
+    return cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
+
+
+def test_match_all_off_is_identical_to_default_and_keeps_ten_keys():
+    """全部切の明示指定と無指定で、返り値も debug も 1 つも変わらない。残した検出は従来の 10 キー。"""
+    names = ["Sova", "Jett", "Omen", "Killjoy", "Viper"]
+    icons = {n: _icon(i) for i, n in enumerate(names)}
+    places = [("Sova", "warm", 0.2, 0.2), ("Jett", "warm", 0.5, 0.3), ("Omen", "cool", 0.7, 0.7),
+              ("Killjoy", "cool", 0.3, 0.8)]
+    img = _minimap(icons, places)
+    teams = {1: ["Sova", "Jett", "Viper"], 2: ["Omen", "Killjoy"]}
+    ct = {"warm": 1, "cool": 2}
+    d1, d2 = [], []
+    a = AG.match(img, icons, teams, ct, debug=d1)
+    b = AG.match(img, icons, teams, ct, debug=d2, **ALL_OFF)
+    assert a == b and d1 == d2
+    assert a
+    assert all(set(e) == DET_KEYS for e in a)
+
+
+def test_filled_rescue_keeps_warm_centered_face_but_not_plain_disc():
+    """中心まで暖色の顔（Chamber など）は filled でも救う。一様な暖色の塗りつぶしの丸は救わない。"""
+    H = W = 400
+    frac = 0.07
+    D = int(frac * H)
+    icons = {"Chamber": _warm_center_icon(5), "Sova": _icon(2)}
+    teams = {1: ["Chamber", "Sova"], 2: []}
+    ct = {"warm": 1, "cool": 2}
+    img = np.full((H, W, 3), 70, np.uint8)
+    _paste(img, icons["Chamber"], 0.5, 0.5, "warm", D)
+    assert AG.match(img, icons, teams, ct, icon_frac=frac) == []
+    got = AG.match(img, icons, teams, ct, icon_frac=frac, filled_rescue=0.66)
+    assert len(got) == 1 and got[0]["agent"] == "Chamber" and got[0]["rescued"] == "filled"
+    disc = np.full((H, W, 3), 70, np.uint8)
+    cv2.circle(disc, (200, 200), int(0.56 * D), (40, 40, 230), -1)
+    assert AG.match(disc, icons, teams, ct, icon_frac=frac, filled_rescue=0.66) == []
+
+
+def test_margin_exclusive_rescues_neon_when_lookalike_is_kept_elsewhere():
+    """同じチームの似た顔 X が別の場所で残っているとき、margin で落ちた Neon を 2 周目で救う。"""
+    H = W = 400
+    frac = 0.05
+    D = int(frac * H)
+    neon = _icon(1)
+    other = _icon(7)
+    X = np.clip(0.6 * neon.astype(np.float32) + 0.4 * other.astype(np.float32), 0, 255).astype(np.uint8)
+    neon_like = np.clip(0.4 * neon.astype(np.float32) + 0.6 * X.astype(np.float32), 0, 255).astype(np.uint8)
+    icons = {"Neon": neon, "X": X}
+    teams = {1: ["Neon", "X"], 2: []}
+    ct = {"warm": 1, "cool": 2}
+    img = np.full((H, W, 3), 70, np.uint8)
+    _paste(img, X, 0.3, 0.3, "warm", D)
+    _paste(img, neon_like, 0.75, 0.7, "warm", D)
+    dbg = []
+    default = AG.match(img, icons, teams, ct, icon_frac=frac, debug=dbg)
+    assert {e["agent"] for e in default} == {"X"}
+    assert any(d["agent"] == "Neon" and d["reason"] == "margin" for d in dbg)
+    excl = AG.match(img, icons, teams, ct, icon_frac=frac, margin_exclusive=True)
+    got = {e["agent"]: e for e in excl}
+    assert set(got) == {"Neon", "X"} and got["Neon"]["margin_pass"] == 2
+    only = np.full((H, W, 3), 70, np.uint8)
+    _paste(only, neon_like, 0.75, 0.7, "warm", D)
+    dbg2 = []
+    assert AG.match(only, icons, teams, ct, icon_frac=frac, debug=dbg2, margin_exclusive=True) == []
+    assert any(d["reason"] == "margin" for d in dbg2)
+
+
+def test_gray_floor_keeps_low_score_candidate_and_consensus_needs_two_frames():
+    """thr 未満でも灰色帯の条件を満たせば残す（tier gray）。重なると残らず、consensus は 2 枚必要。"""
+    H = W = 400
+    frac = 0.05
+    D = int(frac * H)
+    jett, sova = _gray(_icon(1)), _gray(_icon(2))
+    noise = _gray(np.random.default_rng(42).integers(0, 255, (64, 64, 3), dtype=np.uint8))
+    face = np.clip(0.3 * jett.astype(np.float32) + 0.7 * noise.astype(np.float32), 0, 255).astype(np.uint8)
+    icons = {"Jett": jett, "Sova": sova}
+    teams = {1: ["Jett", "Sova"], 2: []}
+    ct = {"warm": 1, "cool": 2}
+    img = np.full((H, W, 3), 70, np.uint8)
+    _paste(img, face, 0.5, 0.5, "warm", D)
+    mask = np.zeros((H, W), np.uint8)
+    cv2.circle(mask, (int(0.5 * W), int(0.5 * H)), 12, 255, -1)
+    got = AG.match(img, icons, teams, ct, icon_frac=frac, mask=mask, gray_floor=0.52)
+    assert len(got) == 1 and got[0]["tier"] == "gray" and 0.52 <= got[0]["score"] < 0.58
+    assert AG.match(img, icons, teams, ct, icon_frac=frac, mask=mask) == []
+    over = np.full((H, W, 3), 70, np.uint8)
+    _paste(over, face, 0.5, 0.5, "warm", D)
+    _paste(over, sova, 0.5 + 0.7 * frac, 0.5, "warm", D)
+    assert not any(e.get("tier") == "gray"
+                   for e in AG.match(over, icons, teams, ct, icon_frac=frac, gray_floor=0.52))
+    g = {"agent": "Jett", "team": 1, "x": 0.5, "y": 0.5, "score": 0.56, "tier": "gray"}
+    assert AG.consensus([(0.0, [dict(g)])]) == []
+    two = AG.consensus([(0.0, [dict(g)]), (1.0, [dict(g, x=0.51)])])
+    assert len(two) == 1 and two[0]["agent"] == "Jett"
+
+
+def test_match_stage5_params_off_are_identical_to_default():
+    """bg_mode=subtract・cand_nms 0.8・cand_per_color 12・face_search false（すべて切）は無指定と同じ。"""
+    names = ["Sova", "Jett", "Omen"]
+    icons = {n: _icon(i) for i, n in enumerate(names)}
+    places = [("Sova", "warm", 0.2, 0.2), ("Jett", "warm", 0.5, 0.3), ("Omen", "cool", 0.7, 0.7)]
+    img = _minimap(icons, places)
+    teams = {1: ["Sova", "Jett"], 2: ["Omen"]}
+    ct = {"warm": 1, "cool": 2}
+    d1, d2 = [], []
+    a = AG.match(img, icons, teams, ct, debug=d1)
+    b = AG.match(img, icons, teams, ct, debug=d2, bg_mode="subtract", cand_nms=0.8,
+                 cand_per_color=12, face_search=False)
+    assert a == b and d1 == d2
+
+
+def test_bg_flag_finds_icon_duplicated_in_background_but_subtract_does_not():
+    """背景にも同じ場所に同じアイコンがある場所：subtract は差し引かれて見つからず、flag は背景の反応を見て拾う。
+    背景にある顔の無い暖色の輪は、どちらのモードでも検出しない。"""
+    H = W = 400
+    frac = 0.05
+    D = int(frac * H)
+    icons = {"Sova": _icon(0)}
+    teams = {1: ["Sova"], 2: []}
+    ct = {"warm": 1, "cool": 2}
+    img = np.full((H, W, 3), 70, np.uint8)
+    bg = np.full((H, W, 3), 70, np.uint8)
+    for m in (img, bg):
+        _paste(m, icons["Sova"], 0.3, 0.3, "warm", D)
+        cv2.circle(m, (int(0.7 * W), int(0.7 * H)), int(D * 0.52), (40, 40, 230), 3)   # 顔の無い暖色の輪
+    sub = AG.match(img, icons, teams, ct, icon_frac=frac, background=bg)
+    flag = AG.match(img, icons, teams, ct, icon_frac=frac, background=bg, bg_mode="flag")
+    assert "Sova" not in {e["agent"] for e in sub}
+    assert "Sova" in {e["agent"] for e in flag}
+    for e in sub + flag:                       # 顔の無い輪（0.7, 0.7）には名前を付けない
+        assert not (abs(e["x"] - 0.7) < 0.06 and abs(e["y"] - 0.7) < 0.06)
+
+
+def test_face_search_recovers_dull_rim_icon_only_when_enabled():
+    """縁の彩度を落としたアイコン（RANGES には入らないが緩めた範囲には入る）：face_search で顔から拾う。
+    床だけのミニマップ（アイコン無し）では、face_search を入れても検出しない。"""
+    H = W = 400
+    frac = 0.05
+    D = int(frac * H)
+    icons = {"Sova": _gray(_icon(0))}
+    teams = {1: ["Sova"], 2: []}
+    ct = {"warm": 1, "cool": 2}
+    dull = tuple(int(v) for v in cv2.cvtColor(np.uint8([[[5, 30, 200]]]), cv2.COLOR_HSV2BGR)[0, 0])
+    img = np.full((H, W, 3), 70, np.uint8)
+    t = cv2.resize(icons["Sova"], (D, D))
+    m = np.zeros((D, D), np.uint8)
+    cv2.circle(m, (D // 2, D // 2), D // 2 - 1, 255, -1)
+    x0, y0 = int(0.5 * W) - D // 2, int(0.5 * H) - D // 2
+    roi = img[y0:y0 + D, x0:x0 + D]
+    roi[m > 0] = t[m > 0]
+    cv2.circle(img, (int(0.5 * W), int(0.5 * H)), int(D * 0.52), dull, 3)
+    assert AG.match(img, icons, teams, ct, icon_frac=frac) == []
+    got = AG.match(img, icons, teams, ct, icon_frac=frac, face_search=True)
+    assert len(got) == 1 and got[0]["source"] == "face" and got[0]["agent"] == "Sova"
+    blank = np.full((H, W, 3), 70, np.uint8)
+    fmask = np.full((H, W), 255, np.uint8)
+    assert AG.match(blank, icons, teams, ct, icon_frac=frac, face_search=True, mask=fmask) == []
+
+

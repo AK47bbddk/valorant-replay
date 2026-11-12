@@ -1154,7 +1154,11 @@ def board_png(base: np.ndarray, entries: list[dict], icons: dict, path: Path, to
 def _agent_match_params(cfg: dict) -> dict:
     """config の tactics.agent_match から、agents.match に渡す厳しさの設定だけを取り出す。"""
     am = (cfg.get("tactics") or {}).get("agent_match") or {}
-    return {k: am[k] for k in ("thr", "margin", "crowded_margin", "min_face_std") if k in am}
+    keys = ("thr", "margin", "crowded_margin", "min_face_std",
+            "filled_rescue", "tpl_fill_min", "margin_exclusive", "margin_pair",
+            "gray_floor", "gray_margin", "gray_face_std", "gray_ring", "face_inner",
+            "bg_mode", "cand_nms", "cand_per_color", "face_search")
+    return {k: am[k] for k in keys if k in am}
 
 
 def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed, aspect, T, background,
