@@ -32,12 +32,15 @@ ENTRY_MIN = 2                 # サイトへ入った（エントリー）とみ
 PUSH_MIN = 2                  # 前進（プッシュ）とみなす人数
 REGROUP_MIN = 3               # リグループ（1 ゾーンに集まり直し）とみなす人数
 RUSH_SECONDS = 15.0           # 開幕からこの秒以内にサイトへエントリーしたらラッシュ
+EARLY_TAKE_WINDOW = 20.0      # 開幕のエリア取り合い判定ウィンドウの下限秒
 FREEZE_SECONDS = 10.0         # ピック後に動きが無いままこの秒数でフリーズ区間
 ROTATE_REVERT_SECONDS = 10.0  # ローテート後にこの秒以内に元のゾーンへ戻ったら取り消す
 EARLY_JUMP_PER_5S = 0.40      # 開幕ウィンドウ内で 5 秒あたりこれ以上の移動は外れ値として落とす
 HOME_ATTACK_RATIO_MAX = 0.51  # 攻撃側の自陣側コールアウト判定（da / (da + dd) の上限）
 HOME_DEFENSE_RATIO_MIN = 0.49 # 防衛側の自陣側コールアウト判定（da / (da + dd) の下限）
+EARLY_BACK_RATIO_MAX = 0.38   # 開幕デフォルト判定で自陣後方エリアとして除外する da/(da+dd) 上限
 POSTPLANT_WAIT_SECONDS = 5.0  # プラント後この秒以降の最初のサンプルでポストプラント配置を見る
+_EARLY_BACK_KEYWORDS = ("spawn", "lobby", "sewer", "bottom", "b link")
 
 # 流れ要約に出すイベント（ラッシュ・フリーズは型として出すので、要約には入れない）
 FLOW_KINDS = ("プッシュ", "テイク", "取り返し", "ローテート", "エントリー", "ピック")
@@ -597,25 +600,102 @@ def _main_zone(counts: dict) -> str:
     return min(zc, key=lambda z: (-zc[z], ZONES.index(z)))
 
 
-def _early_type(frames: list[dict], events: list[Event], early_end: float, atk: int | None) -> dict:
-    # ラッシュは開幕 15 秒以内の動きで決まる（序盤の終わりより後でも拾う）
+def _is_early_back_area(area: str, ranks: dict | None = None) -> bool:
+    """開幕の待機・自陣後方エリア（スポーン・ロビー等）なら True。取りに行くエリアから除外する。"""
+    if not area or area in ("?", "攻撃側", "防衛側"):
+        return True
+    low = area.lower()
+    if any(w in low for w in _EARLY_BACK_KEYWORDS):
+        return True
+    if ranks and area in ranks:
+        da, dd = ranks[area]
+        if da is not None and dd is not None and da + dd > 0 and da / (da + dd) < EARLY_BACK_RATIO_MAX:
+            return True
+    return False
+
+
+def _early_default_label(area: str) -> tuple[str, str]:
+    """取りに行ったエリア名から（開幕デフォルト型名, ゾーン）を返す。"""
+    low = area.lower()
+    z = _area_zone(area)
+    if "ramp" in low:
+        return "ランプデフォルト", z or "A"
+    if area == "Mid" or "mid" in low:
+        return "ミッドデフォルト", "Mid"
+    if area == "B" or low.startswith("b ") or z == "B":
+        return "Bメインデフォルト", "B"
+    if area == "A" or low.startswith("a ") or z == "A":
+        return "Aデフォルト", "A"
+    if area == "C" or low.startswith("c ") or z == "C":
+        return "Cメインデフォルト", "C"
+    return f"{area}デフォルト", (z or area)
+
+
+def _first_early_area(frames: list[dict], early_end: float, atk: int,
+                      def_team: int | None = None, ranks: dict | None = None) -> tuple[str | None, list[str]]:
+    """序盤の最初のテイク（エリア支配の成立）またはそれに相当する開幕の前進エリアを返す。"""
+    limit = max(float(early_end), EARLY_TAKE_WINDOW)
+    seen: set[str] = set()
+    for f in frames:
+        if f["e"] > limit + 1e-9:
+            break
+        for a, n in f["areas"].get(atk, {}).items():
+            if n >= 1 and not _is_early_back_area(a, ranks):
+                seen.add(a)
+
+    # 1. 最初のテイク（2人以上かつ防衛より多い状態が2サンプル連続で成立）
+    for i in range(len(frames) - 1):
+        if frames[i]["e"] > limit + 1e-9:
+            break
+        cands = []
+        for a, n in frames[i]["areas"].get(atk, {}).items():
+            if _is_early_back_area(a, ranks):
+                continue
+            dn = frames[i]["areas"].get(def_team, {}).get(a, 0) if def_team else 0
+            n2 = frames[i + 1]["areas"].get(atk, {}).get(a, 0)
+            dn2 = frames[i + 1]["areas"].get(def_team, {}).get(a, 0) if def_team else 0
+            if n >= DOMINANCE_MIN and n > dn and n2 >= DOMINANCE_MIN and n2 > dn2:
+                cands.append((n, a))
+        if cands:
+            cands.sort(key=lambda x: (-x[0], x[1]))
+            return cands[0][1], sorted(seen)
+
+    # 2. 開幕の前進（2人以上が最初に入った取り合いエリア）
+    for f in frames:
+        if f["e"] > limit + 1e-9:
+            break
+        cands = [(n, a) for a, n in f["areas"].get(atk, {}).items()
+                 if not _is_early_back_area(a, ranks) and n >= DOMINANCE_MIN]
+        if cands:
+            cands.sort(key=lambda x: (-x[0], x[1]))
+            return cands[0][1], sorted(seen)
+
+    # 3. 開幕の前進（1人以上が最初に入った取り合いエリア）
+    for f in frames:
+        if f["e"] > limit + 1e-9:
+            break
+        cands = [(n, a) for a, n in f["areas"].get(atk, {}).items()
+                 if not _is_early_back_area(a, ranks) and n >= 1]
+        if cands:
+            cands.sort(key=lambda x: (-x[0], x[1]))
+            return cands[0][1], sorted(seen)
+
+    return None, []
+
+
+def _early_type(frames: list[dict], events: list[Event], early_end: float, atk: int | None,
+                def_team: int | None = None, ranks: dict | None = None) -> dict:
+    # ラッシュは開幕 15 秒以内の動きで決まる（最優先）
     rush = [e for e in events if e.kind == "ラッシュ" and e.t <= RUSH_SECONDS + 1e-9]
     if rush:
-        return {"type": "ラッシュ", "zone": rush[0].zone, "candidates": []}
+        return {"type": "ラッシュ", "zone": rush[0].zone, "area": None, "candidates": []}
     if atk is None:
-        return {"type": None, "zone": None, "candidates": []}
-    used: Counter = Counter()
-    for f in frames:
-        if f["e"] > early_end + 1e-9:
-            break
-        for z, n in f["zones"].get(atk, {}).items():
-            if z in ZONES:
-                used[z] += int(n)
-    used = {z: n for z, n in used.items() if n}
-    if used:
-        main = _main_zone(used)
-        return {"type": f"{_zone_label(main)}デフォルト", "zone": main, "candidates": sorted(used)}
-    return {"type": "詰め待ち", "zone": None, "candidates": []}
+        return {"type": None, "zone": None, "area": None, "candidates": []}
+    area, cands = _first_early_area(frames, early_end, atk, def_team=def_team, ranks=ranks)
+    if area:
+        typ, zone = _early_default_label(area)
+        return {"type": typ, "zone": zone, "area": area, "candidates": cands}
+    return {"type": "詰め待ち", "zone": None, "area": None, "candidates": []}
 
 
 def _entry_type(norm: dict, events: list[Event], atk: int | None) -> dict:
@@ -906,7 +986,7 @@ def classify_flow(round_dict: dict, ranks: dict | None = None, side: str = ATTAC
         }
     else:
         phases = {
-            "early": _early_type(frames, events, segs["early"]["end"], atk),
+            "early": _early_type(frames, events, segs["early"]["end"], atk, def_team=def_team, ranks=ranks),
             "entry": _entry_type(norm, events, atk),
             "mid": _mid_type(frames, events, segs["mid"]["start"], segs["mid"]["end"], atk),
             "late": _late_type(frames, segs["plant"], events, round_dict, atk, ranks),

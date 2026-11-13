@@ -62,7 +62,7 @@ SETTINGS = [
 ]
 
 PHASE_RULES = [
-    ("攻撃・開幕", "開始〜最初のピックまたは最初の支配交代の早い方", "Aデフォルト・MIDデフォルト・Bデフォルト・ラッシュ・詰め待ち"),
+    ("攻撃・開幕", "開始〜最初のテイクまたは開幕の前進", "Aデフォルト・ランプデフォルト・ミッドデフォルト・Bメインデフォルト・ラッシュ・詰め待ち"),
     ("攻撃・エントリー", "サイトへの進入ウィンドウ", "Aセット・Bセット・Aスプリット・Bスプリット"),
     ("攻撃・ポストプラント", "プラント後5秒以降の最初の配置（サイト別上位2種）", "コールアウト構成による配置クラスタ"),
     ("防衛・序盤", "開始〜最初のピックまたは最初の支配交代の早い方", "A寄せ・MID寄せ・B寄せ・自陣待機"),
@@ -702,17 +702,18 @@ def _ensure_play_gif(ctx: dict, item: dict) -> str:
     return f"gifs/{dst.name}"
 
 
-def play_gif_card(ctx: dict, item: dict) -> tuple[str, str]:
+def play_gif_card(ctx: dict, item: dict, prefix: str = "") -> tuple[str, str]:
     """代表ラウンド（実際のプレイ例）の GIF カード HTML と相対パスを返す。"""
     if not item:
         return "", ""
     r = item.get("r") if "r" in item else item
     label = sample_label(r)
     gif_rel = _ensure_play_gif(ctx, item)
+    cap = f"{prefix}{label}（実プレイGIF）"
     card = (f'<figure class="play-gif">'
             f'<img class="gif-img" src="{html.escape(gif_rel, quote=True)}" '
             f'alt="{html.escape(f"{label} の実プレイGIF", quote=True)}" loading="lazy">'
-            f'<figcaption>{_e(f"{label}（実プレイGIF）")}</figcaption></figure>')
+            f'<figcaption>{_e(cap)}</figcaption></figure>')
     return card, gif_rel
 
 
@@ -890,8 +891,10 @@ def phase_type_description(seg: str, typ: str, members: list[dict] | None = None
                     f"リアクション：防衛がサイト内で耐える動きや逆からの寄せが来る前に、人数差で押し切る")
         elif t.endswith("デフォルト"):
             z = t[:-5]
-            base = (f"アクション：開幕、攻撃は {z} 側を軸に展開してエリアの主導権を探る。"
-                    f"リアクション：防衛の前目プッシュやローテートを見て、手薄な側へエントリーをつなげる")
+            area_txt = {"A": "Aメイン", "ランプ": "Aランプ", "ミッド": "ミッド",
+                        "Bメイン": "Bメイン", "Cメイン": "Cメイン"}.get(z, z)
+            base = (f"アクション：開幕、攻撃は {area_txt} のエリアを取りに行く。"
+                    f"リアクション：防衛の前目プッシュやローテートを見て、そのまま攻めるかリグループして別サイトへ展開する")
         elif t == "詰め待ち":
             base = ("アクション：開幕、攻撃は約10秒ほど後方で動かず詰め待ちする。"
                     "リアクション：防衛が前へ情報を探りに来たタイミングを捉え、ピックから主導権を取る")
@@ -1028,6 +1031,47 @@ def _postplant_clusters(classified: list[dict], k: int = 0) -> list[tuple[str, l
     return out
 
 
+def _build_early_branches(members: list[dict], max_rep_branches: int = 3) -> list[dict]:
+    """攻撃・開幕の各型について、段階Dのエントリー型を軸に展開の分岐（件数・勝率・代表）を集計する。"""
+    groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    total = len(members)
+    for it in members:
+        ph = (it.get("flow") or {}).get("phases") or {}
+        early_zone = (ph.get("early") or {}).get("zone")
+        entry_info = ph.get("entry") or {}
+        ent_type = entry_info.get("type") or "エントリーなし"
+        ent_zone = entry_info.get("zone")
+        is_regroup = bool(early_zone in P.SITES and ent_zone in P.SITES and early_zone != ent_zone)
+        label = f"リグループして{ent_type}" if is_regroup else str(ent_type)
+        groups[(str(ent_type), label)].append(it)
+
+    sorted_groups = sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0][1]))
+    out: list[dict] = []
+    rep_used: set[str] = set()
+    rep_budget = max_rep_branches
+    for (ent_type, label), b_members in sorted_groups:
+        n = len(b_members)
+        w = sum(1 for it in b_members if it["r"].get("win"))
+        rate = w / n if n else 0.0
+        share = n / total if total else 0.0
+        rep = None
+        if n >= 2 and rep_budget > 0:
+            reps = _pick_phase_reps(b_members, "entry", rep_used, max_reps=1)
+            if reps:
+                rep = reps[0]
+                rep_budget -= 1
+        out.append({
+            "type": ent_type,
+            "label": label,
+            "n": n,
+            "w": w,
+            "rate": rate,
+            "share": share,
+            "rep": rep,
+        })
+    return out
+
+
 def build_phase_sections(items: list[dict], side: str | None = None,
                          max_types: int | None = 3, k: int = 0) -> dict:
     """構成のラウンド群を `phases.classify_flow` で集計し、サイド別の3部データを返す。
@@ -1089,6 +1133,7 @@ def build_phase_sections(items: list[dict], side: str | None = None,
                 rate = w / n if n else 0.0
                 share = n / cls_n if cls_n else 0.0
                 late_kind = _defense_late_kind(members)[0] if (desc_side == DEFENSE and seg_key == "late") else None
+                branches = _build_early_branches(members) if (desc_side == ATTACK and seg_key == "early") else []
                 entry = {
                     "side": side,
                     "seg": seg_key,
@@ -1099,6 +1144,7 @@ def build_phase_sections(items: list[dict], side: str | None = None,
                     "rate": rate,
                     "share": share,
                     "defense_late_kind": late_kind,
+                    "branches": branches,
                     "description": phase_type_description(seg_key, typ, members, side=desc_side),
                     "lead": None,
                     "reps": [],
@@ -1696,11 +1742,64 @@ def _phase_type_slide(ctx: dict, sec: dict, t_info: dict, idx: int,
                  f"tracks 無し {sk_n} 件は対象外）。")
     desc_line = t_info["description"]
 
-    media_row = f'<div class="rep-media">{gif_html}{"".join(vod_cards)}</div>'
+    # 段階E: 攻撃・開幕では展開の分岐内訳表と件数の多い分岐の代表（GIF・VOD）を載せる
+    branch_table_html = ""
+    branches_meta = []
+    extra_gifs = []
+    extra_vods = []
+    seen_media_keys = {sample_key(lead)} if lead else set()
+    if t_info.get("branches"):
+        b_rows = []
+        for b in t_info["branches"]:
+            b_rep = b.get("rep")
+            b_rep_key = sample_key(b_rep) if b_rep else None
+            b_rep_lbl = sample_label(b_rep["r"]) if b_rep else ""
+            b_gif_rel = ""
+            b_has_vod = False
+            if b_rep:
+                if b_rep_key not in seen_media_keys:
+                    seen_media_keys.add(b_rep_key)
+                    b_gif_html, b_gif_rel = play_gif_card(ctx, b_rep, prefix=f"[{b['label']}] ")
+                    if b_gif_html:
+                        extra_gifs.append(b_gif_html)
+                    b_vc = _vod_for(b_rep)
+                    if b_vc:
+                        extra_vods.append(b_vc)
+                        b_has_vod = True
+                else:
+                    # 既に代表GIF/VODとして表示されているラウンドならその情報を共有
+                    b_gif_rel = _ensure_play_gif(ctx, b_rep)
+                    b_has_vod = bool(_vod_for(b_rep))
+            rep_cell = _e(b_rep_lbl) if b_rep_lbl else "—"
+            b_rows.append(
+                f'<tr><td>{_e(b["label"])}</td>'
+                f'<td>{b["n"]}件（{b["share"]:.0%}）</td>'
+                f'<td>{b["rate"]:.0%}（{_wl(b["w"], b["n"])}）</td>'
+                f'<td>{rep_cell}</td></tr>'
+            )
+            branches_meta.append({
+                "type": b["type"],
+                "label": b["label"],
+                "n": b["n"],
+                "w": b["w"],
+                "rate": round(b["rate"], 4),
+                "share": round(b["share"], 4),
+                "rep_round": b_rep_key,
+                "rep_label": b_rep_lbl or None,
+                "gif": b_gif_rel or None,
+                "has_vod": b_has_vod,
+            })
+        branch_table_html = (
+            '<table class="branch-table"><thead><tr>'
+            '<th>展開の分岐</th><th>件数</th><th>勝率</th><th>代表</th>'
+            f'</tr></thead><tbody>{"".join(b_rows)}</tbody></table>'
+        )
+
+    media_row = f'<div class="rep-media">{gif_html}{"".join(extra_gifs)}{"".join(vod_cards)}{"".join(extra_vods)}</div>'
     body = (
         f'{boards_html}'
         f'<div class="phase-body">'
-        f'<div class="handtxt">{_s(stat_line)}{_s(desc_line)}{_ul(rep_lines, cls="rep-list")}</div>'
+        f'<div class="handtxt">{_s(stat_line)}{_s(desc_line)}{_ul(rep_lines, cls="rep-list")}{branch_table_html}</div>'
         f'{media_row}'
         f'</div>'
     )
@@ -1725,6 +1824,7 @@ def _phase_type_slide(ctx: dict, sec: dict, t_info: dict, idx: int,
         "rate": round(rate, 4),
         "share": round(share, 4),
         "description": desc_line,
+        "branches": branches_meta,
         "lead_round": sample_key(lead) if lead else None,
         "boards": boards_meta,
         "expected_boards": len(boards_meta),
@@ -1826,6 +1926,9 @@ def build_page(ctx, comp: str, rounds: list[dict], items: list[dict], stat: dict
                     sec_types_meta.append(t_meta)
                     for rep_it in t_info["reps"]:
                         sample_keys.add(rep_it["r"]["comp_key"])
+                    for b in t_info.get("branches") or []:
+                        if b.get("rep"):
+                            sample_keys.add(b["rep"]["r"]["comp_key"])
                     if t_meta["representatives"]:
                         lead_rep = t_meta["representatives"][0]
                         hands_compat_meta.append({

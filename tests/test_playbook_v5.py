@@ -424,11 +424,11 @@ def test_build_phase_sections_splits_sides_and_limits_top3():
         _item(n=5, side="攻撃", raw_round=_synth_round(n=5, kind="hold_site")),
         _item(n=6, side="攻撃", flow={"events": [], "segments": {"early": {"start": 0.0, "end": 10.0},
               "mid": {"start": 10.0, "end": 20.0}, "late": {"start": None, "end": None}},
-              "phases": {"early": {"type": "Bデフォルト"}, "entry": {"type": None}, "postplant": None},
+              "phases": {"early": {"type": "Bメインデフォルト"}, "entry": {"type": None}, "postplant": None},
               "flow": {"early": "", "mid": "", "late": ""}}),
         _item(n=7, side="攻撃", flow={"events": [], "segments": {"early": {"start": 0.0, "end": 10.0},
               "mid": {"start": 10.0, "end": 20.0}, "late": {"start": None, "end": None}},
-              "phases": {"early": {"type": "MIDデフォルト"}, "entry": {"type": None}, "postplant": None},
+              "phases": {"early": {"type": "ミッドデフォルト"}, "entry": {"type": None}, "postplant": None},
               "flow": {"early": "", "mid": "", "late": ""}}),
         _item(n=8, side="攻撃", raw_round={"n": 8, "side1": "攻撃", "tactics": {}}),
     ]
@@ -571,3 +571,45 @@ def test_postplant_limits_to_2_per_site():
     assert len(a_types) == 2
     assert len(b_types) == 1
     assert "A：" in a_types[0]["type"]
+
+
+def test_early_branches_sum_and_regroup_label():
+    """E2: 開幕の型ごとに段階Dエントリー型の分岐内訳（合計一致・リグループ表記・代表付与）が出る。"""
+    def atk_item(n, win, early_type, early_zone, entry_type, entry_zone):
+        return _item(
+            n=n,
+            side="攻撃",
+            win=win,
+            flow={
+                "events": [],
+                "segments": {"early": {"start": 0.0, "end": 10.0},
+                             "mid": {"start": 10.0, "end": 20.0},
+                             "late": {"start": None, "end": None}},
+                "phases": {
+                    "early": {"type": early_type, "zone": early_zone},
+                    "entry": {"type": entry_type, "zone": entry_zone},
+                    "postplant": None,
+                },
+                "flow": {"early": "", "mid": "", "late": ""},
+            },
+        )
+
+    items = [
+        atk_item(1, True, "Bメインデフォルト", "B", "Bセット", "B"),
+        atk_item(2, False, "Bメインデフォルト", "B", "Bセット", "B"),
+        atk_item(3, True, "Bメインデフォルト", "B", "Aセット", "A"),
+        atk_item(4, True, "Bメインデフォルト", "B", "Aセット", "A"),
+        atk_item(5, False, "Bメインデフォルト", "B", None, None),
+    ]
+    sec = PB.build_phase_sections(items, side=PB.ATTACK, max_types=3)
+    early_types = sec["sections"][0]["types"]
+    assert len(early_types) == 1
+    t = early_types[0]
+    assert t["type"] == "Bメインデフォルト"
+    branches = t["branches"]
+    assert sum(b["n"] for b in branches) == t["n"] == 5
+    by_lbl = {b["label"]: b for b in branches}
+    assert set(by_lbl) == {"Bセット", "リグループしてAセット", "エントリーなし"}
+    assert by_lbl["Bセット"]["n"] == 2 and by_lbl["Bセット"]["rep"] is not None
+    assert by_lbl["リグループしてAセット"]["n"] == 2 and by_lbl["リグループしてAセット"]["rep"] is not None
+    assert by_lbl["エントリーなし"]["n"] == 1 and by_lbl["エントリーなし"]["rep"] is None

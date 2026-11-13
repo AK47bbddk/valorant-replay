@@ -314,11 +314,33 @@ def test_attack_entry_set_vs_split():
 
 
 def test_attack_early_5_vocab():
-    """D1: 攻め開幕の型は Aデフォルト/MIDデフォルト/Bデフォルト/ラッシュ/詰め待ち の5種に正規化される。"""
+    """E1: 攻め開幕の型は取りに行くエリアに基づく Split 語彙（A/ランプ/ミッド/Bメインデフォルト＋ラッシュ/詰め待ち）に分類される。"""
     tr_mid = still(["攻撃側", "Mid", "Mid", "A", "B"])
-    assert P.classify_flow(rnd(tr_mid))["phases"]["early"]["type"] == "MIDデフォルト"
+    assert P.classify_flow(rnd(tr_mid))["phases"]["early"]["type"] == "ミッドデフォルト"
     tr_wait = still(["攻撃側", "攻撃側", "攻撃側", "攻撃側", "攻撃側"])
     assert P.classify_flow(rnd(tr_wait))["phases"]["early"]["type"] == "詰め待ち"
+
+    tr_ramp = tracks({
+        "Jett": [(0, "攻撃側"), (5, "A", "A Ramps"), (10, "A", "A Ramps")],
+        "Omen": [(0, "攻撃側"), (5, "A", "A Ramps"), (10, "A", "A Ramps")],
+        "Sova": [(0, "攻撃側"), (5, "攻撃側"), (10, "攻撃側")],
+    }, {"Raze": [(0, "防衛側")]})
+    assert P.classify_flow(rnd(tr_ramp))["phases"]["early"]["type"] == "ランプデフォルト"
+
+
+def test_early_b_main_take_then_regroup_a_is_b_main_default():
+    """E1: 合成データで『開幕はBメインを取り、最終的にAへ攻めたラウンド』が Bメインデフォルト に分類される。"""
+    tr = tracks({
+        "Jett": [(0, "攻撃側"), (5, "B", "B Garage"), (10, "B", "B Garage"), (20, "Mid", "Mid Bottom"), (35, "A", "A Main"), (40, "A", "A Site")],
+        "Omen": [(0, "攻撃側"), (5, "B", "B Garage"), (10, "B", "B Garage"), (20, "Mid", "Mid Bottom"), (35, "A", "A Main"), (40, "A", "A Site")],
+        "Sova": [(0, "攻撃側"), (5, "B", "B Garage"), (10, "B", "B Garage"), (20, "A", "A Main"), (35, "A", "A Main"), (40, "A", "A Site")],
+        "Viper": [(0, "攻撃側"), (5, "B", "B Lobby"), (10, "B", "B Lobby"), (20, "A", "A Lobby"), (35, "A", "A Main"), (40, "A", "A Main")],
+        "Cypher": [(0, "攻撃側"), (5, "B", "B Lobby"), (10, "B", "B Lobby"), (20, "A", "A Lobby"), (35, "A", "A Main"), (40, "A", "A Main")],
+    }, {ag: [(0, "防衛側")] for ag in ("Raze", "Sage", "Fade", "Killjoy", "Skye")})
+    res = P.classify_flow(rnd(tr, plant_t=145.0, plant_site="A"))
+    assert res["phases"]["early"]["type"] == "Bメインデフォルト", res["phases"]["early"]
+    assert res["phases"]["early"]["zone"] == "B"
+    assert res["phases"]["entry"]["type"] == "Aセット", res["phases"]["entry"]
 
 
 def test_barrier_filter_drops_outside_home_and_jumps():

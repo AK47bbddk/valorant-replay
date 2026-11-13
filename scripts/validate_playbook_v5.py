@@ -224,7 +224,8 @@ def check_page(name: str, page: str, manifest_entry: dict, results: list, fail: 
         ATTACK: (["early", "entry", "postplant"], ["開幕", "エントリー", "ポストプラント"]),
         DEFENSE: (["early", "mid", "late"], ["序盤", "中盤", "終盤"]),
     }
-    atk_early_vocab = {"Aデフォルト", "MIDデフォルト", "Bデフォルト", "Cデフォルト", "ラッシュ", "詰め待ち"}
+    atk_early_vocab = {"Aデフォルト", "ランプデフォルト", "ミッドデフォルト", "Bメインデフォルト",
+                       "Cメインデフォルト", "ラッシュ", "詰め待ち"}
     atk_entry_vocab = {"Aセット", "Bセット", "Cセット", "Aスプリット", "Bスプリット", "Cスプリット"}
     def_early_vocab = {"A寄せ", "MID寄せ", "B寄せ", "C寄せ", "自陣待機"}
 
@@ -396,6 +397,37 @@ def check_page(name: str, page: str, manifest_entry: dict, results: list, fail: 
                         side_mix_bad.append(f"html:{side_key}:{li_txt[:40]}")
     rec(not side_mix_bad, "サイド整合（攻撃/防衛の混線なし）",
         str(side_mix_bad[:5]) if side_mix_bad else "")
+
+    # 18. [段階E] 攻撃・開幕の型ごとに展開の分岐内訳（合計一致・語彙・代表GIF/VOD）がある
+    branch_bad = []
+    atk_blk = side_blocks.get(ATTACK) or {}
+    atk_early_sec = next((s for s in (atk_blk.get("sections") or []) if s.get("seg") == "early"), None)
+    early_tps = (atk_early_sec or {}).get("types") or []
+    branch_entry_vocab = atk_entry_vocab | {"エントリーなし"}
+    if early_tps and "展開の分岐" not in text:
+        branch_bad.append("missing_branch_table")
+    for t in early_tps:
+        branches = t.get("branches") or []
+        if not branches:
+            branch_bad.append(f"{t.get('type')}:no_branches")
+            continue
+        if sum(int(b.get("n", 0)) for b in branches) != int(t.get("n", 0)):
+            branch_bad.append(f"{t.get('type')}:sum_mismatch")
+        for b in branches:
+            if b.get("type") not in branch_entry_vocab:
+                branch_bad.append(f"{t.get('type')}:bad_entry={b.get('type')}")
+            lbl = b.get("label") or ""
+            if lbl and lbl not in text:
+                branch_bad.append(f"{t.get('type')}:missing_lbl={lbl}")
+            if b.get("rep_round"):
+                rlbl = b.get("rep_label") or ""
+                if not rlbl or rlbl not in text or not b.get("has_vod"):
+                    branch_bad.append(f"{t.get('type')}:{lbl}:rep_vod")
+                gif_rel = b.get("gif")
+                if not gif_rel or f'src="{gif_rel}"' not in page:
+                    branch_bad.append(f"{t.get('type')}:{lbl}:rep_gif")
+    rec(not branch_bad, "開幕の展開分岐内訳（段階E）",
+        str(branch_bad[:5]) if branch_bad else f"{len(early_tps)} 型")
 
 
 def main(argv=None):
