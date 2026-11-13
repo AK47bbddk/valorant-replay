@@ -25,9 +25,10 @@ def _item(*, win=True, su=5, n=1, match_id="m", order=1, tag="LOUD", opp_tag="PR
     if raw_round is not None:
         r["_round"] = raw_round
     if flow is None and raw_round is not None:
-        flow = P.classify_flow(raw_round)
+        flow = P.classify_flow(raw_round, side=side)
+    fstats = (flow or {}).get("filter_stats") or {"outside_home": 0, "jump": 0, "dropped": 0}
     return {"r": r, "su": setup, "cls": cls or {}, "opp": {}, "flow": flow,
-            "flow_skip": None if flow else "no_tracks"}
+            "flow_skip": None if flow else "no_tracks", "filter_stats": fstats}
 
 
 def _sample_pt(e, x, y, zone, callout=None):
@@ -291,17 +292,14 @@ def test_single_time_board_has_one_step_agent_icons_and_no_arrows():
 def test_phase_type_description_is_action_reaction_and_excludes_old_node_phrases():
     it = _item(raw_round=_synth_round(n=1, kind="default"))
     for seg, typ in [
-        ("early", "A デフォルト"),
-        ("early", "A ラッシュ"),
+        ("early", "Aデフォルト"),
+        ("early", "ラッシュ"),
         ("early", "詰め待ち"),
-        ("mid", "フリーズ"),
-        ("mid", "リグループセット"),
-        ("mid", "フェイクセット"),
-        ("late", "プッシュ"),
-        ("late", "サイト耐え"),
-        ("late", "下がる"),
+        ("entry", "Aセット"),
+        ("entry", "Bスプリット"),
+        ("postplant", "A：A Site 2・A Main 1"),
     ]:
-        desc = PB.phase_type_description(seg, typ, [it])
+        desc = PB.phase_type_description(seg, typ, [it], side=PB.ATTACK)
         assert "アクション：" in desc and "リアクション：" in desc
         assert PB.has_abbrev(desc) is False
         for old_ph in PB.OLD_NODE_PHRASES:
@@ -314,13 +312,13 @@ def test_build_phase_sections_orders_by_count_and_tracks_denominator():
     r_rush = _item(n=3, raw_round=_synth_round(n=3, kind="rush"))
     r_no_tracks = _item(n=4, raw_round={"n": 4, "side1": "攻撃", "tactics": {}})
 
-    data = PB.build_phase_sections([r_def1, r_def2, r_rush, r_no_tracks])
+    data = PB.build_phase_sections([r_def1, r_def2, r_rush, r_no_tracks], side=PB.ATTACK)
     assert data["total"] == 4
     assert data["classified"] == 3
     assert data["skipped"] == 1
-    assert [s["seg"] for s in data["sections"]] == ["early", "mid", "late"]
+    assert [s["seg"] for s in data["sections"]] == ["early", "entry", "postplant"]
     early_types = data["sections"][0]["types"]
-    assert [t["type"] for t in early_types] == ["A デフォルト", "A ラッシュ"]
+    assert [t["type"] for t in early_types] == ["Aデフォルト", "ラッシュ"]
     assert [t["n"] for t in early_types] == [2, 1]
     assert len(early_types[0]["reps"]) == 2
 
@@ -403,6 +401,7 @@ def test_build_page_and_validate_stage_b_with_synthetic_fixture(tmp_path):
         "env_start": PB.ENV_START,
         "env_label": PB.ENV_LABEL,
         "settings": [{"name": k, "value": v, "note": d} for k, v, d in PB.SETTINGS],
+        "barrier_filter": stat["barrier_filter"],
         "unknown_rounds": 0,
         "pages": [page_manifest],
         "skipped": [],
@@ -425,11 +424,11 @@ def test_build_phase_sections_splits_sides_and_limits_top3():
         _item(n=5, side="攻撃", raw_round=_synth_round(n=5, kind="hold_site")),
         _item(n=6, side="攻撃", flow={"events": [], "segments": {"early": {"start": 0.0, "end": 10.0},
               "mid": {"start": 10.0, "end": 20.0}, "late": {"start": None, "end": None}},
-              "phases": {"early": {"type": "B デフォルト"}, "mid": {"type": None}, "late": {"type": None}},
+              "phases": {"early": {"type": "Bデフォルト"}, "entry": {"type": None}, "postplant": None},
               "flow": {"early": "", "mid": "", "late": ""}}),
         _item(n=7, side="攻撃", flow={"events": [], "segments": {"early": {"start": 0.0, "end": 10.0},
               "mid": {"start": 10.0, "end": 20.0}, "late": {"start": None, "end": None}},
-              "phases": {"early": {"type": "Mid デフォルト"}, "mid": {"type": None}, "late": {"type": None}},
+              "phases": {"early": {"type": "MIDデフォルト"}, "entry": {"type": None}, "postplant": None},
               "flow": {"early": "", "mid": "", "late": ""}}),
         _item(n=8, side="攻撃", raw_round={"n": 8, "side1": "攻撃", "tactics": {}}),
     ]
@@ -468,14 +467,15 @@ def test_defense_phase_description_excludes_attack_only_and_marks_retake_or_rota
             ],
             "segments": {"early": {"start": 0.0, "end": 10.0}, "mid": {"start": 10.0, "end": 30.0},
                          "late": {"start": 30.0, "end": 45.0}},
-            "phases": {"early": {"type": "A デフォルト"}, "mid": {"type": "リグループセット"},
-                       "late": {"type": "サイト耐え"}},
+            "phases": {"early": {"type": "A寄せ"}, "mid": {"type": "ローテート"},
+                       "late": {"type": "リテイク"}},
             "flow": {"early": "", "mid": "", "late": "防衛 ローテート→防衛 A 取り返し"},
         },
     )
-    for seg, typ in [("early", "A デフォルト"), ("mid", "リグループセット"), ("late", "サイト耐え")]:
+    for seg, typ in [("early", "A寄せ"), ("mid", "ローテート"), ("late", "リテイク")]:
         desc = PB.phase_type_description(seg, typ, [it_retake], side=PB.DEFENSE)
         assert "アクション：" in desc and "リアクション：" in desc
+        assert "相手が" not in desc
         assert PB.has_abbrev(desc) is False
         for ph in PB.ATTACK_ONLY_PHRASES + PB.OLD_NODE_PHRASES:
             assert ph not in desc
@@ -503,15 +503,15 @@ def test_validate_detects_side_mismatch(tmp_path):
             "攻撃": {
                 "side": "攻撃", "total": 1, "classified": 1, "skipped": 0,
                 "sections": [
-                    {"seg": "early", "label": "序盤", "types": [
-                        {"side": "攻撃", "seg": "early", "seg_label": "序盤", "type": "A デフォルト",
-                         "title": "攻撃・序盤：A デフォルト", "n": 1,
+                    {"seg": "early", "label": "開幕", "types": [
+                        {"side": "攻撃", "seg": "early", "seg_label": "開幕", "type": "Aデフォルト",
+                         "title": "攻撃・開幕：Aデフォルト", "n": 1,
                          "description": "アクション：テスト。リアクション：テスト。",
                          "boards": [], "expected_boards": 0,
                          "representatives": [{"label": "LOUD vs PRX R1○", "side": "防衛", "has_vod": False}]}
                     ]},
-                    {"seg": "mid", "label": "中盤", "types": []},
-                    {"seg": "late", "label": "終盤", "types": []},
+                    {"seg": "entry", "label": "エントリー", "types": []},
+                    {"seg": "postplant", "label": "ポストプラント", "types": []},
                 ],
             },
             "防衛": {
@@ -535,3 +535,39 @@ def test_validate_detects_side_mismatch(tmp_path):
 
 def test_validate_skips_when_real_data_folder_missing(tmp_path):
     assert V5.main([str(tmp_path / "missing_real_data_output")]) == 0
+
+
+def test_postplant_limits_to_2_per_site():
+    """D1: ポストプラント配置クラスタはサイト別に上位2種まで（2種に満たなければある分だけ）。"""
+    def pp_item(n, site, pos):
+        return _item(
+            n=n,
+            side="攻撃",
+            flow={
+                "events": [],
+                "segments": {"early": {"start": 0.0, "end": 10.0},
+                             "mid": {"start": 10.0, "end": 30.0},
+                             "late": {"start": 30.0, "end": 45.0}},
+                "phases": {"early": {"type": "Aデフォルト"}, "entry": {"type": f"{site}セット"},
+                           "postplant": {"site": site, "t": 35.0, "positions": pos}},
+                "flow": {"early": "", "mid": "", "late": ""},
+            },
+        )
+
+    items = [
+        # A サイトに 3 種類の異なる配置（距離 > 0.09）
+        pp_item(1, "A", {"Fade": (0.20, 0.20, "A Site"), "Omen": (0.22, 0.22, "A Main")}),
+        pp_item(2, "A", {"Fade": (0.20, 0.20, "A Site"), "Omen": (0.22, 0.22, "A Main")}),
+        pp_item(3, "A", {"Fade": (0.50, 0.50, "A Heaven"), "Omen": (0.52, 0.52, "A Ramps")}),
+        pp_item(4, "A", {"Fade": (0.85, 0.85, "A Lobby"), "Omen": (0.86, 0.86, "A Sewer")}),
+        # B サイトに 1 種類
+        pp_item(5, "B", {"Fade": (0.70, 0.25, "B Site"), "Omen": (0.72, 0.55, "B Main")}),
+    ]
+    sec = PB.build_phase_sections(items, side=PB.ATTACK, max_types=3, k=0)
+    pp_sec = sec["sections"][2]
+    assert pp_sec["seg"] == "postplant"
+    a_types = [t for t in pp_sec["types"] if t.get("site") == "A"]
+    b_types = [t for t in pp_sec["types"] if t.get("site") == "B"]
+    assert len(a_types) == 2
+    assert len(b_types) == 1
+    assert "A：" in a_types[0]["type"]

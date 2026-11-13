@@ -160,8 +160,9 @@ def test_rush_boundary_15s():
                     {"Raze": [(0, "防衛側")]})
         return P.classify_flow(rnd(tr))
 
-    assert entry_at(15.0)["phases"]["early"]["type"] == "A ラッシュ"
-    assert entry_at(16.0)["phases"]["early"]["type"] != "A ラッシュ"
+    assert entry_at(15.0)["phases"]["early"]["type"] == "ラッシュ"
+    assert entry_at(15.0)["phases"]["early"]["zone"] == "A"
+    assert entry_at(16.0)["phases"]["early"]["type"] != "ラッシュ"
 
 
 def test_fast_group_without_entry_is_default():
@@ -174,7 +175,7 @@ def test_fast_group_without_entry_is_default():
         "Cypher": [(0, "攻撃側"), (5, "攻撃側"), (10, "攻撃側"), (15, "攻撃側"), (20, "攻撃側")],
     }, {ag: [(0, "防衛側")] for ag in ("Raze", "Sage", "Fade", "Killjoy", "Skye")})
     res = P.classify_flow(rnd(tr))
-    assert res["phases"]["early"]["type"] == "A デフォルト", res["phases"]["early"]
+    assert res["phases"]["early"]["type"] == "Aデフォルト", res["phases"]["early"]
     assert not any(e["kind"] == "ラッシュ" for e in res["events"]), res["events"]
 
 
@@ -189,8 +190,8 @@ def test_slow_default_is_not_rush():
     }, {ag: [(0, "防衛側")] for ag in ("Raze", "Sage", "Fade", "Killjoy", "Skye")})
     res = P.classify_flow(rnd(tr))
     early = res["phases"]["early"]["type"]
-    assert early == "A デフォルト", res["phases"]["early"]
-    assert not early.endswith("ラッシュ")
+    assert early == "Aデフォルト", res["phases"]["early"]
+    assert early != "ラッシュ"
 
 
 def test_fake_vs_regroup_priority():
@@ -258,3 +259,100 @@ def test_flow_text_when_classified():
     assert isinstance(res["flow"], dict) and set(res["flow"]) == {"early", "mid", "late"}
     assert all(isinstance(v, str) for v in res["flow"].values())
     assert res["segments"]["early"]["label"] == "序盤"
+
+
+# ---------------------------------------------------------------- 段階D: 視点修正・攻め分類・暫定バリアフィルタ
+def test_defense_perspective_early_mid_late():
+    """D0: 防衛ラウンドは防衛チームの分布・イベントから型が決まる（攻撃の分布に引っ張られない）。"""
+    # 攻撃(team1)は A に集まっているが、防衛(team2)は B に3人置いている → 防衛序盤は B寄せ
+    tr = tracks(
+        {
+            "Jett": [(0, "攻撃側"), (5, "A", "A Main"), (10, "A", "A Main"), (20, "A", "A Main"), (35, "A", "A Site")],
+            "Omen": [(0, "攻撃側"), (5, "A", "A Main"), (10, "A", "A Main"), (20, "A", "A Main"), (35, "A", "A Site")],
+            "Sova": [(0, "攻撃側"), (5, "A", "A Main"), (10, "A", "A Main"), (20, "A", "A Main"), (35, "A", "A Main")],
+            "Viper": [(0, "攻撃側"), (5, "攻撃側"), (10, "攻撃側"), (20, "攻撃側"), (35, "攻撃側")],
+            "Cypher": [(0, "攻撃側"), (5, "攻撃側"), (10, "攻撃側"), (20, "攻撃側"), (35, "攻撃側")],
+        },
+        {
+            "Raze": [(0, "B", "B Site"), (5, "B", "B Site"), (10, "B", "B Site"), (20, "A", "A Site"), (25, "A", "A Site"), (35, "A", "A Site"), (40, "A", "A Site")],
+            "Sage": [(0, "B", "B Site"), (5, "B", "B Site"), (10, "B", "B Site"), (20, "A", "A Site"), (25, "A", "A Site"), (35, "A", "A Site"), (40, "A", "A Site")],
+            "Fade": [(0, "B", "B Site"), (5, "B", "B Site"), (10, "B", "B Site"), (20, "A", "A Site"), (25, "A", "A Site"), (35, "A", "A Site"), (40, "A", "A Site")],
+            "Killjoy": [(0, "A", "A Site"), (5, "A", "A Site"), (10, "A", "A Site"), (20, "A", "A Site"), (25, "A", "A Site"), (35, "A", "A Site"), (40, "A", "A Site")],
+            "Skye": [(0, "Mid", "Mid Top"), (5, "Mid", "Mid Top"), (10, "Mid", "Mid Top"), (20, "A", "A Site"), (25, "A", "A Site"), (35, "A", "A Site"), (40, "A", "A Site")],
+        },
+    )
+    r = rnd(tr, plant_t=130.0, plant_site="A", kills=[{"t": 112.0, "killer_team": "Alpha"}])
+    res = P.classify_flow(r, side=P.DEFENSE)
+    assert res["phases"]["early"]["type"] == "B寄せ", res["phases"]["early"]
+    assert res["phases"]["mid"]["type"] in ("ローテート", "取り返し", "上がり"), res["phases"]["mid"]
+    assert res["phases"]["late"]["type"] in ("リテイク", "寄せ", "寄せ／リテイク"), res["phases"]["late"]
+
+
+def test_attack_entry_set_vs_split():
+    """D1: 進入路エリアの種類数で セット(1種) / スプリット(2種以上) を判定する。"""
+    tr_set = tracks(
+        {
+            "Jett": [(0, "攻撃側"), (15, "A", "A Main"), (20, "A", "A Site")],
+            "Omen": [(0, "攻撃側"), (15, "A", "A Main"), (20, "A", "A Site")],
+            "Sova": [(0, "攻撃側"), (15, "A", "A Main"), (20, "A", "A Main")],
+        },
+        {"Raze": [(0, "防衛側")]},
+    )
+    res_set = P.classify_flow(rnd(tr_set), side=P.ATTACK)
+    assert res_set["phases"]["entry"]["type"] == "Aセット", res_set["phases"]["entry"]
+
+    tr_split = tracks(
+        {
+            "Jett": [(0, "攻撃側"), (15, "A", "A Main"), (20, "A", "A Site")],
+            "Omen": [(0, "攻撃側"), (15, "A", "A Ramps"), (20, "A", "A Site")],
+            "Sova": [(0, "攻撃側"), (15, "Mid", "Mid Vent"), (20, "A", "A Site")],
+        },
+        {"Raze": [(0, "防衛側")]},
+    )
+    res_split = P.classify_flow(rnd(tr_split), side=P.ATTACK)
+    assert res_split["phases"]["entry"]["type"] == "Aスプリット", res_split["phases"]["entry"]
+
+
+def test_attack_early_5_vocab():
+    """D1: 攻め開幕の型は Aデフォルト/MIDデフォルト/Bデフォルト/ラッシュ/詰め待ち の5種に正規化される。"""
+    tr_mid = still(["攻撃側", "Mid", "Mid", "A", "B"])
+    assert P.classify_flow(rnd(tr_mid))["phases"]["early"]["type"] == "MIDデフォルト"
+    tr_wait = still(["攻撃側", "攻撃側", "攻撃側", "攻撃側", "攻撃側"])
+    assert P.classify_flow(rnd(tr_wait))["phases"]["early"]["type"] == "詰め待ち"
+
+
+def test_barrier_filter_drops_outside_home_and_jumps():
+    """D2: 最初のサンプルが自陣外にある場合と、開幕ウィンドウ内のジャンプ外れ値が落ちる。"""
+    calls = [
+        {"name": "Site", "super": "A", "x": 0.30, "y": 0.25},
+        {"name": "Main", "super": "A", "x": 0.25, "y": 0.70},
+        {"name": "Site", "super": "B", "x": 0.70, "y": 0.25},
+        {"name": "Spawn", "super": "Attacker Side", "x": 0.50, "y": 0.95},
+        {"name": "Spawn", "super": "Defender Side", "x": 0.50, "y": 0.05},
+    ]
+    ranks = TC.area_ranks(calls)
+    # Jett: t=0 が A Site (自陣外) → 落ちる。t=5 が A Main (自陣内) → 開幕位置。t=10 が B Site (ジャンプ>0.40) → 落ちる。
+    tr = {
+        "1": {
+            "Jett": [
+                [0.0, 0.30, 0.25, 0.9, "det", "A", "A Site"],
+                [5.0, 0.25, 0.70, 0.9, "det", "A", "A Main"],
+                [10.0, 0.70, 0.25, 0.9, "det", "B", "B Site"],
+                [15.0, 0.24, 0.68, 0.9, "det", "A", "A Main"],
+            ]
+        },
+        "2": {"Raze": [[0.0, 0.50, 0.05, 0.9, "det", "防衛側", "Spawn"]]},
+    }
+    stats = {}
+    norm = P._norm_tracks(tr, sides={1: P.ATTACK, 2: P.DEFENSE}, ranks=ranks, filter_stats=stats)
+    pts = norm[1]["Jett"]
+    assert [p[0] for p in pts] == [5.0, 15.0]
+    assert stats["outside_home"] == 1
+    assert stats["jump"] == 1
+    assert stats["dropped"] == 2
+
+    # 定義のないマップ（ranks=None）ではフィルタは無効
+    stats_none = {}
+    norm_none = P._norm_tracks(tr, sides={1: P.ATTACK, 2: P.DEFENSE}, ranks=None, filter_stats=stats_none)
+    assert [p[0] for p in norm_none[1]["Jett"]] == [0.0, 5.0, 10.0, 15.0]
+    assert stats_none == {}

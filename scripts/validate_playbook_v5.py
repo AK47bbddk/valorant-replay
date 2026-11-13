@@ -214,36 +214,63 @@ def check_page(name: str, page: str, manifest_entry: dict, results: list, fail: 
                if p.get("side") == DEFENSE and any(ph in p["name"] for ph in ATTACK_ONLY_PHRASES)]
     rec(not atk_bad, "守りの型名に攻め専用表現なし", str(atk_bad) if atk_bad else "")
 
-    # 12. [段階B/C] サイド別（攻撃・防衛）× 序盤・中盤・終盤の3部構成（上位3型まで・件数順）
+    # 12. [段階B/C/D] サイド別3部構成（攻撃: 開幕・エントリー・ポストプラント / 防衛: 序盤・中盤・終盤）
     side_blocks = m.get("side_blocks") or {}
     expected_sec_titles = {
-        ATTACK: ("序盤の型", "エントリーの仕方（中盤）", "終盤：ポストプラントの形"),
+        ATTACK: ("開幕の型", "エントリーの型", "ポストプラントの形"),
         DEFENSE: ("序盤の型", "中盤の強い動き", "終盤：寄せ方・リテイクの仕方"),
     }
+    expected_segs = {
+        ATTACK: (["early", "entry", "postplant"], ["開幕", "エントリー", "ポストプラント"]),
+        DEFENSE: (["early", "mid", "late"], ["序盤", "中盤", "終盤"]),
+    }
+    atk_early_vocab = {"Aデフォルト", "MIDデフォルト", "Bデフォルト", "Cデフォルト", "ラッシュ", "詰め待ち"}
+    atk_entry_vocab = {"Aセット", "Bセット", "Cセット", "Aスプリット", "Bスプリット", "Cスプリット"}
+    def_early_vocab = {"A寄せ", "MID寄せ", "B寄せ", "C寄せ", "自陣待機"}
+
     three_parts_ok = ATTACK in side_blocks and DEFENSE in side_blocks
     order_bad = []
     action_reaction_bad = []
     top3_bad = []
     def_late_bad = []
+    stage_d_bad = []
     for side_key in (ATTACK, DEFENSE):
         blk = side_blocks.get(side_key) or {}
         secs = blk.get("sections") or []
         seg_keys = [s.get("seg") for s in secs]
         seg_labels = [s.get("label") for s in secs]
-        if seg_keys != ["early", "mid", "late"] or seg_labels != ["序盤", "中盤", "終盤"]:
+        exp_keys, exp_labels = expected_segs[side_key]
+        if seg_keys != exp_keys or seg_labels != exp_labels:
             three_parts_ok = False
+        if side_key == ATTACK and ("mid" in seg_keys or "中盤" in seg_labels):
+            stage_d_bad.append("atk_has_mid")
         for sec_t in expected_sec_titles[side_key]:
             if f"{side_key} / {sec_t}" not in text:
                 three_parts_ok = False
         for sec in secs:
             tps = sec.get("types") or []
-            if len(tps) > 3:
+            if sec.get("seg") != "postplant" and len(tps) > 3:
                 top3_bad.append(f"{side_key}:{sec.get('label')}:len={len(tps)}")
             ns = [t.get("n", 0) for t in tps]
             if ns != sorted(ns, reverse=True):
                 order_bad.append(f"{side_key}:{sec.get('label')}:{ns}")
+            if side_key == ATTACK and sec.get("seg") == "postplant":
+                per_site: dict[str, int] = {}
+                for t in tps:
+                    s_name = t.get("site") or (str(t.get("type") or "").split("：", 1)[0])
+                    per_site[s_name] = per_site.get(s_name, 0) + 1
+                over_site = {k: v for k, v in per_site.items() if v > 2}
+                if over_site:
+                    stage_d_bad.append(f"postplant_over2:{over_site}")
             for t in tps:
-                head = t.get("title") or f"{side_key}・{sec.get('label')}：{t.get('type')}"
+                tp_name = t.get("type")
+                if side_key == ATTACK and sec.get("seg") == "early" and tp_name not in atk_early_vocab:
+                    stage_d_bad.append(f"atk_early_vocab:{tp_name}")
+                if side_key == ATTACK and sec.get("seg") == "entry" and tp_name not in atk_entry_vocab:
+                    stage_d_bad.append(f"atk_entry_vocab:{tp_name}")
+                if side_key == DEFENSE and sec.get("seg") == "early" and tp_name not in def_early_vocab:
+                    stage_d_bad.append(f"def_early_vocab:{tp_name}")
+                head = t.get("title") or f"{side_key}・{sec.get('label')}：{tp_name}"
                 desc = t.get("description") or ""
                 if head not in text:
                     order_bad.append(f"missing:{head}")
@@ -252,9 +279,10 @@ def check_page(name: str, page: str, manifest_entry: dict, results: list, fail: 
                 if side_key == DEFENSE and sec.get("seg") == "late":
                     if ("寄せ" not in head and "リテイク" not in head) or ("寄せ" not in desc and "リテイク" not in desc):
                         def_late_bad.append(head)
-    rec(three_parts_ok and not order_bad and not action_reaction_bad and not top3_bad and not def_late_bad,
-        "サイド別3部構成（上位3型・序盤中盤終盤）",
-        f"parts_ok={three_parts_ok} top3={top3_bad} order={order_bad} ar={action_reaction_bad} def_late={def_late_bad}")
+    rec(three_parts_ok and not order_bad and not action_reaction_bad and not top3_bad and not def_late_bad and not stage_d_bad,
+        "サイド別3部構成（段階D語彙・攻撃中盤なし・防衛視点）",
+        f"parts_ok={three_parts_ok} top3={top3_bad} order={order_bad} ar={action_reaction_bad} "
+        f"def_late={def_late_bad} stage_d={stage_d_bad}")
 
     # 13. [段階B] 図が型ごとに3枚（1枚1時刻・TactiValボードJSONおよび画像または未生成明示）
     board_bad = []
@@ -389,6 +417,14 @@ def main(argv=None):
     results, fail = [], []
 
     print(f"検証: {d}（{mani.get('map')} / {mani.get('env_label')}）")
+    bf = mani.get("barrier_filter")
+    if isinstance(bf, dict) and "dropped" in bf:
+        print(f"  暫定バリアフィルタ: 除外 {bf.get('dropped', 0)} 件"
+              f"（自陣外 {bf.get('outside_home', 0)}・ジャンプ {bf.get('jump', 0)}）")
+        results.append(("暫定バリアフィルタ統計", True, str(bf)))
+    else:
+        results.append(("暫定バリアフィルタ統計", False, "barrier_filter missing"))
+        fail.append("manifest.json: barrier_filter がありません")
     pages = mani.get("pages") or []
     if not pages:
         print("FAIL: ページが 1 つもありません")

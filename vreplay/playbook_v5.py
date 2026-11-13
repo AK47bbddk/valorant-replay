@@ -32,6 +32,10 @@ from . import tactival as TV
 
 ATTACK, DEFENSE = GM.ATTACK, GM.DEFENSE
 SEGS = (("early", "序盤"), ("mid", "中盤"), ("late", "終盤"))
+SIDE_SEGS = {
+    ATTACK: (("early", "開幕"), ("entry", "エントリー"), ("postplant", "ポストプラント")),
+    DEFENSE: (("early", "序盤"), ("mid", "中盤"), ("late", "終盤")),
+}
 
 # ============================================================== 設定値
 ENV_START = "2026-09-01"
@@ -58,9 +62,12 @@ SETTINGS = [
 ]
 
 PHASE_RULES = [
-    ("序盤", "開始〜最初のピックまたは最初の支配交代の早い方", "A/B/Mid/C デフォルト・A/B/C ラッシュ・詰め待ち"),
-    ("中盤", "序盤の終わり〜プラント（プラント無しは終了まで）", "フリーズ・リグループセット・フェイクセット"),
-    ("終盤", "プラント〜ラウンド終了（プラント無しは区間なし）", "下がる・プッシュ・サイト耐え"),
+    ("攻撃・開幕", "開始〜最初のピックまたは最初の支配交代の早い方", "Aデフォルト・MIDデフォルト・Bデフォルト・ラッシュ・詰め待ち"),
+    ("攻撃・エントリー", "サイトへの進入ウィンドウ", "Aセット・Bセット・Aスプリット・Bスプリット"),
+    ("攻撃・ポストプラント", "プラント後5秒以降の最初の配置（サイト別上位2種）", "コールアウト構成による配置クラスタ"),
+    ("防衛・序盤", "開始〜最初のピックまたは最初の支配交代の早い方", "A寄せ・MID寄せ・B寄せ・自陣待機"),
+    ("防衛・中盤", "序盤の終わり〜プラント", "上がり・ローテート・取り返し"),
+    ("防衛・終盤", "プラント〜ラウンド終了", "リテイク・寄せ・寄せ／リテイク"),
 ]
 
 # 旧ノード表（後方互換の単体テスト用に残すが、生成ページの文面組み立てには使わない）
@@ -384,13 +391,15 @@ def _round_dict_of(r: dict) -> dict:
     return {}
 
 
-def classify_round_flow(r: dict) -> tuple[dict | None, str | None]:
+def classify_round_flow(r: dict, ranks: dict | None = None) -> tuple[dict | None, str | None]:
     """1 ラウンド記録 r を phases.classify_flow で分類し、(結果, スキップ理由) を返す。"""
     rr = _round_dict_of(r)
     reason = P.skip_reason(rr)
     if reason:
         return None, reason
-    res = P.classify_flow(rr, r.get("ranks") if isinstance(r, dict) else None)
+    use_ranks = ranks if ranks is not None else (r.get("ranks") if isinstance(r, dict) else None)
+    side = (r.get("side") if isinstance(r, dict) else None) or ATTACK
+    res = P.classify_flow(rr, use_ranks, side=side)
     if res is None:
         return None, "no_tracks"
     return res, None
@@ -774,10 +783,11 @@ def motion_frames(r: dict, opp: dict | None, model, k: int, walk) -> dict | None
 # ============================================================== フェーズ型（序盤・中盤・終盤）と文面組み立て
 def _observed_action_reaction(members: list[dict], seg: str) -> tuple[str, str] | None:
     """その型のラウンド群から、最も多い「アクション→リアクション」のステップ対を抽出する。"""
+    flow_seg = {"entry": "mid", "postplant": "late"}.get(seg, seg)
     pairs: Counter = Counter()
     for it in members:
         fl = it.get("flow") or {}
-        flow_str = ((fl.get("flow") or {}).get(seg) or "").strip()
+        flow_str = ((fl.get("flow") or {}).get(flow_seg) or "").strip()
         steps = [s.strip() for s in flow_str.split("→") if s.strip()]
         if len(steps) < 2:
             # 区間内が1ステップ以下ならラウンド全体の流れから拾う
@@ -832,84 +842,78 @@ def phase_type_description(seg: str, typ: str, members: list[dict] | None = None
                            side: str = ATTACK) -> str:
     """フェーズの型と流れ要約から「アクション→リアクション」の形で説明文を組み立てる。
 
+    防衛ブロックは防衛視点（防衛を主語）、攻撃ブロックは攻撃視点（攻撃を主語）で書く。
     旧ノード表（glossary_word 系）は使わない。
     """
     members = members or []
     t = str(typ or "").strip()
     if side == DEFENSE:
         if seg == "early":
-            if t.endswith("ラッシュ"):
-                z = t.split()[0]
-                base = (f"アクション：相手が開幕{int(P.RUSH_SECONDS)}秒以内に {z} サイトへラッシュしてくる。"
-                        f"リアクション：防衛は {z} サイト内でスキルを使って足止めし、逆サイトからの寄せで取り返す")
-            elif t.endswith("デフォルト"):
-                z = t.split()[0]
-                base = (f"アクション：相手が {z} 側を中心にデフォルト展開してエリアを探る。"
-                        f"リアクション：防衛は前目のプッシュやローテートで情報を集め、手薄な側へ人数を寄せて備える")
-            elif t == "詰め待ち":
-                base = ("アクション：相手が開幕に踏み込まず後方で詰め待ちする。"
-                        "リアクション：防衛は無理に前へ出すぎず、ラインを保って中盤の仕掛けに備える")
+            if t.endswith("寄せ"):
+                z = t[:-2]
+                base = (f"アクション：序盤、防衛は {z} 側に人数を厚く置いて主導権を握る。"
+                        f"リアクション：厚い側へ来ればスキルとクロスで受け止め、逆側へ来たら素早く寄せる")
+            elif t == "自陣待機":
+                base = ("アクション：序盤、防衛は無理に前へ出ず自陣寄りのポジションで構える。"
+                        "リアクション：相手の位置が見えてから寄せる方向を判断する")
             else:
-                base = (f"アクション：序盤に相手が {t} の形で展開してくる。"
-                        f"リアクション：防衛は初期配置から相手の位置を把握し、中盤のローテート判断につなげる")
+                base = (f"アクション：序盤、防衛は {t} の配置でエリアを押さえる。"
+                        f"リアクション：初期情報から中盤のローテート判断につなげる")
         elif seg == "mid":
-            if t == "フリーズ":
-                base = (f"アクション：ピック後に相手が{int(P.FREEZE_SECONDS)}秒以上動きを止めて間を置く。"
-                        f"リアクション：防衛は相手の本命サイドを見極め、ローテートと再配置で受けの形を整える")
-            elif t == "リグループセット":
-                base = ("アクション：散っていた相手が1つのゾーンに3人以上で集まり直してセットに入る。"
-                        "リアクション：防衛は寄りを間に合わせ、サイト入口のスキルとクロスファイアで進入を止める")
-            elif t == "フェイクセット":
-                base = ("アクション：相手が片側のゾーンを取ってフェイクの圧をかける。"
-                        "リアクション：防衛は全員で寄り切らず逆サイトの守りを残し、本命のエントリーに対応する")
+            if t == "上がり":
+                base = ("アクション：中盤、防衛は前目へプッシュしてエリアと情報を奪う。"
+                        "リアクション：相手の動きを絞って逆サイトの守りを厚くし、エントリーに備える")
+            elif t == "ローテート":
+                base = ("アクション：中盤、防衛は取った情報に合わせて重心を移動（ローテート）させる。"
+                        "リアクション：手薄になったサイトへ素早くカバーを寄せ、入口で迎え撃つ")
+            elif t == "取り返し":
+                base = ("アクション：中盤、防衛は一度渡したエリアへ人数をかけて取り返しに動く。"
+                        "リアクション：エリアを奪い返して相手の攻め筋を狭め、エントリーを遅らせる")
             else:
-                base = (f"アクション：中盤に相手が {t} を仕掛けてくる。"
-                        f"リアクション：防衛は情報に合わせてローテートし、強い形で迎え撃つ")
+                base = (f"アクション：中盤、防衛は {t} の動きで主導権を保つ。"
+                        f"リアクション：相手の仕掛けに合わせて強い形で迎え撃つ")
         else:
             kind, rot_n, ret_n = _defense_late_kind(members)
             detail = f"{kind}：寄せ {rot_n} 件・リテイク {ret_n} 件"
-            if t == "プッシュ":
-                base = (f"アクション：プラント後に相手がサイト奥へプッシュしてくる（{detail}）。"
-                        f"リアクション：防衛は奥の相手を人数かけて処理してからサイトへ{kind}で入る")
-            elif t == "サイト耐え":
-                base = (f"アクション：プラント後に相手がサイト内に2人以上で残って耐える（{detail}）。"
-                        f"リアクション：防衛は味方の合流を待ち、複数方向から{kind}でサイト内を崩す")
-            elif t == "下がる":
-                base = (f"アクション：プラント後に相手がメインや後方へ引いて解除待ちをする（{detail}）。"
-                        f"リアクション：防衛は素早くサイトへ{kind}してエリアを確保し、スモークやカバーで解除を通す")
+            if kind == "リテイク":
+                base = (f"アクション：スパイク設置後、防衛は味方の合流を待ってからサイトへリテイクに入る（{detail}）。"
+                        f"リアクション：スキルと複数方向からの進入でサイト内を制圧し、解除を通す")
+            elif kind == "寄せ":
+                base = (f"アクション：スパイク設置後、防衛は他サイトから素早く人数を寄せて包囲を作る（{detail}）。"
+                        f"リアクション：設置後の配置を崩して解除の時間を確保する")
             else:
-                base = (f"アクション：終盤に相手が {t} の形で守る（{detail}）。"
-                        f"リアクション：防衛はタイミングを合わせて{kind}を仕掛ける")
+                base = (f"アクション：スパイク設置後、防衛は状況に応じて寄せとリテイクを切り替える（{detail}）。"
+                        f"リアクション：人数とスキルのタイミングを合わせて解除を狙う")
     elif seg == "early":
-        if t.endswith("ラッシュ"):
-            z = t.split()[0]
-            base = (f"アクション：開幕{int(P.RUSH_SECONDS)}秒以内に攻撃が {z} サイトへ2人以上で一気にエントリーする。"
-                    f"リアクション：防衛はサイト内で耐えるか、逆サイトからローテートして取り返しに回る")
+        if t == "ラッシュ":
+            base = (f"アクション：開幕{int(P.RUSH_SECONDS)}秒以内に攻撃がサイトへ2人以上で一気にエントリーする。"
+                    f"リアクション：防衛がサイト内で耐える動きや逆からの寄せが来る前に、人数差で押し切る")
         elif t.endswith("デフォルト"):
-            z = t.split()[0]
-            base = (f"アクション：攻撃が {z} 側を軸に展開してエリアの主導権を探る。"
-                    f"リアクション：防衛の前目プッシュやローテートを見て、手薄な側へテイクやエントリーをつなげる")
+            z = t[:-5]
+            base = (f"アクション：開幕、攻撃は {z} 側を軸に展開してエリアの主導権を探る。"
+                    f"リアクション：防衛の前目プッシュやローテートを見て、手薄な側へエントリーをつなげる")
         elif t == "詰め待ち":
-            base = ("アクション：攻撃が開幕にゾーンへ踏み込まず後方で待機する。"
-                    "リアクション：防衛が前へプッシュしてきた動きに合わせて撃ち合い、ピックから主導権を取る")
+            base = ("アクション：開幕、攻撃は約10秒ほど後方で動かず詰め待ちする。"
+                    "リアクション：防衛が前へ情報を探りに来たタイミングを捉え、ピックから主導権を取る")
         else:
-            base = (f"アクション：序盤に {t} の形で展開する。"
-                    f"リアクション：相手の初期配置とプッシュの有無を見て中盤の攻め先を決める")
-    elif seg == "mid":
-        if t == "フリーズ":
-            base = (f"アクション：ピック（キル）が出た直後に{int(P.FREEZE_SECONDS)}秒以上動きを止めて間を置く。"
-                    f"リアクション：相手のローテートや情報取りを誘い、配置の隙を見て次の攻め先を選ぶ")
-        elif t == "リグループセット":
-            base = ("アクション：複数ゾーンへ散って情報を取った攻撃が1つのゾーンに3人以上で集まり直す。"
-                    "リアクション：防衛の寄りがそろう前に、集結した人数でサイトへエントリーする")
-        elif t == "フェイクセット":
-            base = ("アクション：片側のゾーンで支配（テイク）を作って圧をかける。"
-                    "リアクション：防衛がそのゾーンへローテートして応じた隙に、反対側のサイトへエントリーする")
+            base = (f"アクション：開幕に {t} の形で展開する。"
+                    f"リアクション：相手の初期配置とプッシュの有無を見てエントリー先を決める")
+    elif seg == "entry":
+        z = t[0] if t and t[0] in P.SITES else ""
+        if t.endswith("スプリット"):
+            base = (f"アクション：攻撃は複数の進入路から同時に {z} サイトへ挟み込む（スプリット）。"
+                    f"リアクション：防衛の射線とカバーを分断し、サイト内の守りを崩して設置へつなげる")
+        elif t.endswith("セット"):
+            base = (f"アクション：攻撃は {z} サイトの1つの進入路に人数をそろえてセットで進入する。"
+                    f"リアクション：スキルを合わせてサイト内を一気に確保し、設置まで持ち込む")
         else:
-            base = (f"アクション：中盤に {t} を仕掛ける。"
-                    f"リアクション：相手のローテートに合わせてエントリーのタイミングを決める")
-    else:
-        if t == "プッシュ":
+            base = (f"アクション：エントリーで {t} を仕掛ける。"
+                    f"リアクション：防衛の配置に合わせてサイト内を制圧する")
+    elif seg in ("postplant", "late"):
+        if seg == "postplant":
+            base = (f"アクション：スパイク設置後、攻撃は「{t}」の配置で防衛の解除を待つ。"
+                    f"リアクション：防衛のリテイク進入をクロスファイアと時間稼ぎで迎え撃つ")
+        elif t == "プッシュ":
             base = ("アクション：プラント直後に攻撃がサイトより奥（相手スポーン側）へ2人以上で前進する。"
                     "リアクション：リテイクに集まる防衛を深い位置で迎え撃ち、解除の時間を奪う")
         elif t == "サイト耐え":
@@ -921,6 +925,9 @@ def phase_type_description(seg: str, typ: str, members: list[dict] | None = None
         else:
             base = (f"アクション：終盤に {t} の配置を取る。"
                     f"リアクション：防衛のリテイク進入に合わせて撃ち合う")
+    else:
+        base = (f"アクション：中盤に攻撃は {t} の形で展開する。"
+                f"リアクション：防衛の配置とローテートを見てサイトへのエントリーにつなげる")
 
     pair = _observed_action_reaction(members, seg)
     if pair:
@@ -973,11 +980,60 @@ def _pick_phase_reps(members: list[dict], seg: str, used_leads: set[str], max_re
     return reps
 
 
-def build_phase_sections(items: list[dict], side: str | None = None,
-                         max_types: int | None = 3) -> dict:
-    """構成のラウンド群を `phases.classify_flow` で集計し、序盤・中盤・終盤の3部データを返す。
+def _postplant_type_name(site: str, med_positions: dict, used: set[str]) -> str:
+    """ポストプラントのコールアウト構成から型名を付ける。"""
+    counts = Counter(area for _u, _v, area in med_positions.values() if area and area != "?")
+    if counts:
+        parts = [f"{a}{n}" if n > 1 else str(a) for a, n in counts.most_common(3)]
+        base = f"{site}：{'・'.join(parts)}"
+    else:
+        base = f"{site}：配置"
+    if base not in used:
+        used.add(base)
+        return base
+    i = 2
+    while f"{base}（{i}）" in used:
+        i += 1
+    cand = f"{base}（{i}）"
+    used.add(cand)
+    return cand
 
-    `side` を指定した場合はそのサイド（ATTACK/DEFENSE）のラウンドだけで集計し、各区間上位 `max_types` 型に絞る。
+
+def _postplant_clusters(classified: list[dict], k: int = 0) -> list[tuple[str, list[dict], str]]:
+    """ポストプラント配置をサイト別に PATTERN_DIST でクラスタリングし、サイトごとに上位2種まで返す。"""
+    by_site: dict[str, list[tuple[dict, dict, dict]]] = defaultdict(list)
+    for it in classified:
+        pp = ((it.get("flow") or {}).get("phases") or {}).get("postplant")
+        if not pp or not pp.get("site") or not pp.get("positions"):
+            continue
+        site = pp["site"]
+        pos = pp["positions"]
+        pt = {ag: MF.to_view(u, v, k) for ag, (u, v, _a) in pos.items()}
+        by_site[site].append((it, pos, pt))
+
+    out: list[tuple[str, list[dict], str]] = []
+    used_names: set[str] = set()
+    for site in sorted(by_site):
+        rows = by_site[site]
+        points = [pt for _it, _pos, pt in rows]
+        clusters, _singles = leader_clusters(points, th=PATTERN_DIST, min_n=1)
+        for grp in clusters[:2]:
+            members = [rows[i][0] for i in grp]
+            win_idx = [i for i in grp if rows[i][0]["r"].get("win")]
+            cand = win_idx or grp
+            med = min(cand, key=lambda a: sum(round_distance(points[a], points[b]) for b in grp))
+            typ_name = _postplant_type_name(site, rows[med][1], used_names)
+            out.append((typ_name, members, site))
+    out.sort(key=lambda x: (-len(x[1]), x[0]))
+    return out
+
+
+def build_phase_sections(items: list[dict], side: str | None = None,
+                         max_types: int | None = 3, k: int = 0) -> dict:
+    """構成のラウンド群を `phases.classify_flow` で集計し、サイド別の3部データを返す。
+
+    - 攻撃: 開幕（5種）／エントリー（サイト別セット・スプリット）／ポストプラント（サイト別上位2種）
+    - 防衛: 序盤（防衛配置）／中盤（防衛の強い動き）／終盤（寄せ方・リテイク）
     """
     pool = [it for it in items if side is None or (it.get("r") or {}).get("side") == side]
     total = len(pool)
@@ -988,40 +1044,68 @@ def build_phase_sections(items: list[dict], side: str | None = None,
     raw_sections = []
     all_entries = []
     desc_side = side or ATTACK
-    for seg_key, seg_label in SEGS:
-        by_type: dict[str, list[dict]] = defaultdict(list)
-        for it in classified:
-            typ = ((it["flow"].get("phases") or {}).get(seg_key) or {}).get("type")
-            if typ:
-                by_type[str(typ)].append(it)
-        typed_n = sum(len(v) for v in by_type.values())
-        sorted_types = sorted(by_type.items(), key=lambda kv: (-len(kv[1]), kv[0]))
-        if max_types is not None:
-            sorted_types = sorted_types[:max_types]
+    segs = SIDE_SEGS.get(desc_side, SEGS)
+    for seg_key, seg_label in segs:
         types_out = []
-        for typ, members in sorted_types:
-            n = len(members)
-            w = sum(1 for it in members if it["r"].get("win"))
-            rate = w / n if n else 0.0
-            share = n / cls_n if cls_n else 0.0
-            late_kind = _defense_late_kind(members)[0] if (desc_side == DEFENSE and seg_key == "late") else None
-            entry = {
-                "side": side,
-                "seg": seg_key,
-                "seg_label": seg_label,
-                "type": typ,
-                "n": n,
-                "w": w,
-                "rate": rate,
-                "share": share,
-                "defense_late_kind": late_kind,
-                "description": phase_type_description(seg_key, typ, members, side=desc_side),
-                "lead": None,
-                "reps": [],
-                "members": members,
-            }
-            types_out.append(entry)
-            all_entries.append(entry)
+        if desc_side == ATTACK and seg_key == "postplant":
+            pp_groups = _postplant_clusters(classified, k=k)
+            typed_n = sum(len(m) for _t, m, _s in pp_groups)
+            for typ, members, site in pp_groups:
+                n = len(members)
+                w = sum(1 for it in members if it["r"].get("win"))
+                rate = w / n if n else 0.0
+                share = n / cls_n if cls_n else 0.0
+                entry = {
+                    "side": side,
+                    "seg": seg_key,
+                    "seg_label": seg_label,
+                    "site": site,
+                    "type": typ,
+                    "n": n,
+                    "w": w,
+                    "rate": rate,
+                    "share": share,
+                    "defense_late_kind": None,
+                    "description": phase_type_description(seg_key, typ, members, side=desc_side),
+                    "lead": None,
+                    "reps": [],
+                    "members": members,
+                }
+                types_out.append(entry)
+                all_entries.append(entry)
+        else:
+            by_type: dict[str, list[dict]] = defaultdict(list)
+            for it in classified:
+                typ = ((it["flow"].get("phases") or {}).get(seg_key) or {}).get("type")
+                if typ:
+                    by_type[str(typ)].append(it)
+            typed_n = sum(len(v) for v in by_type.values())
+            sorted_types = sorted(by_type.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+            if max_types is not None:
+                sorted_types = sorted_types[:max_types]
+            for typ, members in sorted_types:
+                n = len(members)
+                w = sum(1 for it in members if it["r"].get("win"))
+                rate = w / n if n else 0.0
+                share = n / cls_n if cls_n else 0.0
+                late_kind = _defense_late_kind(members)[0] if (desc_side == DEFENSE and seg_key == "late") else None
+                entry = {
+                    "side": side,
+                    "seg": seg_key,
+                    "seg_label": seg_label,
+                    "type": typ,
+                    "n": n,
+                    "w": w,
+                    "rate": rate,
+                    "share": share,
+                    "defense_late_kind": late_kind,
+                    "description": phase_type_description(seg_key, typ, members, side=desc_side),
+                    "lead": None,
+                    "reps": [],
+                    "members": members,
+                }
+                types_out.append(entry)
+                all_entries.append(entry)
         raw_sections.append({
             "side": side,
             "seg": seg_key,
@@ -1087,19 +1171,55 @@ def _prepare(reports: list[dict], map_name: str, cfg: dict, log=print) -> dict:
     model = GM.MapModel(fig.regions, fig.adj, fig.k, kbo.map(map_name), fig.spawns, allr, roles,
                         cent=None if fig.fillable else fig.label_xy)
     walk = _walk_from_view(fig.view) if fig.fillable else None
-    return {"allr": allr, "fig": fig, "model": model, "callouts": callouts, "walk": walk,
+    ranks = TC.area_ranks(meta) if callouts else {}
+    return {"allr": allr, "fig": fig, "model": model, "callouts": callouts, "ranks": ranks, "walk": walk,
             "kb": kbo, "k": fig.k, "vitals": model.vitals(), "bg": fig._uri, "cfg": cfg, "log": log}
 
 
-def _items_for(rounds: list[dict], allr: list[dict], model) -> list[dict]:
+def _apply_filter_to_record(r: dict, rr: dict, ranks: dict | None) -> dict:
+    """配置抽出（setup_at_140 等）にも暫定バリアフィルタを効かせるため、r['tracks'] から除外済み初期サンプルを除く。"""
+    if not ranks or not rr or not isinstance(r.get("tracks"), dict):
+        return r
+    sides = P._team_sides(rr)
+    norm = P._norm_tracks(P.tracks_of(rr), sides=sides, ranks=ranks)
+    team_no = r.get("no") if r.get("no") in (1, 2) else None
+    if team_no is None or team_no not in norm:
+        return r
+    kept_times = {
+        ag: {P._snap(P._f(p[0])) for p in pts if isinstance(p, (list, tuple)) and p}
+        for ag, pts in norm[team_no].items()
+    }
+    new_tracks = {}
+    for ag, pts in r["tracks"].items():
+        if not isinstance(pts, list):
+            new_tracks[ag] = pts
+            continue
+        allowed = kept_times.get(ag)
+        if allowed is None:
+            new_tracks[ag] = [p for p in pts if P._f(p[0]) > P.RUSH_SECONDS + 1e-9]
+        else:
+            new_tracks[ag] = [
+                p for p in pts
+                if P._f(p[0]) > P.RUSH_SECONDS + 1e-9 or P._snap(P._f(p[0])) in allowed
+            ]
+    out = dict(r)
+    out["tracks"] = new_tracks
+    return out
+
+
+def _items_for(rounds: list[dict], allr: list[dict], model, ranks: dict | None = None) -> list[dict]:
     idx = {(r["match_id"], r["order"], r["n"], r["no"]): r for r in allr}
     items = []
     for r in rounds:
         opp = idx.get((r["match_id"], r["order"], r["n"], 3 - r["no"])) or {}
-        su = GM.setup_at_140(r, model)
-        cls = GM.classify(r, opp, model) if su is not None else {}
-        flow, skip = classify_round_flow(r)
-        items.append({"r": r, "opp": opp, "su": su, "cls": cls, "flow": flow, "flow_skip": skip})
+        rr = _round_dict_of(r)
+        r_filt = _apply_filter_to_record(r, rr, ranks)
+        su = GM.setup_at_140(r_filt, model)
+        cls = GM.classify(r_filt, opp, model) if su is not None else {}
+        flow, skip = classify_round_flow(r_filt, ranks=ranks)
+        fstats = (flow or {}).get("filter_stats") or {"outside_home": 0, "jump": 0, "dropped": 0}
+        items.append({"r": r_filt, "opp": opp, "su": su, "cls": cls, "flow": flow,
+                      "flow_skip": skip, "filter_stats": fstats})
     return items
 
 
@@ -1109,9 +1229,12 @@ def comp_stats(rounds: list[dict], items: list[dict]) -> dict:
     full5 = sum(1 for it in items if it["su"] is not None and len(it["su"]) == 5)
     flow_classified = sum(1 for it in items if it.get("flow") is not None)
     flow_skipped = len(rounds) - flow_classified
+    f_out = sum(int((it.get("filter_stats") or {}).get("outside_home", 0)) for it in items)
+    f_jmp = sum(int((it.get("filter_stats") or {}).get("jump", 0)) for it in items)
     return {"total": len(rounds), "used": used_def + used_atk, "used_def": used_def, "used_atk": used_atk,
             "excluded": len(rounds) - used_def - used_atk, "full5": full5,
             "flow_classified": flow_classified, "flow_skipped": flow_skipped,
+            "barrier_filter": {"outside_home": f_out, "jump": f_jmp, "dropped": f_out + f_jmp},
             "dates": sorted({str(r.get("date")) for r in rounds if r.get("date")}),
             "teams": sorted({str(r.get("tag") or r.get("team")) for r in rounds}),
             "wins": sum(1 for r in rounds if r.get("win"))}
@@ -1195,7 +1318,10 @@ def _phase_type_counts(items: list[dict]) -> tuple[int, dict[tuple[str, str, str
     cls_items = [it for it in items if it.get("flow") is not None]
     by_key: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
     for it in cls_items:
-        for seg_key, seg_label in SEGS:
+        side = (it.get("r") or {}).get("side") or ATTACK
+        for seg_key, seg_label in SIDE_SEGS.get(side, SEGS):
+            if seg_key == "postplant":
+                continue
             typ = ((it["flow"].get("phases") or {}).get(seg_key) or {}).get("type")
             if typ:
                 by_key[(seg_key, seg_label, str(typ))].append(it)
@@ -1499,9 +1625,9 @@ def _role_slide(ctx, comp, items) -> str:
 
 SIDE_SECTION_TITLES = {
     ATTACK: {
-        "early": "序盤の型",
-        "mid": "エントリーの仕方（中盤）",
-        "late": "終盤：ポストプラントの形",
+        "early": "開幕の型",
+        "entry": "エントリーの型",
+        "postplant": "ポストプラントの形",
     },
     DEFENSE: {
         "early": "序盤の型",
@@ -1591,6 +1717,7 @@ def _phase_type_slide(ctx: dict, sec: dict, t_info: dict, idx: int,
         "seg_label": seg_label,
         "section_title": sec_title,
         "title": title,
+        "site": t_info.get("site"),
         "defense_late_kind": late_kind,
         "type": typ,
         "n": n,
@@ -1630,6 +1757,7 @@ def _phase_empty_slide(ctx: dict, sec: dict, total_rounds: int, classified_round
 def _appendix_slide(ctx, stat, singles, unknown, def_pats, atk_pats) -> str:
     cls_n = stat.get("flow_classified", 0)
     sk_n = stat.get("flow_skipped", stat["total"] - cls_n)
+    bf = stat.get("barrier_filter") or {}
     tables = []
     tables.append('<table><thead><tr><th>数合わせ</th><th>値</th></tr></thead><tbody>'
                   f'<tr><td>総数（環境内ラウンド）</td><td>{stat["total"]}</td></tr>'
@@ -1638,7 +1766,8 @@ def _appendix_slide(ctx, stat, singles, unknown, def_pats, atk_pats) -> str:
                   f'<tr><td>除外（1:40 が取れない）</td><td>{stat["excluded"]}</td></tr>'
                   f'<tr><td>ピストル</td><td>{stat.get("pistol", 0)}</td></tr>'
                   f'<tr><td>フェーズ分類対象（tracks あり）</td><td>{cls_n}</td></tr>'
-                  f'<tr><td>フェーズ分類対象外（tracks 無し）</td><td>{sk_n}</td></tr></tbody></table>')
+                  f'<tr><td>フェーズ分類対象外（tracks 無し）</td><td>{sk_n}</td></tr>'
+                  f'<tr><td>暫定バリアフィルタ除外サンプル</td><td>{bf.get("dropped", 0)}（自陣外 {bf.get("outside_home", 0)}・ジャンプ {bf.get("jump", 0)}）</td></tr></tbody></table>')
     tables.append('<table><thead><tr><th>設定値</th><th>値</th><th>意味</th></tr></thead><tbody>'
                   + "".join(f'<tr><td>{_e(k)}</td><td>{_e(v)}</td><td>{_e(d)}</td></tr>'
                             for k, v, d in SETTINGS) + "</tbody></table>")
@@ -1682,7 +1811,7 @@ def build_page(ctx, comp: str, rounds: list[dict], items: list[dict], stat: dict
     side_blocks_meta = {}
     hands_compat_meta = []
     for side_key in (ATTACK, DEFENSE):
-        phase_data = build_phase_sections(items, side=side_key, max_types=3)
+        phase_data = build_phase_sections(items, side=side_key, max_types=3, k=ctx["k"])
         block_sections_meta = []
         for sec in phase_data["sections"]:
             sec_types_meta = []
@@ -1755,6 +1884,7 @@ def build_page(ctx, comp: str, rounds: list[dict], items: list[dict], stat: dict
         "full5": stat["full5"],
         "flow_classified": stat["flow_classified"],
         "flow_skipped": stat["flow_skipped"],
+        "barrier_filter": stat.get("barrier_filter") or {"outside_home": 0, "jump": 0, "dropped": 0},
         "dates": stat["dates"],
         "teams": stat["teams"],
         "patterns": [{"side": p["side"], "name": p["name"], "n": p["n"], "w": p["w"]}
@@ -1888,10 +2018,12 @@ def generate(reports: list[dict], map_name: str, out, cfg: dict, log=print) -> P
     old_by, _ = group_by_comp(old_rounds)
     base_rounds = env_rounds
 
-    env_stats = {k: comp_stats(v, _items_for(v, allr, ctx0["model"])) for k, v in env_by.items()}
+    ranks = ctx0.get("ranks")
+    env_stats = {k: comp_stats(v, _items_for(v, allr, ctx0["model"], ranks=ranks)) for k, v in env_by.items()}
     comp_rows = sorted(env_stats.items(), key=lambda kv: -kv[1]["total"])
 
-    base_items = _items_for(base_rounds, allr, ctx0["model"])
+    base_items = _items_for(base_rounds, allr, ctx0["model"], ranks=ranks)
+    base_stat = comp_stats(base_rounds, base_items)
     ctx = {**ctx0, "map": map_name, "out": out, "base_rounds": base_rounds, "base_items": base_items,
             "unknown": unknown, "css": _css()}
 
@@ -1899,7 +2031,7 @@ def generate(reports: list[dict], map_name: str, out, cfg: dict, log=print) -> P
     try:
         for comp in sorted(env_by, key=lambda k: -len(env_by[k])):
             rounds = env_by[comp]
-            items = _items_for(rounds, allr, ctx0["model"])
+            items = _items_for(rounds, allr, ctx0["model"], ranks=ranks)
             stat = comp_stats(rounds, items)
             stat["pistol"] = sum(1 for r in rounds if r.get("pistol"))
             ok, reason = gate_ok(stat)
@@ -1927,6 +2059,7 @@ def generate(reports: list[dict], map_name: str, out, cfg: dict, log=print) -> P
 
     manifest = {"map": map_name, "env_start": ENV_START, "env_label": ENV_LABEL,
                 "settings": [{"name": k, "value": v, "note": d} for k, v, d in SETTINGS],
+                "barrier_filter": base_stat.get("barrier_filter") or {"outside_home": 0, "jump": 0, "dropped": 0},
                 "unknown_rounds": unknown, "pages": page_meta, "skipped": skipped, "old_env": old_meta}
     (out / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     log(f"プレイブック v5: {out / 'index.html'}")

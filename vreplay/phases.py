@@ -16,6 +16,7 @@ tracks を持たないラウンドは対象外とし、`classify_flow` は None 
 """
 from __future__ import annotations
 
+import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 
@@ -33,6 +34,10 @@ REGROUP_MIN = 3               # リグループ（1 ゾーンに集まり直し�
 RUSH_SECONDS = 15.0           # 開幕からこの秒以内にサイトへエントリーしたらラッシュ
 FREEZE_SECONDS = 10.0         # ピック後に動きが無いままこの秒数でフリーズ区間
 ROTATE_REVERT_SECONDS = 10.0  # ローテート後にこの秒以内に元のゾーンへ戻ったら取り消す
+EARLY_JUMP_PER_5S = 0.40      # 開幕ウィンドウ内で 5 秒あたりこれ以上の移動は外れ値として落とす
+HOME_ATTACK_RATIO_MAX = 0.51  # 攻撃側の自陣側コールアウト判定（da / (da + dd) の上限）
+HOME_DEFENSE_RATIO_MIN = 0.49 # 防衛側の自陣側コールアウト判定（da / (da + dd) の下限）
+POSTPLANT_WAIT_SECONDS = 5.0  # プラント後この秒以降の最初のサンプルでポストプラント配置を見る
 
 # 流れ要約に出すイベント（ラッシュ・フリーズは型として出すので、要約には入れない）
 FLOW_KINDS = ("プッシュ", "テイク", "取り返し", "ローテート", "エントリー", "ピック")
@@ -120,14 +125,105 @@ def tracks_of(round_dict: dict) -> dict:
     return round_dict.get("tracks") or {}
 
 
-def _norm_tracks(tracks: dict) -> dict:
+def home_callouts(ranks: dict | None) -> dict[str, set[str]]:
+    """マップの area_ranks から、サイド別の自陣側コールアウト集合を作る。"""
+    if not ranks:
+        return {}
+    atk: set[str] = set()
+    dfn: set[str] = set()
+    for area, pair in ranks.items():
+        if not pair or len(pair) < 2:
+            continue
+        da, dd = pair[0], pair[1]
+        if da is None or dd is None or da + dd <= 0:
+            continue
+        ratio = float(da) / float(da + dd)
+        if ratio <= HOME_ATTACK_RATIO_MAX and not _is_site_area(area):
+            atk.add(area)
+        if ratio >= HOME_DEFENSE_RATIO_MIN:
+            dfn.add(area)
+    if not atk and not dfn:
+        return {}
+    return {ATTACK: atk, DEFENSE: dfn}
+
+
+def _is_home_sample(p, side: str, homes: dict[str, set[str]]) -> bool:
+    """サンプル p が所属サイドの自陣側コールアウト集合に含まれるか。"""
+    zone = _zone_of_sample(p)
+    callout = _callout_of_sample(p) or ""
+    low_c = callout.lower()
+    if side == ATTACK:
+        if zone == "攻撃側" or ("attacker" in low_c and "spawn" in low_c):
+            return True
+        if zone == "防衛側" or ("defender" in low_c and "spawn" in low_c):
+            return False
+    elif side == DEFENSE:
+        if zone == "防衛側" or ("defender" in low_c and "spawn" in low_c):
+            return True
+        if zone == "攻撃側" or ("attacker" in low_c and "spawn" in low_c):
+            return False
+    area = _area_of(zone, p)
+    return area in homes.get(side, set())
+
+
+def _filter_agent_pts(pts: list, side: str | None, homes: dict[str, set[str]],
+                      stats: dict | None = None) -> list:
+    """最初期サンプルの自陣外誤検出と、開幕ウィンドウ内のジャンプ外れ値を落とす。"""
+    ordered = sorted((p for p in pts if isinstance(p, (list, tuple)) and p), key=lambda p: _f(p[0]))
+    if not ordered or not homes:
+        return list(ordered)
+    if stats is not None:
+        stats.setdefault("outside_home", 0)
+        stats.setdefault("jump", 0)
+        stats.setdefault("dropped", 0)
+
+    # 1. 最初のサンプルが開幕ウィンドウ内で自陣外なら誤検出として落とし、次の有効サンプルを探す
+    start_idx = 0
+    if side in (ATTACK, DEFENSE):
+        while start_idx < len(ordered):
+            p = ordered[start_idx]
+            if _f(p[0]) <= RUSH_SECONDS + 1e-9 and not _is_home_sample(p, side, homes):
+                if stats is not None:
+                    stats["outside_home"] += 1
+                    stats["dropped"] += 1
+                start_idx += 1
+            else:
+                break
+    rem = ordered[start_idx:]
+    if not rem:
+        return []
+
+    # 2. 連続性チェック（開幕ウィンドウ内で 5 秒間隔にあり得ない距離のジャンプを落とす）
+    kept = [rem[0]]
+    prev = rem[0]
+    for cur in rem[1:]:
+        e_cur = _f(cur[0])
+        if e_cur <= RUSH_SECONDS + 1e-9 and len(cur) >= 3 and len(prev) >= 3:
+            x0, y0 = _f(prev[1]), _f(prev[2])
+            x1, y1 = _f(cur[1]), _f(cur[2])
+            dt = e_cur - _f(prev[0])
+            if dt > 0 and (x0 != 0.0 or y0 != 0.0) and (x1 != 0.0 or y1 != 0.0):
+                dist = math.hypot(x1 - x0, y1 - y0)
+                limit = EARLY_JUMP_PER_5S * max(1.0, dt / SAMPLE_SECONDS)
+                if dist > limit:
+                    if stats is not None:
+                        stats["jump"] += 1
+                        stats["dropped"] += 1
+                    continue
+        kept.append(cur)
+        prev = cur
+    return kept
+
+
+def _norm_tracks(tracks: dict, sides: dict[int, str] | None = None,
+                 ranks: dict | None = None, filter_stats: dict | None = None) -> dict:
     """tracks を {チーム番号: {エージェント: [サンプル]}} にそろえる。
 
-    実データは `{チーム: {エージェント: [...]}}`。エージェント直下にサンプルが並ぶ形も受ける
-    （そのときはチーム不明の 0 に入れる）。
+    ranks が渡された場合は暫定バリアフィルタ（自陣外・連続性チェック）を適用する。
     """
     if not isinstance(tracks, dict) or not tracks:
         return {}
+    homes = home_callouts(ranks)
     nested = any(isinstance(v, dict) for v in tracks.values()) and \
         all(isinstance(v, dict) for v in tracks.values())
     out: dict[int, dict] = defaultdict(dict)
@@ -136,13 +232,18 @@ def _norm_tracks(tracks: dict) -> dict:
             team = _team_no(key)
             if team is None:
                 continue
+            side = sides.get(team) if sides else None
             for agent, pts in (agents or {}).items():
                 if pts:
-                    out[team][agent] = list(pts)
+                    filtered = _filter_agent_pts(list(pts), side, homes, filter_stats)
+                    if filtered:
+                        out[team][agent] = filtered
     else:
         for agent, pts in tracks.items():
             if pts:
-                out[0][agent] = list(pts)
+                filtered = _filter_agent_pts(list(pts), None, homes, filter_stats)
+                if filtered:
+                    out[0][agent] = filtered
     return dict(out)
 
 
@@ -434,13 +535,13 @@ def round_events(round_dict: dict, ranks: dict | None = None) -> list[Event]:
     """ラウンドのイベント列（時刻・種別・ゾーン・側）。tracks が無ければ空リスト。
 
     ranks: エリア名 → （攻撃スポーンからの距離, 防衛スポーンからの距離）。あれば
-    プッシュ（相手側への前進・サイトより奥へ）を拾う（`tactics.area_ranks` で作れる）。
+    プッシュ（相手側への前進・サイトより奥へ）と暫定バリアフィルタに使う。
     """
-    norm = _norm_tracks(tracks_of(round_dict))
+    sides = _team_sides(round_dict)
+    norm = _norm_tracks(tracks_of(round_dict), sides=sides, ranks=ranks)
     if not norm:
         return []
     frames = _frames(norm)
-    sides = _team_sides(round_dict)
     atk = _attack_team(sides)
     ev: list[Event] = []
     ev += _dominance_events(frames, sides)
@@ -454,13 +555,14 @@ def round_events(round_dict: dict, ranks: dict | None = None) -> list[Event]:
 
 
 # ---------------------------------------------------------------- 区間
-def segment_phases(events: list[Event], round_dict: dict) -> dict:
+def segment_phases(events: list[Event], round_dict: dict, ranks: dict | None = None) -> dict:
     """序盤・中盤・終盤の区間（開始からの秒）。
 
     序盤: 開始〜最初のピックか最初の支配交代の早い方。中盤: 序盤の終わり〜プラント。
     終盤: プラント〜終了。プラントが無いラウンドは中盤が終了までで、終盤は空。
     """
-    frames = _frames(_norm_tracks(tracks_of(round_dict)))
+    sides = _team_sides(round_dict)
+    frames = _frames(_norm_tracks(tracks_of(round_dict), sides=sides, ranks=ranks))
     dur = _duration(round_dict, frames)
     picks = [e.t for e in events if e.kind == "ピック"]
     doms = [e.t for e in events if e.kind in ("テイク", "取り返し")]
@@ -480,6 +582,14 @@ def segment_phases(events: list[Event], round_dict: dict) -> dict:
 
 
 # ---------------------------------------------------------------- 型
+def _defense_team(sides: dict[int, str]) -> int | None:
+    return next((t for t, s in sides.items() if s == DEFENSE), None)
+
+
+def _zone_label(z: str) -> str:
+    return "MID" if z == "Mid" else z
+
+
 def _main_zone(counts: dict) -> str:
     zc = {z: int(n) for z, n in counts.items() if z in ZONES and n}
     if not zc:
@@ -491,7 +601,7 @@ def _early_type(frames: list[dict], events: list[Event], early_end: float, atk: 
     # ラッシュは開幕 15 秒以内の動きで決まる（序盤の終わりより後でも拾う）
     rush = [e for e in events if e.kind == "ラッシュ" and e.t <= RUSH_SECONDS + 1e-9]
     if rush:
-        return {"type": f"{rush[0].zone} ラッシュ", "zone": rush[0].zone, "candidates": []}
+        return {"type": "ラッシュ", "zone": rush[0].zone, "candidates": []}
     if atk is None:
         return {"type": None, "zone": None, "candidates": []}
     used: Counter = Counter()
@@ -504,8 +614,99 @@ def _early_type(frames: list[dict], events: list[Event], early_end: float, atk: 
     used = {z: n for z, n in used.items() if n}
     if used:
         main = _main_zone(used)
-        return {"type": f"{main} デフォルト", "zone": main, "candidates": sorted(used)}
+        return {"type": f"{_zone_label(main)}デフォルト", "zone": main, "candidates": sorted(used)}
     return {"type": "詰め待ち", "zone": None, "candidates": []}
+
+
+def _entry_type(norm: dict, events: list[Event], atk: int | None) -> dict:
+    """攻めエントリーの型: 進入メンバーの直前の進入路エリア種類数（1種=セット, 2種以上=スプリット）。"""
+    entries = [e for e in events if e.kind == "エントリー" and e.zone in SITES]
+    if not entries or atk is None:
+        return {"type": None, "zone": None, "routes": []}
+    ent = entries[0]
+    site = ent.zone
+    ent_t = float(ent.t)
+    ag_map = norm.get(atk) or {}
+    prev_areas: list[str] = []
+    for _ag, pts in ag_map.items():
+        # サイトへの進入ウィンドウ内で最初にサイトへ入った時刻を探す
+        t_in = None
+        for p in pts:
+            e = _f(p[0])
+            if ent_t - SAMPLE_SECONDS - 1e-9 <= e <= ent_t + SAMPLE_SECONDS + 1e-9:
+                z = _zone_of_sample(p)
+                a = _area_of(z, p)
+                if _is_site_area(a) and _area_zone(a) == site:
+                    t_in = e
+                    break
+        if t_in is None:
+            continue
+        # 進入直前の進入路エリア（サイト外・スポーン外の直近サンプル）
+        prev_p = None
+        for p in pts:
+            e = _f(p[0])
+            if e >= t_in - 1e-9:
+                break
+            if e < t_in - 15.0 - 1e-9:
+                continue
+            z = _zone_of_sample(p)
+            c = _callout_of_sample(p)
+            a = _area_of(z, p)
+            if not _is_site_area(a) and not TC.is_spawn(z, c) and z != "?":
+                prev_p = a
+        if prev_p:
+            prev_areas.append(prev_p)
+    routes = sorted(set(prev_areas))
+    typ = f"{site}スプリット" if len(routes) >= 2 else f"{site}セット"
+    return {"type": typ, "zone": site, "routes": routes}
+
+
+def _early_type_defense(frames: list[dict], early_end: float, def_team: int | None) -> dict:
+    """防衛の序盤の型: 防衛チームのゾーン分布から主ゾーンの寄せを判定する。"""
+    if def_team is None:
+        return {"type": None, "zone": None, "candidates": [], "dist": {}}
+    used: Counter = Counter()
+    for f in frames:
+        if f["e"] > early_end + 1e-9:
+            break
+        for z, n in f["zones"].get(def_team, {}).items():
+            if z in ZONES:
+                used[z] += int(n)
+    used_d = {z: int(n) for z, n in used.items() if n}
+    if used_d:
+        main = _main_zone(used_d)
+        return {"type": f"{_zone_label(main)}寄せ", "zone": main, "candidates": sorted(used_d), "dist": used_d}
+    return {"type": "自陣待機", "zone": None, "candidates": [], "dist": {}}
+
+
+def _mid_type_defense(events: list[Event], mid0: float, mid1: float) -> dict:
+    """防衛の中盤の型: 防衛側のイベント（上がり／ローテート／取り返し）から判定する。"""
+    evs = [e for e in events if e.side == DEFENSE and mid0 - 1e-9 <= e.t <= mid1 + 1e-9]
+    got: dict[str, float] = {}
+    kind_map = {"プッシュ": "上がり", "ローテート": "ローテート", "取り返し": "取り返し", "テイク": "取り返し"}
+    for e in evs:
+        lbl = kind_map.get(e.kind)
+        if lbl and lbl not in got:
+            got[lbl] = float(e.t)
+    if not got:
+        return {"type": None, "candidates": []}
+    main = min(got, key=lambda k: got[k])
+    return {"type": main, "candidates": sorted(k for k in got if k != main)}
+
+
+def _late_type_defense(events: list[Event], plant: float | None, round_dict: dict) -> dict:
+    """防衛の終盤の型: プラント後の防衛側イベントからリテイク／寄せを判定する。"""
+    if plant is None:
+        return {"type": None, "zone": None, "detail": None}
+    site = _attack_site(events, round_dict)
+    evs = [e for e in events if e.side == DEFENSE and e.t >= plant - 1e-9]
+    has_retake = any(e.kind in ("取り返し", "テイク") for e in evs)
+    has_rotate = any(e.kind == "ローテート" for e in evs)
+    if has_retake:
+        return {"type": "リテイク", "zone": site, "detail": None}
+    if has_rotate:
+        return {"type": "寄せ", "zone": site, "detail": None}
+    return {"type": "寄せ／リテイク", "zone": site, "detail": None}
 
 
 def _freeze_at(events: list[Event], mid_end: float) -> float | None:
@@ -635,24 +836,81 @@ def _segment_flow(events: list[Event], segs: dict) -> dict:
     return {seg: flow_text(evs) for seg, evs in groups.items()}
 
 
-def classify_flow(round_dict: dict, ranks: dict | None = None) -> dict | None:
+def postplant_sample(round_dict: dict, events: list[Event] | None = None,
+                     ranks: dict | None = None) -> dict | None:
+    """プラント後5秒以降の最初のサンプルで、生存している攻撃側の配置を返す。"""
+    plant = _plant_elapsed(round_dict)
+    if plant is None:
+        return None
+    sides = _team_sides(round_dict)
+    atk = _attack_team(sides)
+    if atk is None:
+        return None
+    norm = _norm_tracks(tracks_of(round_dict), sides=sides, ranks=ranks)
+    ag_map = norm.get(atk) or {}
+    if not ag_map:
+        return None
+    events = events if events is not None else round_events(round_dict, ranks)
+    site = _attack_site(events, round_dict)
+    if site is None:
+        return None
+    target_t = plant + POSTPLANT_WAIT_SECONDS
+    cand_times = sorted(
+        _snap(_f(p[0]))
+        for pts in ag_map.values()
+        for p in pts
+        if isinstance(p, (list, tuple)) and p and _f(p[0]) >= target_t - 1e-9
+    )
+    if not cand_times:
+        return None
+    t0 = cand_times[0]
+    positions: dict[str, tuple[float, float, str]] = {}
+    for ag, pts in sorted(ag_map.items()):
+        near = [p for p in pts if isinstance(p, (list, tuple)) and len(p) >= 3
+                and abs(_snap(_f(p[0])) - t0) <= 1e-9]
+        if not near:
+            continue
+        p = near[0]
+        u, v = _f(p[1]), _f(p[2])
+        z = _zone_of_sample(p)
+        area = _area_of(z, p)
+        positions[str(ag)] = (u, v, area)
+    if not positions:
+        return None
+    return {"site": site, "t": t0, "positions": positions}
+
+
+def classify_flow(round_dict: dict, ranks: dict | None = None, side: str = ATTACK) -> dict | None:
     """1 ラウンドの型（区間ごと）・イベント列・区間ごとの流れ要約。tracks が無ければ None。
 
-    ranks は `tactics.area_ranks(callouts_placed)` の形（あればプッシュ判定に使う）。
+    side: どちらの視点で型付けするか（ATTACK / DEFENSE）。
+    ranks: `tactics.area_ranks(callouts_placed)` の形（あればプッシュ判定・暫定バリアフィルタに使う）。
     `flow` は {"early": 序盤, "mid": 中盤, "late": 終盤} の文字列で、その区間のイベントだけを含む。
     """
-    norm = _norm_tracks(tracks_of(round_dict))
+    sides = _team_sides(round_dict)
+    filter_stats = {"outside_home": 0, "jump": 0, "dropped": 0}
+    norm = _norm_tracks(tracks_of(round_dict), sides=sides, ranks=ranks, filter_stats=filter_stats)
     if not norm:
         return None
     frames = _frames(norm)
     events = round_events(round_dict, ranks)
-    segs = segment_phases(events, round_dict)
-    sides = _team_sides(round_dict)
+    segs = segment_phases(events, round_dict, ranks=ranks)
     atk = _attack_team(sides)
-    phases = {
-        "early": _early_type(frames, events, segs["early"]["end"], atk),
-        "mid": _mid_type(frames, events, segs["mid"]["start"], segs["mid"]["end"], atk),
-        "late": _late_type(frames, segs["plant"], events, round_dict, atk, ranks),
-    }
-    return {"events": [e.to_dict() for e in events], "segments": segs, "phases": phases,
-            "flow": _segment_flow(events, segs)}
+    def_team = _defense_team(sides)
+    view_side = _canon(side) or ATTACK
+    if view_side == DEFENSE:
+        phases = {
+            "early": _early_type_defense(frames, segs["early"]["end"], def_team),
+            "mid": _mid_type_defense(events, segs["mid"]["start"], segs["mid"]["end"]),
+            "late": _late_type_defense(events, segs["plant"], round_dict),
+        }
+    else:
+        phases = {
+            "early": _early_type(frames, events, segs["early"]["end"], atk),
+            "entry": _entry_type(norm, events, atk),
+            "mid": _mid_type(frames, events, segs["mid"]["start"], segs["mid"]["end"], atk),
+            "late": _late_type(frames, segs["plant"], events, round_dict, atk, ranks),
+            "postplant": postplant_sample(round_dict, events=events, ranks=ranks),
+        }
+    return {"side": view_side, "events": [e.to_dict() for e in events], "segments": segs, "phases": phases,
+            "flow": _segment_flow(events, segs), "filter_stats": filter_stats}
