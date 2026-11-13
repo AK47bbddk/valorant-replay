@@ -1,14 +1,14 @@
-"""プレイブック v5：マップ × 5人構成のページ。図（マップ図・動く図・VODカード）を主役にする。
+"""プレイブック v5：マップ × 5人構成のページ。図（3枚TactiValボード・実プレイGIF・VODカード）を主役にする。
 
 v4（`playbook_v4.py`）はチーム単位で集計を文章で並べていた。v5 は単位を「マップ × 5人構成」に変え、
-構成ごとに 1 ページを作る。判定は `gamemodel`、図は `mapfig`、動く図は `deck` の部品を再利用する。
-仕様の正本は `docs/PLAYBOOK_v5.md`。
-
-設定値（モジュール冒頭の定数）は docs/PLAYBOOK_v5.md と各ページ付録にも出る。
+構成ごとに 1 ページを作る。段階Bでは、構成ページを「なぜこの構成か（基本配置・役割表は現行維持）」＋
+「序盤」「中盤」「終盤」の3部構成とし、各区間の型（`phases.classify_flow`）を件数順に並べる。
+図は1枚1時刻の TactiVal ボード3枚（序盤・中盤・終盤）とし、文面は「アクション→リアクション」の応酬で組み立てる。
 """
 from __future__ import annotations
 
 import copy
+import hashlib
 import html
 import json
 import math
@@ -21,13 +21,17 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from . import board_img as BI
 from . import deck as D
 from . import gamemodel as GM
 from . import kb as K
 from . import mapfig as MF
+from . import phases as P
 from . import tactics as TC
+from . import tactival as TV
 
 ATTACK, DEFENSE = GM.ATTACK, GM.DEFENSE
+SEGS = (("early", "序盤"), ("mid", "中盤"), ("late", "終盤"))
 
 # ============================================================== 設定値
 ENV_START = "2026-09-01"
@@ -46,13 +50,20 @@ SETTINGS = [
     ("PAGE_MIN_ROUNDS", PAGE_MIN_ROUNDS, "環境内の構成ラウンド数の下限"),
     ("PAGE_MIN_FULL5", PAGE_MIN_FULL5, "1:40 で5人そろったラウンド数の下限"),
     ("PAGE_MIN_SETUP_RATE", PAGE_MIN_SETUP_RATE, "setup が取れたラウンドの割合の下限"),
-    ("PATTERN_MIN", PATTERN_MIN, "型（配置クラスタ）の成立ラウンド数"),
-    ("PATTERN_DIST", PATTERN_DIST, "型クラスタの距離しきい値（表示座標 0..1）"),
-    ("HAND_MIN_N", HAND_MIN_N, "手札の成立ラウンド数"),
-    ("HAND_MIN_WINRATE", HAND_MIN_WINRATE, "手札の勝率の下限"),
+    ("PATTERN_MIN", PATTERN_MIN, "基本配置（配置クラスタ）の成立ラウンド数"),
+    ("PATTERN_DIST", PATTERN_DIST, "基本配置クラスタの距離しきい値（表示座標 0..1）"),
+    ("SAMPLE_SECONDS", P.SAMPLE_SECONDS, "軌跡サンプルの間隔（秒）"),
+    ("RUSH_SECONDS", P.RUSH_SECONDS, "開幕からこの秒以内のサイトエントリーをラッシュと判定"),
+    ("FREEZE_SECONDS", P.FREEZE_SECONDS, "ピック後に動きが無いままこの秒数以上でフリーズと判定"),
 ]
 
-# 内部のノード名 → プレイヤーの言葉。表示は必ずここを通す（略号や設計用語を出さない）
+PHASE_RULES = [
+    ("序盤", "開始〜最初のピックまたは最初の支配交代の早い方", "A/B/Mid/C デフォルト・A/B/C ラッシュ・詰め待ち"),
+    ("中盤", "序盤の終わり〜プラント（プラント無しは終了まで）", "フリーズ・リグループセット・フェイクセット"),
+    ("終盤", "プラント〜ラウンド終了（プラント無しは区間なし）", "下がる・プッシュ・サイト耐え"),
+]
+
+# 旧ノード表（後方互換の単体テスト用に残すが、生成ページの文面組み立てには使わない）
 GLOSSARY = {
     "fast_deep": "深くまで早く入って主導権を取る",
     "bu_reaction": "薄い側に圧をかけられたら逆側を取りに行く",
@@ -89,7 +100,7 @@ ABBREV = ("DC", "PrP", "PoC", "BP", "BTP")
 ROLE_JA = {"duelist": "デュエリスト", "controller": "コントローラー", "initiator": "イニシエーター",
            "sentinel": "センチネル"}
 
-# 守り側で使う動作語。攻め専用の言い回しを守りの型名・手札名に残さない。
+# 守り側で使う動作語（後方互換テスト用）
 DEF_ACTION_WORD = {
     "fast_deep": "前に出て間合いを詰める",
 }
@@ -101,16 +112,21 @@ DEFENSE_NODES = ("fast_deep", "bu_counter", "hold", "v_occupy", "v_reaction", "v
                  "timing_push", "one_man", "reaction_def", "stack", "choke_def", "back_def",
                  "fast", "surround", "slow", "save", "up2", "down1", "anti_eco")
 
+# 生成ページに出してはいけない旧ノード表の文言（段階Bの検証対象）
+OLD_NODE_PHRASES = tuple(dict.fromkeys(
+    list(GLOSSARY.values()) + list(DEF_ACTION_WORD.values()) + ["はまると強い"]
+))
+
 
 def glossary_word(nid: str | None) -> str:
-    """内部ノード ID → プレイヤーの言葉。知らない ID はそのまま返す（略号は含まれない）。"""
+    """内部ノード ID → プレイヤーの言葉（後方互換テスト用）。生成ページの本文には使わない。"""
     if not nid:
         return ""
     return GLOSSARY.get(str(nid), str(nid))
 
 
 def glossary_word_side(nid: str | None, side: str) -> str:
-    """側に合わせた動作語。守りでは攻め専用の言い回しを使わない。"""
+    """側に合わせた動作語（後方互換テスト用）。守りでは攻め専用の言い回しを使わない。"""
     if not nid:
         return ""
     if side == DEFENSE:
@@ -137,8 +153,11 @@ def _s(text: str) -> str:
     return f'<p class="s">{_e(text)}</p>'
 
 
-def _ul(lines: list[str]) -> str:
-    return f"<ul>{''.join(f'<li>{_e(x)}</li>' for x in lines)}</ul>" if lines else ""
+def _ul(lines: list[str], cls: str = "") -> str:
+    if not lines:
+        return ""
+    attr = f' class="{cls}"' if cls else ""
+    return f"<ul{attr}>{''.join(f'<li>{_e(x)}</li>' for x in lines)}</ul>"
 
 
 def _pct(x) -> str:
@@ -164,6 +183,12 @@ def _bump_svg(svg: str) -> str:
 def _bump_html(h: str) -> str:
     """HTML 内の font-size 指定（style 属性ふくむ）を 14px 以上へ引き上げる。"""
     return _FS_CSS.sub(lambda m: f"font-size:{max(float(m.group(1)), 14):g}px", h)
+
+
+def _slug(s: str) -> str:
+    h = hashlib.sha1(str(s).encode("utf-8")).hexdigest()[:8]
+    ascii_part = re.sub(r"[^A-Za-z0-9]+", "-", str(s)).strip("-").lower()
+    return f"{ascii_part}-{h}" if ascii_part else h
 
 
 # ============================================================== 構成のグルーピング
@@ -207,7 +232,7 @@ def gate_ok(stat: dict) -> tuple[bool, str]:
     return True, ""
 
 
-# ============================================================== 型（配置クラスタ）
+# ============================================================== 基本配置（1:40 配置クラスタ）
 def round_distance(p: dict, q: dict) -> float:
     """2 ラウンド間の、同じエージェント同士の表示座標のユークリッド距離の平均。"""
     ks = set(p) & set(q)
@@ -257,11 +282,40 @@ def _zone_head(zones: Counter, side: str) -> str:
 
 
 def pattern_name(zones: Counter, action: str | None = None, side: str = ATTACK) -> str:
-    """1:40 のゾーン分布 + 多数派の動きから、側に合った動きの名前を組み立てる。"""
-    return _zone_head(zones, side) + (action or "その場で構える")
+    """1:40 のゾーン分布 + 側に合った動きの名前を組み立てる。"""
+    default_action = "展開する" if side == ATTACK else "エリアを押さえる"
+    return _zone_head(zones, side) + (action or default_action)
 
 
-# ============================================================== VOD カード
+def _placement_action(members: list[dict], side: str) -> str:
+    """基本配置のクラスタ名をフェーズの流れから決める（旧ノード表の文言は使わない）。"""
+    if side == DEFENSE:
+        def_evs = Counter()
+        for it in members:
+            fl = it.get("flow") or {}
+            early_end = float(((fl.get("segments") or {}).get("early") or {}).get("end") or 20.0)
+            for ev in fl.get("events") or []:
+                if ev.get("side") == DEFENSE and float(ev.get("t") or 0.0) <= early_end + 1e-9:
+                    if ev.get("kind") in ("プッシュ", "ローテート", "取り返し"):
+                        def_evs[ev["kind"]] += 1
+        top = def_evs.most_common(1)[0][0] if def_evs else None
+        if top == "プッシュ":
+            return "前目で情報を取る"
+        if top == "ローテート":
+            return "寄せて守る"
+        return "エリアを押さえる"
+    early_types = Counter(
+        ((it.get("flow") or {}).get("phases") or {}).get("early", {}).get("type")
+        for it in members
+        if ((it.get("flow") or {}).get("phases") or {}).get("early", {}).get("type")
+    )
+    if early_types:
+        et = early_types.most_common(1)[0][0]
+        return f"{et}へ展開する"
+    return "展開する"
+
+
+# ============================================================== VOD カード・実プレイ GIF
 def yt_id(url: str | None) -> str | None:
     if not url:
         return None
@@ -314,11 +368,346 @@ def sample_candidates(items: list[dict], used: set[str] | None = None) -> list[d
 def _vod_for(item: dict) -> str:
     if not item:
         return ""
-    r = item["r"]
+    r = item.get("r") if "r" in item else item
     return vod_card(r.get("yt"), sample_label(r))
 
 
-# ============================================================== 動く図
+# ============================================================== フェーズ分類と時刻・3枚図
+def _round_dict_of(r: dict) -> dict:
+    """phases.classify_flow に渡す report.json のラウンド要素を取り出す。"""
+    if not isinstance(r, dict):
+        return {}
+    if isinstance(r.get("_round"), dict):
+        return r["_round"]
+    if isinstance(r.get("tactics"), dict):
+        return r
+    return {}
+
+
+def classify_round_flow(r: dict) -> tuple[dict | None, str | None]:
+    """1 ラウンド記録 r を phases.classify_flow で分類し、(結果, スキップ理由) を返す。"""
+    rr = _round_dict_of(r)
+    reason = P.skip_reason(rr)
+    if reason:
+        return None, reason
+    res = P.classify_flow(rr, r.get("ranks") if isinstance(r, dict) else None)
+    if res is None:
+        return None, "no_tracks"
+    return res, None
+
+
+def _stable_early_time(frames: list[dict], start: float, end: float) -> float:
+    """序盤区間の代表サンプル（開幕後最初の安定サンプル）の経過秒を選ぶ。"""
+    in_seg = [f for f in frames if start - 1e-9 <= float(f["e"]) <= end + 1e-9]
+    if not in_seg:
+        return round(min(5.0, max(0.0, end)), 1)
+    after_zero = [f for f in in_seg if float(f["e"]) > 1e-9]
+    cand = after_zero or in_seg
+    for idx, f in enumerate(cand):
+        has_zone = any(sum(f["zones"][t].get(z, 0) for z in P.ZONES) > 0 for t in (1, 2))
+        if not has_zone:
+            continue
+        if idx + 1 < len(cand) and cand[idx]["zones"] == cand[idx + 1]["zones"]:
+            return round(float(f["e"]), 1)
+    for f in cand:
+        if any(sum(f["zones"][t].get(z, 0) for z in P.ZONES) > 0 for t in (1, 2)):
+            return round(float(f["e"]), 1)
+    return round(float(cand[0]["e"]), 1)
+
+
+def phase_board_times(round_or_item: dict, flow: dict | None = None) -> list[tuple[str, str, float]]:
+    """代表ラウンドの区間ごとの配置図時刻 [(seg_key, seg_label, elapsed_sec), ...] を返す。
+
+    時刻の既定:
+    - 序盤: 区間の代表サンプル（開幕後最初の安定サンプル）
+    - 中盤: 区間中央（に最も近いサンプル）
+    - 終盤: プラント直後（プラント以降の最初のサンプル）
+    区間が無いラウンド（プラント無し等）はある区間だけ出す。
+    """
+    if isinstance(round_or_item, dict) and "r" in round_or_item:
+        r_obj = round_or_item["r"]
+        rr = _round_dict_of(r_obj)
+        flow = flow or round_or_item.get("flow")
+    else:
+        r_obj = round_or_item if isinstance(round_or_item, dict) else {}
+        rr = _round_dict_of(r_obj)
+    if flow is None and rr:
+        flow = P.classify_flow(rr, r_obj.get("ranks") if isinstance(r_obj, dict) else None)
+    norm = P._norm_tracks(P.tracks_of(rr)) if rr else {}
+    frames = P._frames(norm) if norm else []
+    if not flow:
+        pe = (r_obj or {}).get("plant_e") if isinstance(r_obj, dict) else None
+        if pe is None and rr:
+            pe = P._plant_elapsed(rr)
+        out = [("early", "序盤", 5.0), ("mid", "中盤", 20.0)]
+        if pe is not None:
+            out.append(("late", "終盤", round(float(pe), 1)))
+        return out
+
+    segs = flow["segments"]
+    out: list[tuple[str, str, float]] = []
+    # 1. 序盤: 開幕後最初の安定サンプル
+    e_start = float(segs["early"]["start"])
+    e_end = float(segs["early"]["end"])
+    out.append(("early", "序盤", _stable_early_time(frames, e_start, e_end)))
+
+    # 2. 中盤: 区間中央（区間がある場合のみ）
+    m_start = segs["mid"].get("start")
+    m_end = segs["mid"].get("end")
+    if m_start is not None and m_end is not None and float(m_end) > float(m_start) + 1e-9:
+        center = (float(m_start) + float(m_end)) / 2.0
+        in_mid = [f for f in frames if float(m_start) - 1e-9 <= float(f["e"]) <= float(m_end) + 1e-9]
+        if in_mid:
+            best_f = min(in_mid, key=lambda f: abs(float(f["e"]) - center))
+            mid_t = round(float(best_f["e"]), 1)
+        else:
+            mid_t = round(center, 1)
+        out.append(("mid", "中盤", mid_t))
+
+    # 3. 終盤: プラント直後（プラントがある場合のみ）
+    l_start = segs["late"].get("start")
+    l_end = segs["late"].get("end")
+    if l_start is not None and l_end is not None:
+        in_late = [f for f in frames if float(l_start) - 1e-9 <= float(f["e"]) <= float(l_end) + 1e-9]
+        if in_late:
+            late_t = round(float(in_late[0]["e"]), 1)
+        else:
+            late_t = round(float(l_start), 1)
+        out.append(("late", "終盤", late_t))
+
+    return out
+
+
+_ZONE_FALLBACK_UV = {
+    "A": (0.28, 0.28),
+    "Mid": (0.50, 0.50),
+    "B": (0.72, 0.28),
+    "C": (0.50, 0.28),
+    "攻撃側": (0.50, 0.85),
+    "防衛側": (0.50, 0.15),
+}
+
+
+def _positions_at(item: dict, model, e: float) -> list[dict]:
+    """時刻 e（開始からの秒）での自チーム各エージェントの (u, v) を返す（1時刻のみ）。"""
+    r = item.get("r") if isinstance(item, dict) and "r" in item else item
+    pts_out: dict[str, tuple[float, float]] = {}
+    # 1. r["tracks"]（deck.records で 0..1 に変換済みの軌跡）
+    tr = (r.get("tracks") or {}) if isinstance(r, dict) else {}
+    if isinstance(tr, dict):
+        for ag, seq in tr.items():
+            if not ag or ag == "?" or not isinstance(seq, (list, tuple)) or not seq:
+                continue
+            valid = [p for p in seq if isinstance(p, (list, tuple)) and len(p) >= 3]
+            if not valid:
+                continue
+            near = min(valid, key=lambda p: abs(float(p[0]) - e))
+            u, v = float(near[1]), float(near[2])
+            if 0.0 <= u <= 1.0 and 0.0 <= v <= 1.0 and (u > 0.0 or v > 0.0):
+                pts_out[str(ag)] = (round(u, 4), round(v, 4))
+    # 2. model があれば GM.snap で補完
+    if len(pts_out) < 3 and model is not None and isinstance(r, dict):
+        try:
+            sn = GM.snap(r, model, e, tol=12)
+            for ag, (u, v, _ar) in (sn or {}).items():
+                if ag and ag != "?" and ag not in pts_out and 0.0 <= float(u) <= 1.0 and 0.0 <= float(v) <= 1.0:
+                    pts_out[str(ag)] = (round(float(u), 4), round(float(v), 4))
+        except Exception:
+            pass
+    # 3. _round（report.json の tactics.tracks）から補完
+    if len(pts_out) < 3 and isinstance(r, dict):
+        rr = _round_dict_of(r)
+        norm = P._norm_tracks(P.tracks_of(rr))
+        team_no = r.get("no") if r.get("no") in (1, 2) else 1
+        ag_map = norm.get(team_no) or norm.get(1) or norm.get(0) or {}
+        for idx, (ag, seq) in enumerate(sorted(ag_map.items())):
+            if not ag or ag == "?" or ag in pts_out or not seq:
+                continue
+            near = min(seq, key=lambda p: abs(float(p[0]) - e))
+            u = float(near[1]) if len(near) > 1 else 0.0
+            v = float(near[2]) if len(near) > 2 else 0.0
+            if (u == 0.0 and v == 0.0) or not (0.0 <= u <= 1.0 and 0.0 <= v <= 1.0):
+                zone = P._zone_of_sample(near)
+                bu, bv = _ZONE_FALLBACK_UV.get(zone, (0.50, 0.50))
+                u = min(0.95, max(0.05, bu + (idx - 2) * 0.03))
+                v = min(0.95, max(0.05, bv + (idx % 2) * 0.03))
+            pts_out[str(ag)] = (round(u, 4), round(v, 4))
+    # 4. su（1:40 の初期配置）から補完
+    su = item.get("su") if isinstance(item, dict) else None
+    if len(pts_out) < 3 and isinstance(su, dict):
+        for ag, (u, v, _ar) in su.items():
+            if ag and ag != "?" and ag not in pts_out:
+                pts_out[str(ag)] = (round(float(u), 4), round(float(v), 4))
+    return [{"label": ag, "xy": [[u, v]]} for ag, (u, v) in sorted(pts_out.items())]
+
+
+def single_time_board(map_name: str, title: str, mark: str, dots: list[dict], side: str,
+                      cfg: dict | None = None) -> dict | None:
+    """1枚1時刻の TactiVal ボードJSON（1ステップ・エージェントアイコン駒のみ・時間経過の矢印なし）を作る。"""
+    bs = BI.boards(map_name, title, {"marks": [mark], "dots": dots}, side, cfg)
+    if not bs:
+        return None
+    b = bs[0]
+    tpl = TV.load_template(cfg)
+    ids = TV.agent_ids(tpl)
+    fallback_uid = next(iter(ids.values()), None)
+    for st in b.get("steps") or []:
+        # 1枚1時刻のみ（矢印等の時間経過要素を持たず、すべてTactiValエージェントアイコン駒にする）
+        st["elements"] = [el for el in (st.get("elements") or []) if el.get("type") == "agent"]
+        for el in st["elements"]:
+            d = el.setdefault("data", {})
+            if not d.get("agentId") and fallback_uid:
+                d["agentId"] = fallback_uid
+    b["patchSnapshot"] = tpl.get("patchSnapshot")
+    return b
+
+
+def build_phase_boards(ctx: dict, item: dict, title: str, slug_prefix: str) -> tuple[str, list[dict]]:
+    """代表ラウンドの区間（序盤・中盤・終盤）ごとに1枚1時刻の TactiVal ボード（最大3枚）を作る。
+
+    - `board_img` 経路（ボードJSON→本物の TactiVal で画像化）を使う。
+    - 実行環境で TactiVal 画像化ができない場合は、ボードJSONを成果物として `<out>/boards/` に残し、
+      図の場所にその旨を明示する（旧来の重ね描き図への無言のフォールバックはしない）。
+    """
+    if not item:
+        return "", []
+    r = item.get("r") if "r" in item else item
+    side = r.get("side") or ATTACK
+    times = phase_board_times(item, item.get("flow") if isinstance(item, dict) else None)
+    out_dir = Path(ctx["out"])
+    boards_dir = out_dir / "boards"
+    boards_dir.mkdir(parents=True, exist_ok=True)
+
+    cards: list[str] = []
+    meta_list: list[dict] = []
+    for seg_key, seg_label, e in times:
+        clock = BI._lab(e)
+        mark = f"{seg_label} {clock}"
+        dots = _positions_at(item, ctx.get("model"), e)
+        b = single_time_board(ctx["map"], title, mark, dots, side, ctx.get("cfg"))
+        b_fn = f"{slug_prefix}_{seg_key}.tactival.json"
+        b_path = boards_dir / b_fn
+        if b is not None:
+            b_path.write_text(json.dumps(b, ensure_ascii=False, indent=2), encoding="utf-8")
+        imgs = []
+        if b is not None:
+            imgs = BI.images(ctx.get("cfg") or {}, ctx["map"], title, None, side,
+                             log=ctx.get("log", print), bs=[b], marks=[mark])
+        tactival_img = next((p for _m, p, kind in imgs if kind == "tactival" and Path(p).exists()), None)
+        rendered = tactival_img is not None
+        img_rel = None
+        if rendered:
+            img_fn = f"{slug_prefix}_{seg_key}.jpg"
+            dst_img = boards_dir / img_fn
+            if Path(tactival_img).resolve() != dst_img.resolve():
+                shutil.copyfile(tactival_img, dst_img)
+            img_rel = f"boards/{img_fn}"
+            inner = (f'<img class="tactival-img" src="{html.escape(img_rel, quote=True)}" '
+                     f'alt="{_e(f"{title} {seg_label}（{clock}）のTactiVal配置図")}" loading="lazy">')
+        else:
+            inner = (f'<div class="board-note">TactiVal ボードJSONを出力済み（実行環境でTactiVal画像化不可）：'
+                     f'<a href="boards/{html.escape(b_fn, quote=True)}" download>{_e(b_fn)}</a></div>')
+        cap = f"{seg_label}（{clock} / 開始{e:.0f}秒）"
+        cards.append(
+            f'<figure class="board-card" data-segment="{_e(seg_key)}" data-time="{e:.1f}" '
+            f'data-board="boards/{html.escape(b_fn, quote=True)}">'
+            f'{inner}<figcaption>{_e(cap)}</figcaption></figure>'
+        )
+        meta_list.append({
+            "segment": seg_key,
+            "label": seg_label,
+            "time": e,
+            "clock": clock,
+            "board_json": f"boards/{b_fn}",
+            "image": img_rel,
+            "rendered": rendered,
+            "single_timestamp": True,
+            "steps": len((b or {}).get("steps") or []),
+        })
+    return f'<div class="boards3">{"".join(cards)}</div>', meta_list
+
+
+def _ensure_play_gif(ctx: dict, item: dict) -> str:
+    """実プレイ例（代表ラウンド）のアニメーション GIF を `<out>/gifs/` に用意し、相対パスを返す。"""
+    r = item.get("r") if isinstance(item, dict) and "r" in item else item
+    rk_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", sample_key(item)).strip("_") or "round"
+    gifs_dir = Path(ctx["out"]) / "gifs"
+    gifs_dir.mkdir(parents=True, exist_ok=True)
+    dst = gifs_dir / f"{rk_slug}.gif"
+    if dst.exists() and dst.stat().st_size > 0:
+        return f"gifs/{dst.name}"
+
+    # 1. report.json の minimap_gif がディスクにあればそれをコピー
+    rr = _round_dict_of(r)
+    cand_paths = [r.get("gif"), ((rr.get("assets") or {}).get("minimap_gif") if isinstance(rr, dict) else None)]
+    for cp in cand_paths:
+        if cp and Path(cp).is_file() and Path(cp).stat().st_size > 0:
+            shutil.copyfile(cp, dst)
+            return f"gifs/{dst.name}"
+
+    # 2. 実プレイの軌跡サンプルからアニメーション GIF を生成
+    from PIL import Image, ImageDraw
+    size = 280
+    fig = ctx.get("fig")
+    if fig is not None and getattr(fig, "view", None) is not None:
+        v = cv2.resize(fig.view, (size, size), interpolation=cv2.INTER_AREA)
+        if v.shape[2] == 4:
+            al = (v[:, :, 3:4].astype(np.float32) / 255.0) * 0.85
+            bg_arr = np.zeros((size, size, 3), np.uint8)
+            bg_arr[:] = (18, 22, 28)
+            bgr = (bg_arr * (1.0 - al) + v[:, :, :3] * al).astype(np.uint8)
+        else:
+            bgr = v[:, :, :3]
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        base_im = Image.fromarray(rgb)
+    else:
+        base_im = Image.new("RGB", (size, size), (18, 22, 28))
+
+    norm = P._norm_tracks(P.tracks_of(rr)) if rr else {}
+    frames_data = P._frames(norm) if norm else []
+    es = [float(f["e"]) for f in frames_data][:18]
+    if len(es) < 2:
+        es = [0.0, 5.0, 10.0, 15.0, 20.0, 25.0]
+
+    k_rot = ctx.get("k", 0)
+    side = r.get("side") or ATTACK
+    col_fill = (255, 70, 85) if side == ATTACK else (46, 196, 182)
+    pil_frames: list[Image.Image] = []
+    for e in es:
+        im = base_im.copy()
+        dr = ImageDraw.Draw(im)
+        dots = _positions_at(item, ctx.get("model"), e)
+        for d in dots:
+            u, v_coord = d["xy"][0]
+            vx, vy = MF.to_view(u, v_coord, k_rot)
+            px = int(min(size - 10, max(10, round(vx * size))))
+            py = int(min(size - 10, max(10, round(vy * size))))
+            dr.ellipse((px - 7, py - 7, px + 7, py + 7), fill=col_fill, outline=(255, 255, 255), width=2)
+        dr.rectangle((6, 6, 68, 24), fill=(15, 18, 24))
+        dr.text((12, 9), BI._lab(e), fill=(255, 255, 255))
+        pil_frames.append(im)
+
+    pil_frames[0].save(
+        dst, format="GIF", save_all=True, append_images=pil_frames[1:], duration=360, loop=0
+    )
+    return f"gifs/{dst.name}"
+
+
+def play_gif_card(ctx: dict, item: dict) -> tuple[str, str]:
+    """代表ラウンド（実際のプレイ例）の GIF カード HTML と相対パスを返す。"""
+    if not item:
+        return "", ""
+    r = item.get("r") if "r" in item else item
+    label = sample_label(r)
+    gif_rel = _ensure_play_gif(ctx, item)
+    card = (f'<figure class="play-gif">'
+            f'<img class="gif-img" src="{html.escape(gif_rel, quote=True)}" '
+            f'alt="{html.escape(f"{label} の実プレイGIF", quote=True)}" loading="lazy">'
+            f'<figcaption>{_e(f"{label}（実プレイGIF）")}</figcaption></figure>')
+    return card, gif_rel
+
+
+# ============================================================== 動く図（後方互換の関数群）
 RECORD_MARKS = [("1:40", 0.0), ("1:30", 10.0), ("1:20", 20.0)]
 
 
@@ -350,7 +739,6 @@ def motion_frames(r: dict, opp: dict | None, model, k: int, walk) -> dict | None
     if len(agents) < 3:
         return None
     team = "def" if r["side"] == DEFENSE else "atk"
-    # 節目ごとに、同じ場所で重なる駒を少しずらす（名札が隠れないように）
     xs_by_agent: dict[str, list] = {a: [None] * len(snaps) for a in agents}
     for mi, (_mk, sn) in enumerate(snaps):
         present = [a for a in agents if a in sn]
@@ -383,87 +771,217 @@ def motion_frames(r: dict, opp: dict | None, model, k: int, walk) -> dict | None
     return {"marks": [mk for mk, _ in snaps], "dots": dots, "team": team}
 
 
-def _motion_html(title: str, fr: dict, bg: str) -> str:
-    return D.motion_html({"name": title}, fr, bg)
-
-
-def _pick_motion(items: list[dict], used: set[str], model, k: int, walk, bg: str, title: str,
-                 *, allow_used: bool = False):
-    """その中で動く図が作れる full5 の見本を 1 つ返す。`used` の見本は避ける。"""
-    pool = sample_candidates(items, used)
-    if not pool and allow_used:
-        pool = sorted([it for it in items if is_full5(it)],
-                      key=lambda it: (not it["r"].get("win"), sample_key(it)))
-    for it in pool:
-        fr = motion_frames(it["r"], it.get("opp"), model, k, walk)
-        if fr:
-            return it, _motion_html(title, fr, bg)
-    return None, ""
-
-
-# ============================================================== ラウンド操作
-def _move_verb(side: str, a0, a1, model) -> str:
-    if not a1 or a1 == a0:
-        if side == DEFENSE:
-            return "前に出て取る" if (a0 and model.half(a0)) else "その場で構える"
-        return "様子を見る"
-    if side == DEFENSE:
-        h0, h1 = model.half(a0 or ""), model.half(a1)
-        if h1 and not h0:
-            return "前に出て取る"
-        if h0 and not h1:
-            return "下がって時間を稼ぐ"
-        if GM.zone_of(a0) != GM.zone_of(a1):
-            return "ローテする"
-        return "その場で構える"
-    if GM.in_site(a1):
-        return "入る"
-    if GM.zone_of(a1) != GM.zone_of(a0):
-        return "切り替える"
-    return "詰める"
-
-
-def _agent_lines(item: dict, model) -> list[str]:
-    """見本ラウンドの各エージェント：1:40 のエリア → 1:20 のエリア + 動詞（キル数は書かない）。"""
-    r = item["r"]
-    side = r["side"]
-    s20 = GM.snap(r, model, 20, tol=8)
-    out = []
-    for ag, (_u, _v, a0) in sorted(item["su"].items()):
-        if not ag or ag == "?":
+# ============================================================== フェーズ型（序盤・中盤・終盤）と文面組み立て
+def _observed_action_reaction(members: list[dict], seg: str) -> tuple[str, str] | None:
+    """その型のラウンド群から、最も多い「アクション→リアクション」のステップ対を抽出する。"""
+    pairs: Counter = Counter()
+    for it in members:
+        fl = it.get("flow") or {}
+        flow_str = ((fl.get("flow") or {}).get(seg) or "").strip()
+        steps = [s.strip() for s in flow_str.split("→") if s.strip()]
+        if len(steps) < 2:
+            # 区間内が1ステップ以下ならラウンド全体の流れから拾う
+            all_steps = [
+                s.strip()
+                for k in ("early", "mid", "late")
+                for s in (((fl.get("flow") or {}).get(k) or "").split("→"))
+                if s.strip()
+            ]
+            steps = all_steps
+        if len(steps) < 2:
             continue
-        a1 = (s20.get(ag) or (0, 0, None))[2]
-        verb = _move_verb(side, a0, a1, model)
-        if a1 and a1 != a0:
-            out.append(f"{ag}：1:40 は {a0 or '不明'}、1:20 に {a1}（{verb}）")
+        chosen_pair = None
+        for i in range(len(steps) - 1):
+            s0, s1 = steps[i], steps[i + 1]
+            side0 = s0.split(" ", 1)[0]
+            side1 = s1.split(" ", 1)[0]
+            if side0 != side1:
+                chosen_pair = (s0, s1)
+                break
+        if chosen_pair is None:
+            chosen_pair = (steps[0], steps[1])
+        pairs[chosen_pair] += 1
+    return pairs.most_common(1)[0][0] if pairs else None
+
+
+def phase_type_description(seg: str, typ: str, members: list[dict] | None = None) -> str:
+    """フェーズの型と流れ要約から「アクション→リアクション」の形で説明文を組み立てる。
+
+    旧ノード表（glossary_word 系）は使わない。
+    """
+    members = members or []
+    t = str(typ or "").strip()
+    if seg == "early":
+        if t.endswith("ラッシュ"):
+            z = t.split()[0]
+            base = (f"アクション：開幕{int(P.RUSH_SECONDS)}秒以内に攻撃が {z} サイトへ2人以上で一気にエントリーする。"
+                    f"リアクション：防衛はサイト内で耐えるか、逆サイトからローテートして取り返しに回る")
+        elif t.endswith("デフォルト"):
+            z = t.split()[0]
+            base = (f"アクション：攻撃が {z} 側を軸に展開してエリアの主導権を探る。"
+                    f"リアクション：防衛の前目プッシュやローテートを見て、手薄な側へテイクやエントリーをつなげる")
+        elif t == "詰め待ち":
+            base = ("アクション：攻撃が開幕にゾーンへ踏み込まず後方で待機する。"
+                    "リアクション：防衛が前へプッシュしてきた動きに合わせて撃ち合い、ピックから主導権を取る")
         else:
-            out.append(f"{ag}：1:40 は {a0 or '不明'}、{verb}")
-    return out[:5]
+            base = (f"アクション：序盤に {t} の形で展開する。"
+                    f"リアクション：相手の初期配置とプッシュの有無を見て中盤の攻め先を決める")
+    elif seg == "mid":
+        if t == "フリーズ":
+            base = (f"アクション：ピック（キル）が出た直後に{int(P.FREEZE_SECONDS)}秒以上動きを止めて間を置く。"
+                    f"リアクション：相手のローテートや情報取りを誘い、配置の隙を見て次の攻め先を選ぶ")
+        elif t == "リグループセット":
+            base = ("アクション：複数ゾーンへ散って情報を取った攻撃が1つのゾーンに3人以上で集まり直す。"
+                    "リアクション：防衛の寄りがそろう前に、集結した人数でサイトへエントリーする")
+        elif t == "フェイクセット":
+            base = ("アクション：片側のゾーンで支配（テイク）を作って圧をかける。"
+                    "リアクション：防衛がそのゾーンへローテートして応じた隙に、反対側のサイトへエントリーする")
+        else:
+            base = (f"アクション：中盤に {t} を仕掛ける。"
+                    f"リアクション：相手のローテートに合わせてエントリーのタイミングを決める")
+    else:
+        if t == "プッシュ":
+            base = ("アクション：プラント直後に攻撃がサイトより奥（相手スポーン側）へ2人以上で前進する。"
+                    "リアクション：リテイクに集まる防衛を深い位置で迎え撃ち、解除の時間を奪う")
+        elif t == "サイト耐え":
+            base = ("アクション：プラント後に攻撃が2人以上でサイト内に残ってポジションを固める。"
+                    "リアクション：防衛の取り返し（リテイク）に対し、サイト内のクロスとカバーで耐え切る")
+        elif t == "下がる":
+            base = ("アクション：プラント後に攻撃がサイト内からメインや後方エリアへ引いて構える。"
+                    "リアクション：防衛がスパイク解除に入る動きに合わせてピークとスキルで阻止する")
+        else:
+            base = (f"アクション：終盤に {t} の配置を取る。"
+                    f"リアクション：防衛のリテイク進入に合わせて撃ち合う")
+
+    pair = _observed_action_reaction(members, seg)
+    if pair:
+        return f"{base}（実測の応酬：{pair[0]} → {pair[1]}）。"
+    return f"{base}。"
 
 
-def _static_layers(item: dict, model, marks=("1:40",)) -> list[dict]:
-    r = item["r"]
-    team = "def" if r["side"] == DEFENSE else "atk"
-    e_of = {"1:40": 0.0, "1:30": 10.0, "1:20": 20.0}
-    layers = []
-    for mk in marks:
-        sn = item["su"] if mk == "1:40" else GM.snap(r, model, e_of[mk], tol=8)
-        pieces = [{"agent": a, "u": u, "v": v, "team": team} for a, (u, v, _ar) in sn.items() if a and a != "?"]
-        if pieces:
-            layers.append({"mark": mk, "pieces": pieces})
-    return layers
+def _has_all_3_segments(it: dict) -> bool:
+    fl = it.get("flow")
+    if not fl:
+        return False
+    segs = fl.get("segments") or {}
+    m0, m1 = (segs.get("mid") or {}).get("start"), (segs.get("mid") or {}).get("end")
+    l0 = (segs.get("late") or {}).get("start")
+    return m0 is not None and m1 is not None and float(m1) > float(m0) + 1e-9 and l0 is not None
 
 
-def _fig_svg(fig, item: dict, model, *, marks=("1:40",), alt="", legend=True, px=460) -> str:
-    layers = _static_layers(item, model, marks)
-    if not layers:
-        return ""
-    return _bump_svg(fig.svg(layers, alt=alt, legend=legend, px=px))
+def _pick_phase_reps(members: list[dict], seg: str, used_leads: set[str], max_reps: int = 3) -> list[dict]:
+    """型の代表ラウンド（複数件）を選ぶ。VODあり・3区間そろい・full5・勝ち・イベント数を優先。"""
+    def sort_key(it: dict):
+        r = it["r"]
+        fl = it.get("flow") or {}
+        seg_flow = (fl.get("flow") or {}).get(seg) or ""
+        return (
+            not bool(yt_id(r.get("yt"))),
+            not _has_all_3_segments(it),
+            not is_full5(it),
+            not bool(seg_flow),
+            not bool(r.get("win")),
+            -len(fl.get("events") or []),
+            sample_key(it),
+        )
+
+    ordered = sorted(members, key=sort_key)
+    if not ordered:
+        return []
+    # 先頭（3枚図と実プレイGIFを描く主代表）は他型の主代表と重複しないものを優先
+    lead = next((it for it in ordered if sample_key(it) not in used_leads), ordered[0])
+    used_leads.add(sample_key(lead))
+    reps = [lead]
+    seen = {sample_key(lead)}
+    for it in ordered:
+        rk = sample_key(it)
+        if rk in seen:
+            continue
+        seen.add(rk)
+        reps.append(it)
+        if len(reps) >= max_reps:
+            break
+    return reps
+
+
+def build_phase_sections(items: list[dict]) -> dict:
+    """構成のラウンド群を `phases.classify_flow` で集計し、序盤・中盤・終盤の3部データを返す。"""
+    total = len(items)
+    classified = [it for it in items if it.get("flow") is not None]
+    cls_n = len(classified)
+    skipped_n = total - cls_n
+    used_leads: set[str] = set()
+    raw_sections = []
+    all_entries = []
+    for seg_key, seg_label in SEGS:
+        by_type: dict[str, list[dict]] = defaultdict(list)
+        for it in classified:
+            typ = ((it["flow"].get("phases") or {}).get(seg_key) or {}).get("type")
+            if typ:
+                by_type[str(typ)].append(it)
+        typed_n = sum(len(v) for v in by_type.values())
+        types_out = []
+        for typ, members in sorted(by_type.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+            n = len(members)
+            w = sum(1 for it in members if it["r"].get("win"))
+            rate = w / n if n else 0.0
+            share = n / cls_n if cls_n else 0.0
+            entry = {
+                "seg": seg_key,
+                "seg_label": seg_label,
+                "type": typ,
+                "n": n,
+                "w": w,
+                "rate": rate,
+                "share": share,
+                "description": phase_type_description(seg_key, typ, members),
+                "lead": None,
+                "reps": [],
+                "members": members,
+            }
+            types_out.append(entry)
+            all_entries.append(entry)
+        raw_sections.append({
+            "seg": seg_key,
+            "label": seg_label,
+            "typed_rounds": typed_n,
+            "untyped_rounds": cls_n - typed_n,
+            "types": types_out,
+        })
+    # 件数の少ない型から順に主代表ラウンドを割り当て、型間で主代表が重複しないようにする
+    for entry in sorted(all_entries, key=lambda e: (e["n"], e["seg"], e["type"])):
+        reps = _pick_phase_reps(entry["members"], entry["seg"], used_leads, max_reps=3)
+        entry["reps"] = reps
+        entry["lead"] = reps[0] if reps else None
+    return {
+        "total": total,
+        "classified": cls_n,
+        "skipped": skipped_n,
+        "sections": raw_sections,
+    }
 
 
 # ============================================================== データの組み立て
 def _prepare(reports: list[dict], map_name: str, cfg: dict, log=print) -> dict:
-    allr = [r for rep in reports if str(rep.get("map") or "").lower() == map_name.lower() for r in D.records(rep)]
+    allr = []
+    match_yts = []
+    for rep in reports:
+        if str(rep.get("map") or "").lower() != map_name.lower():
+            continue
+        for rr in rep.get("rounds") or []:
+            if rr.get("yt_url"):
+                match_yts.append(rr["yt_url"])
+    fallback_yt = match_yts[0] if match_yts else None
+    for rep in reports:
+        if str(rep.get("map") or "").lower() != map_name.lower():
+            continue
+        rr_by_n = {int(rr.get("n") or 0): rr for rr in (rep.get("rounds") or []) if rr.get("n") is not None}
+        rep_yt = next((rr.get("yt_url") for rr in (rep.get("rounds") or []) if rr.get("yt_url")), fallback_yt)
+        for r in D.records(rep):
+            r["_round"] = rr_by_n.get(int(r.get("n") or 0))
+            if not r.get("yt") and rep_yt:
+                r["yt"] = rep_yt
+            allr.append(r)
     if not allr:
         raise ValueError(f"{map_name} のラウンドがありません")
     meta = TC.load_map(map_name, cfg, log=None) or {}
@@ -487,7 +1005,7 @@ def _prepare(reports: list[dict], map_name: str, cfg: dict, log=print) -> dict:
                         cent=None if fig.fillable else fig.label_xy)
     walk = _walk_from_view(fig.view) if fig.fillable else None
     return {"allr": allr, "fig": fig, "model": model, "callouts": callouts, "walk": walk,
-            "kb": kbo, "k": fig.k, "vitals": model.vitals(), "bg": fig._uri}
+            "kb": kbo, "k": fig.k, "vitals": model.vitals(), "bg": fig._uri, "cfg": cfg, "log": log}
 
 
 def _items_for(rounds: list[dict], allr: list[dict], model) -> list[dict]:
@@ -497,7 +1015,8 @@ def _items_for(rounds: list[dict], allr: list[dict], model) -> list[dict]:
         opp = idx.get((r["match_id"], r["order"], r["n"], 3 - r["no"])) or {}
         su = GM.setup_at_140(r, model)
         cls = GM.classify(r, opp, model) if su is not None else {}
-        items.append({"r": r, "opp": opp, "su": su, "cls": cls})
+        flow, skip = classify_round_flow(r)
+        items.append({"r": r, "opp": opp, "su": su, "cls": cls, "flow": flow, "flow_skip": skip})
     return items
 
 
@@ -505,14 +1024,17 @@ def comp_stats(rounds: list[dict], items: list[dict]) -> dict:
     used_def = sum(1 for it in items if it["su"] is not None and it["r"]["side"] == DEFENSE)
     used_atk = sum(1 for it in items if it["su"] is not None and it["r"]["side"] == ATTACK)
     full5 = sum(1 for it in items if it["su"] is not None and len(it["su"]) == 5)
+    flow_classified = sum(1 for it in items if it.get("flow") is not None)
+    flow_skipped = len(rounds) - flow_classified
     return {"total": len(rounds), "used": used_def + used_atk, "used_def": used_def, "used_atk": used_atk,
             "excluded": len(rounds) - used_def - used_atk, "full5": full5,
+            "flow_classified": flow_classified, "flow_skipped": flow_skipped,
             "dates": sorted({str(r.get("date")) for r in rounds if r.get("date")}),
             "teams": sorted({str(r.get("tag") or r.get("team")) for r in rounds}),
             "wins": sum(1 for r in rounds if r.get("win"))}
 
 
-# ============================================================== 型
+# ============================================================== 基本配置クラスタの構築
 def _pattern_suffix(medoid_it: dict) -> str:
     """名前がぶつかったときに付ける、内容で区別できる短い説明（ゾーン分布＋代表エリア）。"""
     zones = Counter(GM.zone_of(a) for _u, _v, a in medoid_it["su"].values() if GM.zone_of(a))
@@ -537,7 +1059,7 @@ def unique_name(base: str, suffix: str, used: set[str]) -> str:
 
 def build_patterns(items: list[dict], model, k: int, side: str,
                    used_names: set[str] | None = None) -> tuple[list[dict], list[dict]]:
-    """側の型（配置クラスタ）。対象＝ピストルでない・1:40 に5人そろったラウンド。"""
+    """側の基本配置型（1:40 配置クラスタ）。対象＝ピストルでない・1:40 に5人そろったラウンド。"""
     used_names = used_names if used_names is not None else set()
     pool = [it for it in items if it["r"]["side"] == side and not it["r"]["pistol"]
             and it["su"] is not None and len(it["su"]) == 5]
@@ -546,14 +1068,12 @@ def build_patterns(items: list[dict], model, k: int, side: str,
     out = []
     for grp in pats_idx:
         members = [pool[i] for i in grp]
-        # メドイド（勝ちを優先）
         winner = [i for i in grp if pool[i]["r"]["win"]]
         cand = winner or grp
         med = min(cand, key=lambda a: sum(round_distance(points[a], points[b]) for b in grp))
         med_it = pool[med]
         zones = Counter(GM.zone_of(a) for _u, _v, a in med_it["su"].values() if GM.zone_of(a))
-        bu = Counter(it["cls"].get("buildup") for it in members if it["cls"].get("buildup"))
-        action = glossary_word_side(bu.most_common(1)[0][0], side) if bu else None
+        action = _placement_action(members, side)
         name = unique_name(pattern_name(zones, action, side), _pattern_suffix(med_it), used_names)
         used_names.add(name)
         out.append({"side": side, "name": name, "n": len(grp), "w": sum(it["r"]["win"] for it in members),
@@ -563,53 +1083,48 @@ def build_patterns(items: list[dict], model, k: int, side: str,
     for i in singles_idx:
         it = pool[i]
         zones = Counter(GM.zone_of(a) for _u, _v, a in it["su"].values() if GM.zone_of(a))
-        action = next((v for ph, v in it["cls"].items() if ph != "setup" and v), None)
-        name = unique_name(pattern_name(zones, glossary_word_side(action, side), side),
-                           _pattern_suffix(it), used_names)
+        action = _placement_action([it], side)
+        name = unique_name(pattern_name(zones, action, side), _pattern_suffix(it), used_names)
         used_names.add(name)
         singles.append({"side": side, "name": name, "n": 1, "item": it})
     return out, singles
 
 
-# ============================================================== 手札
-def hand_nodes(items: list[dict], side: str) -> list[dict]:
-    nodes: dict[str, list[int]] = defaultdict(lambda: [0, 0])
-    for it in items:
-        if it["r"]["side"] != side or it["r"]["pistol"] or it["su"] is None:
-            continue
-        for ph, val in it["cls"].items():
-            if ph == "setup" or not val:
-                continue
-            nodes[val][0] += 1
-            nodes[val][1] += int(it["r"]["win"])
-    out = []
-    for nid, (n, w) in nodes.items():
-        if n >= HAND_MIN_N and (w / n) >= HAND_MIN_WINRATE:
-            out.append({"id": nid, "n": n, "w": w, "rate": w / n, "name": glossary_word_side(nid, side)})
-    out.sort(key=lambda x: (-x["n"], x["name"]))
-    return out[:5]
-
-
 # ============================================================== なぜこの構成か
-def _node_stats(items: list[dict]) -> dict[str, list[int]]:
-    """局面ノードごとの (回数, 勝ち数)。ピストルと setup は数えない。"""
-    nodes: dict[str, list[int]] = defaultdict(lambda: [0, 0])
-    for it in items:
-        if it["su"] is None or it["r"]["pistol"]:
-            continue
-        for ph, val in it["cls"].items():
-            if ph == "setup" or not val:
-                continue
-            nodes[val][0] += 1
-            nodes[val][1] += int(it["r"]["win"])
-    return nodes
+def _pick_claim_example(cands: list[dict]) -> dict | None:
+    if not cands:
+        return None
+    ordered = sorted(
+        cands,
+        key=lambda it: (
+            not bool(yt_id(it["r"].get("yt"))),
+            not _has_all_3_segments(it),
+            not (it.get("flow") is not None),
+            not is_full5(it),
+            not bool(it["r"].get("win")),
+            sample_key(it),
+        ),
+    )
+    return ordered[0]
+
+
+def _phase_type_counts(items: list[dict]) -> tuple[int, dict[tuple[str, str, str], list[dict]]]:
+    cls_items = [it for it in items if it.get("flow") is not None]
+    by_key: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+    for it in cls_items:
+        for seg_key, seg_label in SEGS:
+            typ = ((it["flow"].get("phases") or {}).get(seg_key) or {}).get("type")
+            if typ:
+                by_key[(seg_key, seg_label, str(typ))].append(it)
+    return len(cls_items), by_key
 
 
 def _why_claims(comp_rounds: list[dict], items: list[dict], base_rounds: list[dict],
                 base_items: list[dict], model) -> list[dict]:
+    """全体平均との差がしきい値を超えた指標だけから主張を作る（旧ノード表や「はまると強い」は使わない）。"""
     claims = []
 
-    # 1. 設置サイトの偏り（15pt 以上）
+    # 1. 設置サイトの偏り（全体との差 15pt 以上）
     pa = [r for r in comp_rounds if r.get("plant_site") in ("A", "B")]
     ba = [r for r in base_rounds if r.get("plant_site") in ("A", "B")]
     if len(pa) >= 8 and len(ba) >= 20:
@@ -619,60 +1134,80 @@ def _why_claims(comp_rounds: list[dict], items: list[dict], base_rounds: list[di
             site = "A" if sha > bha else "B"
             share = sha if site == "A" else 1 - sha
             base_share = bha if site == "A" else 1 - bha
-            ex = next((it for it in items if it["r"].get("plant_site") == site and it["su"]), None)
-            claims.append({"text": f"{site} サイトへの設置が {share:.0%}（全体 {base_share:.0%}）。{site} を軸に組み立てる。",
-                           "item": ex, "metric": "plant_site"})
+            ex = _pick_claim_example([it for it in items if it["r"].get("plant_site") == site and it["su"]])
+            claims.append({
+                "text": f"{site} サイトへの設置が {share:.0%}（全体 {base_share:.0%}）。{site} 側のエリア取りから設置へつなげる。",
+                "item": ex,
+                "metric": "plant_site",
+            })
 
-    # 2. ファーストキル取得率（10pt 以上）
+    # 2. ファーストキル取得率（全体との差 10pt 以上）
     fa = [r for r in comp_rounds if r.get("fk_own") is not None]
     fb = [r for r in base_rounds if r.get("fk_own") is not None]
     if len(fa) >= 8 and len(fb) >= 20:
         fr = sum(1 for r in fa if r["fk_own"]) / len(fa)
         br = sum(1 for r in fb if r["fk_own"]) / len(fb)
         if abs(fr - br) >= 0.10:
-            ex = next((it for it in items if it["r"].get("fk_own") and it["su"]), None) or \
-                 next((it for it in items if it["su"]), None)
-            word = "取る" if fr >= br else "取られる"
-            claims.append({"text": f"ファーストキルを {fr:.0%} のラウンドで{word}（全体 {br:.0%}）。序盤の当たりが持ち味。",
-                           "item": ex, "metric": "fk"})
+            ex = _pick_claim_example([it for it in items if it["r"].get("fk_own") and it["su"]]) or \
+                 _pick_claim_example([it for it in items if it["su"]])
+            if fr >= br:
+                txt = f"ファーストキル取得率が {fr:.0%}（全体 {br:.0%}）。序盤のピックから人数差を作る。"
+            else:
+                txt = f"ファーストキル取得率が {fr:.0%}（全体 {br:.0%}）。序盤は無理に当たらず中盤の展開で勝負する。"
+            claims.append({"text": txt, "item": ex, "metric": "fk"})
 
-    # 3. 特定ノードの勝率（n>=5 かつ全体より 10pt 以上高い）
-    nodes = _node_stats(items)
-    base_nodes = _node_stats(base_items)
-    best = None
-    for nid, (n, w) in nodes.items():
-        bn, bw = base_nodes.get(nid, (0, 0))
-        if n < 5 or bn < 5 or has_abbrev(glossary_word(nid)):
-            continue
-        rate = w / n
-        base_rate = bw / bn
-        if rate - base_rate < 0.10:
-            continue
-        score = rate * n
-        if best is None or score > best[0]:
-            ex = next((it for it in items if it["cls"].get(_node_phase(it, nid)) == nid), None)
-            best = (score, nid, n, w, rate, base_rate, ex)
-    if best:
-        _sc, nid, n, w, rate, base_rate, ex = best
-        claims.append({"text": f"{glossary_word(nid)} の勝率 {rate:.0%}（全体 {base_rate:.0%}、{_wl(w, n)}）。はまると強い。",
-                       "item": ex, "metric": "node"})
+    # 3. フェーズ型の特徴（構成・全体のどちらも n>=5 で、採用割合または勝率が全体と 10pt 以上差がある）
+    cls_n, my_types = _phase_type_counts(items)
+    base_cls_n, base_types = _phase_type_counts(base_items)
+    best_phase = None
+    if cls_n >= 5 and base_cls_n >= 10:
+        for key, members in my_types.items():
+            seg_key, seg_label, typ = key
+            base_members = base_types.get(key) or []
+            n, bn = len(members), len(base_members)
+            if n < 5 or bn < 5:
+                continue
+            w = sum(1 for it in members if it["r"].get("win"))
+            bw = sum(1 for it in base_members if it["r"].get("win"))
+            share, base_share = n / cls_n, bn / base_cls_n
+            rate, base_rate = w / n, bw / bn
+            diff_share = share - base_share
+            diff_rate = rate - base_rate
+            if max(abs(diff_share), diff_rate) < 0.10:
+                continue
+            score = max(abs(diff_share), diff_rate) * n
+            if best_phase is None or score > best_phase[0]:
+                ex = _pick_claim_example(members)
+                if abs(diff_share) >= diff_rate:
+                    txt = (f"{seg_label}の「{typ}」が {share:.0%}（全体 {base_share:.0%}、"
+                           f"分類 {cls_n} 件中 {n} 件・{_wl(w, n)}）。")
+                else:
+                    txt = (f"{seg_label}「{typ}」での勝率が {rate:.0%}（全体 {base_rate:.0%}、"
+                           f"{_wl(w, n)}）。")
+                best_phase = (score, txt, ex)
+    if best_phase:
+        _sc, txt, ex = best_phase
+        claims.append({"text": txt, "item": ex, "metric": "phase"})
 
-    # 4. 守りのバイタル占有（15pt 以上）
+    # 4. 守りのバイタル占有（全体との差 15pt 以上）
     vit = model.vitals()
     if vit:
         da = [it for it in items if it["r"]["side"] == DEFENSE and it["su"]]
-        oc = 0
-        for it in da:
-            if any(a in vit for _u, _v, a in it["su"].values()):
-                oc += 1
+        oc = sum(1 for it in da if any(a in vit for _u, _v, a in it["su"].values()))
         if len(da) >= 8:
             orate = oc / len(da)
-            base_oc = _base_vital_rate(base_rounds, model, vit)
+            bda = [it for it in base_items if it["r"]["side"] == DEFENSE and it["su"]]
+            if bda:
+                base_oc = sum(1 for it in bda if any(a in vit for _u, _v, a in it["su"].values())) / len(bda)
+            else:
+                base_oc = _base_vital_rate(base_rounds, model, vit)
             if base_oc is not None and abs(orate - base_oc) >= 0.15:
-                ex = next((it for it in da if any(a in vit for _u, _v, a in it["su"].values())), None)
-                claims.append({"text": f"守りで 1:40 にバイタル（{'・'.join(vit)}）へ人がいる割合 {orate:.0%}（全体 {base_oc:.0%}）。",
-                               "item": ex, "metric": "vital"})
-    # 重複 metric を除いて最大 3
+                ex = _pick_claim_example([it for it in da if any(a in vit for _u, _v, a in it["su"].values())])
+                claims.append({
+                    "text": f"守りで 1:40 にバイタル（{'・'.join(vit)}）へ人がいる割合が {orate:.0%}（全体 {base_oc:.0%}）。",
+                    "item": ex,
+                    "metric": "vital",
+                })
     seen, out = set(), []
     for c in claims:
         if c["metric"] in seen or not c.get("item"):
@@ -680,13 +1215,6 @@ def _why_claims(comp_rounds: list[dict], items: list[dict], base_rounds: list[di
         seen.add(c["metric"])
         out.append(c)
     return out[:3]
-
-
-def _node_phase(it: dict, nid: str) -> str:
-    for ph, val in it["cls"].items():
-        if val == nid:
-            return ph
-    return ""
 
 
 def _base_vital_rate(base_rounds: list[dict], model, vit: list[str]):
@@ -714,9 +1242,12 @@ def _cover_slide(ctx, comp, stat) -> str:
     agents = agents_of(comp)
     teams = "・".join(stat["teams"])
     period = f"{stat['dates'][0]} 〜 {stat['dates'][-1]}" if stat["dates"] else "-"
+    cls_n = stat.get("flow_classified", 0)
+    sk_n = stat.get("flow_skipped", stat["total"] - cls_n)
     body = (_s(f"使うチーム：{teams}") +
             _s(f"期間：{period}（{ENV_LABEL}）") +
-            _s(f"{ctx['map']} {stat['total']} チームラウンド・1:40 の配置が取れたのは {stat['used']}。"))
+            _s(f"{ctx['map']} 全 {stat['total']} ラウンド（基本配置の対象＝1:40 の配置が取れた {stat['used']} ラウンド）。") +
+            _s(f"フェーズ分類できたラウンド数：{cls_n} / 全 {stat['total']} ラウンド（tracks 無し {sk_n} 件は対象外）。"))
     return _slide(f"{ctx['map']} / {ENV_LABEL}", "・".join(agents), body, ctx["map"], h1=True)
 
 
@@ -738,37 +1269,29 @@ def _env_slide(ctx, comp, comp_rows) -> str:
     return _slide("環境とマップ", f"{ENV_LABEL} の構成とバイタル", body, ctx["map"])
 
 
-def _why_slide(ctx, claims) -> str:
+def _why_slide(ctx, claims) -> tuple[str, list[dict]]:
     if not claims:
         return _slide("なぜこの構成か", "なぜこの構成か",
-                      _s("他の構成とはっきりした差は出ていない。"), ctx["map"])
+                      _s("他の構成とはっきりした差は出ていない。"), ctx["map"]), []
     cols = []
-    for c in claims:
-        fig = _fig_svg(ctx["fig"], c["item"], ctx["model"], alt="根拠の見本",
-                       marks=("1:40", "1:30", "1:20"), legend=False, px=320)
-        cols.append(f'<div class="claim">{fig}{_vod_for(c["item"])}{_s(c["text"])}</div>')
-    return _slide("なぜこの構成か", "なぜこの構成か", f'<div class="claims">{"".join(cols)}</div>', ctx["map"])
-
-
-def _hand_slide(ctx, side_label, item, motion, hand, reason: str = "") -> str:
-    eyebrow = f"{side_label} / 手札（{hand['n']} 回・{hand['rate']:.0%}）"
-    if not item:
-        body = _s(reason or f"{hand['name']}：1:40 に5人そろった見本ラウンドがありません。動く図は出せません。")
-        return _slide(eyebrow, hand["name"], body, ctx["map"])
-    eyebrow += f" 見本 {sample_label(item['r'])}"
-    lines = _agent_lines(item, ctx["model"])
-    body = (f'<div class="handfig"><div>{motion}{_vod_for(item)}</div>'
-            f'<div class="handtxt">{_ul(lines)}</div></div>')
-    return _slide(eyebrow, hand["name"], body, ctx["map"])
-
-
-def _side_reason_slide(ctx, side, kind, reason) -> str:
-    label = "守り" if side == DEFENSE else "攻め"
-    return _slide(f"{label} / {kind}", f"{label}の{kind}", _s(reason), ctx["map"])
+    claims_meta = []
+    for idx, c in enumerate(claims, 1):
+        b_html, b_meta = build_phase_boards(
+            ctx, c["item"], f"根拠_{c['metric']}", f"{ctx['comp_slug']}_why_{idx}_{c['metric']}"
+        )
+        cols.append(f'<div class="claim">{b_html}{_vod_for(c["item"])}{_s(c["text"])}</div>')
+        claims_meta.append({
+            "metric": c["metric"],
+            "text": c["text"],
+            "sample_round": sample_key(c["item"]),
+            "boards": b_meta,
+            "expected_boards": len(b_meta),
+        })
+    return _slide("なぜこの構成か", "なぜこの構成か", f'<div class="claims">{"".join(cols)}</div>', ctx["map"]), claims_meta
 
 
 def side_avg_winrate(items: list[dict], side: str):
-    """その側の平均勝率（型と同じ母数＝ピストルを除く・1:40 に5人そろったラウンド）。"""
+    """その側の平均勝率（基本配置と同じ母数＝ピストルを除く・1:40 に5人そろったラウンド）。"""
     pool = [it for it in items if it["r"]["side"] == side and not it["r"]["pistol"] and is_full5(it)]
     if not pool:
         return None
@@ -790,24 +1313,27 @@ def choose_placement(patterns: list[dict], avg):
 
 def _placement_slide(ctx, side, patterns, items, used) -> tuple[str, dict]:
     label = "守り" if side == DEFENSE else "攻め"
+    side_slug = "def" if side == DEFENSE else "atk"
     avg = side_avg_winrate(items, side)
     chosen, avoid = choose_placement(patterns, avg)
     pool_n = sum(1 for it in items if it["r"]["side"] == side and not it["r"]["pistol"] and is_full5(it))
-    item, motion, reason = None, "", ""
+    item, boards_html, boards_meta, reason = None, "", [], ""
     reason_kind = ""
     if chosen:
-        item, motion = _pick_motion(chosen["members"], used, ctx["model"], ctx["k"], ctx["walk"], ctx["bg"],
-                                    f"{label}の基本配置", allow_used=True)
+        item = _pick_claim_example(chosen["members"]) or chosen["medoid"]
         if item:
             used.add(sample_key(item))
+            boards_html, boards_meta = build_phase_boards(
+                ctx, item, f"{label}の基本配置", f"{ctx['comp_slug']}_placement_{side_slug}"
+            )
     texts = []
-    if chosen and motion:
+    if chosen and boards_html:
         reason_kind = "rendered"
         rate = chosen["w"] / chosen["n"] if chosen["n"] else 0.0
         zones = "・".join(f"{z}{n}枚" for z, n in sorted(chosen["zones"].items(), key=lambda kv: -kv[1]))
         texts.append(_s(f"基本配置：{chosen['name']}（{_wl(chosen['w'], chosen['n'])}・勝率 {rate:.0%}、"
-                        f"この側の平均 {avg:.0%}）。"))
-        texts.append(_s(f"1:40 の人数は {zones or '-'}。1:30・1:20 の動きを同じ駒でつないでいる。"))
+                        f"この側の平均 {avg:.0%}／全ラウンド基盤の非ピストル full5 {pool_n} 件中）。"))
+        texts.append(_s(f"1:40 の初期人数配分は {zones or '-'}。代表ラウンド（{sample_label(item['r'])}）の序盤・中盤・終盤を並べている。"))
     elif chosen:
         reason_kind = "no_motion"
         reason = (f"{label}の基本配置は {chosen['name']}（{_wl(chosen['w'], chosen['n'])}）だが、"
@@ -830,8 +1356,8 @@ def _placement_slide(ctx, side, patterns, items, used) -> tuple[str, dict]:
     if avoid:
         a = "、".join(f"{p['name']}（{_wl(p['w'], p['n'])}）" for p in avoid)
         texts.append(_s(f"避けるべき型：{a}。"))
-    if motion:
-        body = f'<div class="handfig">{motion}<div class="handtxt">{"".join(texts)}</div></div>'
+    if boards_html:
+        body = f'<div class="placement-wrap">{boards_html}<div class="handtxt">{"".join(texts)}</div></div>'
     else:
         body = f'<div class="handtxt">{"".join(texts)}</div>'
     meta = {"side": side, "name": chosen["name"] if chosen else None,
@@ -841,7 +1367,8 @@ def _placement_slide(ctx, side, patterns, items, used) -> tuple[str, dict]:
             "meets_winrate": bool(chosen) and (avg is None or chosen["w"] / chosen["n"] >= avg),
             "pool_n": pool_n, "reason_kind": reason_kind,
             "avoid": [{"name": p["name"], "n": p["n"], "w": p["w"]} for p in avoid],
-            "rendered": bool(motion), "sample_round": sample_key(item) if item else None, "reason": reason}
+            "rendered": bool(boards_html), "sample_round": sample_key(item) if item else None,
+            "boards": boards_meta, "reason": reason}
     return _slide(f"{label} / 配置", f"{label}の基本配置", body, ctx["map"]), meta
 
 
@@ -857,7 +1384,7 @@ def _pattern_slide(ctx, def_pats, atk_pats) -> str:
                     f"<td>{_wl(p['w'], p['n'])}</td><td>{link}</td></tr>")
     table = ('<table><thead><tr><th>側</th><th>型名</th><th>回数</th><th>勝敗</th><th>見本</th></tr></thead>'
              f'<tbody>{"".join(rows)}</tbody></table>')
-    return _slide("配置 / 型の一覧", "型の一覧", table, ctx["map"])
+    return _slide("配置 / 型の一覧", "基本配置の型一覧（1:40 配置クラスタ）", table, ctx["map"])
 
 
 def _role_table(ctx, comp, items, side) -> str:
@@ -885,87 +1412,192 @@ def _role_slide(ctx, comp, items) -> str:
     return _slide("真似る手順", "役割表", body, ctx["map"])
 
 
+def _phase_type_slide(ctx: dict, sec: dict, t_info: dict, idx: int,
+                      total_rounds: int, classified_rounds: int) -> tuple[str, dict]:
+    """序盤・中盤・終盤の各型のスライド（3枚図＋アクション→リアクション説明＋代表ラウンド複数件＋実プレイGIF＋VODカード）。"""
+    seg_key = sec["seg"]
+    seg_label = sec["label"]
+    typ = t_info["type"]
+    n = t_info["n"]
+    w = t_info["w"]
+    rate = t_info["rate"]
+    share = t_info["share"]
+    lead = t_info["lead"]
+    reps = t_info["reps"]
+    sk_n = total_rounds - classified_rounds
+
+    slug_prefix = f"{ctx['comp_slug']}_{seg_key}_{idx}_{_slug(typ)}"
+    boards_html, boards_meta = build_phase_boards(ctx, lead, f"{seg_label} {typ}", slug_prefix)
+
+    # 代表ラウンド（複数件）の流れ要約行と VOD カード、実プレイ例の GIF
+    rep_lines = []
+    vod_cards = []
+    reps_meta = []
+    gif_html, lead_gif_rel = play_gif_card(ctx, lead) if lead else ("", "")
+
+    for r_idx, rep_it in enumerate(reps[:3]):
+        r = rep_it["r"]
+        lbl = sample_label(r)
+        side_ja = "攻め" if r.get("side") == ATTACK else "守り"
+        fl_map = (rep_it.get("flow") or {}).get("flow") or {}
+        seg_flow = (fl_map.get(seg_key) or "").strip()
+        all_flow = "→".join(s for k in ("early", "mid", "late") for s in [(fl_map.get(k) or "").strip()] if s)
+        flow_disp = seg_flow or all_flow or "支配変化なし（構え合い）"
+        rep_lines.append(f"代表 {lbl}（{side_ja}）：{flow_disp}")
+        vc = _vod_for(rep_it)
+        if vc:
+            vod_cards.append(vc)
+        _, g_rel = (gif_html, lead_gif_rel) if r_idx == 0 else play_gif_card(ctx, rep_it)
+        reps_meta.append({
+            "round": sample_key(rep_it),
+            "team": r.get("tag") or r.get("team"),
+            "opp": r.get("opp_tag") or r.get("opp"),
+            "label": lbl,
+            "side": r.get("side"),
+            "flow": flow_disp,
+            "has_vod": bool(vc),
+            "gif": g_rel,
+            "full5": is_full5(rep_it),
+        })
+
+    # スライド本文は p.s 2行 + li 最大3行 = 最大5行以内を守る
+    stat_line = (f"{seg_label}の型「{typ}」：{n} 件・勝率 {rate:.0%}（{_wl(w, n)}／"
+                 f"フェーズ分類できた {classified_rounds} ラウンド中 {share:.0%}、"
+                 f"全 {total_rounds} ラウンド中 tracks 無し {sk_n} 件は対象外）。")
+    desc_line = t_info["description"]
+
+    media_row = f'<div class="rep-media">{gif_html}{"".join(vod_cards)}</div>'
+    body = (
+        f'{boards_html}'
+        f'<div class="phase-body">'
+        f'<div class="handtxt">{_s(stat_line)}{_s(desc_line)}{_ul(rep_lines, cls="rep-list")}</div>'
+        f'{media_row}'
+        f'</div>'
+    )
+    eyebrow = f"{seg_label} / フェーズ型（{n} 件・勝率 {rate:.0%}・分類 {classified_rounds}/{total_rounds}R）"
+    slide_html = _slide(eyebrow, f"{seg_label}：{typ}", body, ctx["map"], cls=f"phase-slide phase-{seg_key}")
+    meta = {
+        "seg": seg_key,
+        "seg_label": seg_label,
+        "type": typ,
+        "n": n,
+        "w": w,
+        "rate": round(rate, 4),
+        "share": round(share, 4),
+        "description": desc_line,
+        "lead_round": sample_key(lead) if lead else None,
+        "boards": boards_meta,
+        "expected_boards": len(boards_meta),
+        "representatives": reps_meta,
+    }
+    return slide_html, meta
+
+
+def _phase_empty_slide(ctx: dict, sec: dict, total_rounds: int, classified_rounds: int) -> str:
+    seg_label = sec["label"]
+    sk_n = total_rounds - classified_rounds
+    body = (
+        _s(f"{seg_label}の該当する型はありません（フェーズ分類できた {classified_rounds} / 全 {total_rounds} ラウンド、"
+           f"tracks 無し {sk_n} 件は対象外）。") +
+        _s("この区間に該当するイベント（プラント等）が発生したラウンドがありませんでした。")
+    )
+    return _slide(f"{seg_label} / フェーズ型（0 件・分類 {classified_rounds}/{total_rounds}R）",
+                  f"{seg_label}：該当型なし", body, ctx["map"], cls=f"phase-slide phase-{sec['seg']}")
+
+
 def _appendix_slide(ctx, stat, singles, unknown, def_pats, atk_pats) -> str:
+    cls_n = stat.get("flow_classified", 0)
+    sk_n = stat.get("flow_skipped", stat["total"] - cls_n)
     tables = []
     tables.append('<table><thead><tr><th>数合わせ</th><th>値</th></tr></thead><tbody>'
-                  f'<tr><td>総数</td><td>{stat["total"]}</td></tr>'
-                  f'<tr><td>守り（使用）</td><td>{stat["used_def"]}</td></tr>'
-                  f'<tr><td>攻め（使用）</td><td>{stat["used_atk"]}</td></tr>'
+                  f'<tr><td>総数（環境内ラウンド）</td><td>{stat["total"]}</td></tr>'
+                  f'<tr><td>守り（1:40 配置あり）</td><td>{stat["used_def"]}</td></tr>'
+                  f'<tr><td>攻め（1:40 配置あり）</td><td>{stat["used_atk"]}</td></tr>'
                   f'<tr><td>除外（1:40 が取れない）</td><td>{stat["excluded"]}</td></tr>'
-                  f'<tr><td>ピストル</td><td>{stat.get("pistol", 0)}</td></tr></tbody></table>')
+                  f'<tr><td>ピストル</td><td>{stat.get("pistol", 0)}</td></tr>'
+                  f'<tr><td>フェーズ分類対象（tracks あり）</td><td>{cls_n}</td></tr>'
+                  f'<tr><td>フェーズ分類対象外（tracks 無し）</td><td>{sk_n}</td></tr></tbody></table>')
     tables.append('<table><thead><tr><th>設定値</th><th>値</th><th>意味</th></tr></thead><tbody>'
                   + "".join(f'<tr><td>{_e(k)}</td><td>{_e(v)}</td><td>{_e(d)}</td></tr>'
                             for k, v, d in SETTINGS) + "</tbody></table>")
-    tables.append('<table><thead><tr><th>内部の呼び方</th><th>この冊子での言い方</th></tr></thead><tbody>'
-                  + "".join(f'<tr><td>{_e(k)}</td><td>{_e(v)}</td></tr>' for k, v in GLOSSARY.items())
-                  + "</tbody></table>")
+    tables.append('<table><thead><tr><th>フェーズ区間</th><th>区間の切り方</th><th>判定する型</th></tr></thead><tbody>'
+                  + "".join(f'<tr><td>{_e(seg)}</td><td>{_e(cut)}</td><td>{_e(tps)}</td></tr>'
+                            for seg, cut, tps in PHASE_RULES) + "</tbody></table>")
     single_txt = "、".join(f"{s['name']}（{s['n']}）" for s in singles) or "なし"
     return _slide("付録", "付録",
-                  _s(f"単発の型（1〜{PATTERN_MIN - 1} 回）：{single_txt}") +
+                  _s(f"単発の1:40配置（1〜{PATTERN_MIN - 1} 回）：{single_txt}") +
                   _s(f"構成不明で外したラウンド（{ctx['map']} 全体）：{unknown}") +
                   f'<div class="appendix">{"".join(tables)}</div>', ctx["map"], cls="appendix")
 
 
 def build_page(ctx, comp: str, rounds: list[dict], items: list[dict], stat: dict, comp_rows) -> tuple[str, dict]:
-    ctx = {**ctx, "map": ctx["map"]}
+    comp_slug = re.sub(r"[^A-Za-z0-9]+", "-", comp).strip("-").lower() or "comp"
+    ctx = {**ctx, "map": ctx["map"], "comp_slug": comp_slug}
     used_names: set[str] = set()
     def_pats, def_singles = build_patterns(items, ctx["model"], ctx["k"], DEFENSE, used_names)
     atk_pats, atk_singles = build_patterns(items, ctx["model"], ctx["k"], ATTACK, used_names)
     claims = _why_claims(rounds, items, ctx["base_rounds"], ctx["base_items"], ctx["model"])
 
-    slides = [_cover_slide(ctx, comp, stat), _env_slide(ctx, comp, comp_rows), _why_slide(ctx, claims)]
+    why_html, claims_meta = _why_slide(ctx, claims)
+    slides = [_cover_slide(ctx, comp, stat), _env_slide(ctx, comp, comp_rows), why_html]
 
     sample_keys = set()
-    used_samples: set[str] = set()
-    hands_meta: list[dict] = []
-    # 手札（守り・攻めの両側。見本は full5 から選び、手札どうしで重ならないようにする）
-    for side, label in ((DEFENSE, "守り"), (ATTACK, "攻め")):
-        hands = hand_nodes(items, side)
-        if not hands:
-            side_n = sum(1 for it in items if it["r"]["side"] == side and not it["r"]["pistol"]
-                         and it["su"] is not None)
-            slides.append(_side_reason_slide(
-                ctx, side, "手札",
-                f"{label}の手札はありません（対象 {side_n} ラウンド。{HAND_MIN_N} 回以上かつ勝率 "
-                f"{HAND_MIN_WINRATE:.0%} 以上の動きが出ませんでした）。"))
-            continue
-        for h in hands:
-            src = [it for it in items if it["r"]["side"] == side and not it["r"]["pistol"]
-                   and h["id"] in it["cls"].values() and is_full5(it)]
-            item, motion = _pick_motion(src, used_samples, ctx["model"], ctx["k"], ctx["walk"], ctx["bg"],
-                                        h["name"])
-            if item:
-                used_samples.add(sample_key(item))
-                sample_keys.add(item["r"]["comp_key"])
-                status, reason = "ok", ""
-            elif not src:
-                status = "no_full5"
-                reason = f"{h['name']}：1:40 に5人そろった見本ラウンドがありません。動く図は出せません。"
-            else:
-                status = "no_motion"
-                reason = (f"{h['name']}：5人そろった見本ラウンドは {len(src)} 件ありますが、"
-                          f"動く図にできるラウンドがありませんでした。")
-            slides.append(_hand_slide(ctx, label, item, motion, h, reason))
-            r = item["r"] if item else None
-            hands_meta.append({
-                "side": side, "id": h["id"], "name": h["name"], "n": h["n"], "w": h["w"],
-                "rate": round(h["rate"], 4), "sample_round": sample_key(item) if item else None,
-                "sample_full5": bool(item), "sample_status": status,
-                "sample_team": (r.get("tag") or r.get("team")) if r else None,
-                "sample_opp": r.get("opp_tag") if r else None,
-                "sample_label": sample_label(r) if r else "",
-            })
+    for c in claims:
+        if c.get("item"):
+            sample_keys.add(c["item"]["r"]["comp_key"])
 
+    used_samples: set[str] = set()
     placement_meta: list[dict] = []
     for side, pats in ((DEFENSE, def_pats), (ATTACK, atk_pats)):
-        html, meta = _placement_slide(ctx, side, pats, items, used_samples)
-        slides.append(html)
-        placement_meta.append(meta)
+        html_pl, meta_pl = _placement_slide(ctx, side, pats, items, used_samples)
+        slides.append(html_pl)
+        placement_meta.append(meta_pl)
     slides.append(_pattern_slide(ctx, def_pats, atk_pats))
     slides.append(_role_slide(ctx, comp, items))
+
+    # 序盤・中盤・終盤の3部構成（phases.classify_flow による型表示）
+    phase_data = build_phase_sections(items)
+    phase_sections_meta = []
+    hands_compat_meta = []
+    for sec in phase_data["sections"]:
+        sec_types_meta = []
+        if not sec["types"]:
+            slides.append(_phase_empty_slide(ctx, sec, phase_data["total"], phase_data["classified"]))
+        else:
+            for idx, t_info in enumerate(sec["types"], 1):
+                s_html, t_meta = _phase_type_slide(
+                    ctx, sec, t_info, idx, phase_data["total"], phase_data["classified"]
+                )
+                slides.append(s_html)
+                sec_types_meta.append(t_meta)
+                for rep_it in t_info["reps"]:
+                    sample_keys.add(rep_it["r"]["comp_key"])
+                if t_meta["representatives"]:
+                    lead_rep = t_meta["representatives"][0]
+                    hands_compat_meta.append({
+                        "side": lead_rep["side"],
+                        "id": f"{sec['seg']}:{t_info['type']}",
+                        "name": f"{sec['label']}：{t_info['type']}",
+                        "n": t_info["n"],
+                        "w": t_info["w"],
+                        "rate": t_meta["rate"],
+                        "sample_round": lead_rep["round"],
+                        "sample_full5": True,
+                        "sample_status": "ok",
+                        "sample_team": lead_rep["team"],
+                        "sample_opp": lead_rep["opp"],
+                        "sample_label": lead_rep["label"],
+                    })
+        phase_sections_meta.append({
+            "seg": sec["seg"],
+            "label": sec["label"],
+            "typed_rounds": sec["typed_rounds"],
+            "untyped_rounds": sec["untyped_rounds"],
+            "types": sec_types_meta,
+        })
+
     slides.append(_appendix_slide(ctx, stat, def_singles + atk_singles, ctx["unknown"], def_pats, atk_pats))
 
-    # 型の見本ラウンドの構成も照合対象に入れる
     for p in def_pats + atk_pats:
         sample_keys.add(p["medoid"]["r"]["comp_key"])
 
@@ -975,15 +1607,27 @@ def build_page(ctx, comp: str, rounds: list[dict], items: list[dict], stat: dict
             f'<title>{_e("・".join(agents_of(comp)))} {_e(ctx["map"])} プレイブック v5</title>'
             f'<style>{ctx["css"]}</style></head><body>{ctx["fig"].defs()}'
             f'<main class="deck"><div class="toolbar"><p>{_e("・".join(agents_of(comp)))} の {_e(ctx["map"])}'
-            f'</p><p>印刷すると 1 スライド 1 ページ</p></div>{body}</main>{ctx["js"]}</body></html>')
-    manifest = {"key": comp, "agents": agents_of(comp), "total": stat["total"], "used_def": stat["used_def"],
-                "used_atk": stat["used_atk"], "excluded": stat["excluded"], "full5": stat["full5"],
-                "dates": stat["dates"], "teams": stat["teams"],
-                "patterns": [{"side": p["side"], "name": p["name"], "n": p["n"], "w": p["w"]}
-                             for p in def_pats + atk_pats],
-                "hands": hands_meta,
-                "placements": placement_meta,
-                "sample_comp_keys": sorted(k for k in sample_keys if k)}
+            f'</p><p>印刷すると 1 スライド 1 ページ</p></div>{body}</main></body></html>')
+    manifest = {
+        "key": comp,
+        "agents": agents_of(comp),
+        "total": stat["total"],
+        "used_def": stat["used_def"],
+        "used_atk": stat["used_atk"],
+        "excluded": stat["excluded"],
+        "full5": stat["full5"],
+        "flow_classified": stat["flow_classified"],
+        "flow_skipped": stat["flow_skipped"],
+        "dates": stat["dates"],
+        "teams": stat["teams"],
+        "patterns": [{"side": p["side"], "name": p["name"], "n": p["n"], "w": p["w"]}
+                     for p in def_pats + atk_pats],
+        "hands": hands_compat_meta,
+        "placements": placement_meta,
+        "claims": claims_meta,
+        "phase_sections": phase_sections_meta,
+        "sample_comp_keys": sorted(k for k in sample_keys if k),
+    }
     return _bump_html(page), manifest
 
 
@@ -993,10 +1637,12 @@ def _index_page(ctx, pages: list[dict], skipped: list[dict], old: list[dict]) ->
     for p in sorted(pages, key=lambda x: -x["total"]):
         wr = p["wins"] / p["total"] if p["total"] else 0
         rows.append(f'<tr><td>{"・".join(p["agents"])}</td><td>{_e("・".join(p["teams"]))}</td><td>{p["total"]}</td>'
-                    f'<td>{wr:.0%}</td><td>{p["dates"][-1] if p["dates"] else "-"}</td>'
+                    f'<td>{wr:.0%}</td><td>{p.get("flow_classified", 0)}/{p["total"]}</td>'
+                    f'<td>{p["dates"][-1] if p["dates"] else "-"}</td>'
                     f'<td><a href="{html.escape(p["file"], quote=True)}">ページ</a></td></tr>')
-    main_table = ('<table><thead><tr><th>5人構成</th><th>チーム</th><th>ラウンド</th><th>勝率</th><th>直近</th>'
-                  f'<th>リンク</th></tr></thead><tbody>{"".join(rows)}</tbody></table>')
+    main_table = ('<table><thead><tr><th>5人構成</th><th>チーム</th><th>ラウンド</th><th>勝率</th>'
+                  '<th>フェーズ分類</th><th>直近</th><th>リンク</th></tr></thead>'
+                  f'<tbody>{"".join(rows)}</tbody></table>')
     sk = []
     for s in sorted(skipped, key=lambda x: -x["total"]):
         sk.append(f'<tr><td>{"・".join(s["agents"])}</td><td>{s["total"]}</td><td>{s["full5"]}</td>'
@@ -1048,23 +1694,6 @@ def _seed_cache(cfg: dict, out: Path, log=print) -> None:
     log("  既存キャッシュが見つかりませんでした（マップ画像の取得を試みます）")
 
 
-def _motion_js() -> str:
-    """deck の MOTION_JS を複製し、reduced-motion 対応を足す。三項演算子は検証の「?」禁止に合わせて書き換える。"""
-    js = D.MOTION_JS
-    js = js.replace("let t=0, playing=true;",
-                    "var reduce=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;"
-                    "let t=0, playing=!reduce;")
-    js = js.replace("var t=L[k]>0?Math.min(1,r/L[k]):0;",
-                    "var t=0;if(L[k]>0){t=Math.min(1,r/L[k]);}")
-    js = js.replace("e.target.textContent=playing?'一時停止':'再生';",
-                    "if(playing){e.target.textContent='一時停止';}else{e.target.textContent='再生';}")
-    js = js.replace("el.querySelector('.mo-play').addEventListener('click',function(e){playing=!playing;",
-                    "var pb=el.querySelector('.mo-play');"
-                    "if(playing){pb.textContent='一時停止';}else{pb.textContent='再生';}"
-                    "pb.addEventListener('click',function(e){playing=!playing;")
-    return js
-
-
 def _css() -> str:
     v5 = """
 .deck{max-width:1180px}
@@ -1079,20 +1708,25 @@ def _css() -> str:
 .claims{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;align-items:start}
 .claim{min-width:0}
 .claim .s{font-size:14px;line-height:1.6;margin:6px 0 0}
-.vod{margin:6px 0 0;border:1px solid var(--line-weak);border-radius:var(--radius);overflow:hidden;background:var(--bg-sub)}
-.vod img{display:block;width:100%;height:auto}
-.vod figcaption{font-size:14px;padding:3px 8px}
-.handfig{display:grid;grid-template-columns:minmax(300px,440px) minmax(240px,1fr);gap:18px;align-items:start}
-.mo-map{width:min(100%,440px)}
-.claim .mo-map{width:min(100%,360px)}
-.handtxt ul{margin:0;padding-left:1.2em}
+.boards3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;align-items:start;margin:8px 0}
+.board-card{border:1px solid var(--line-weak);border-radius:var(--radius);overflow:hidden;background:var(--bg-sub)}
+.board-card img.tactival-img{display:block;width:100%;height:auto}
+.board-card .board-note{padding:16px 12px;font-size:14px;line-height:1.5;color:var(--text-sub);background:var(--bg)}
+.board-card figcaption{font-size:14px;padding:4px 8px;font-weight:700}
+.phase-body{display:grid;grid-template-columns:1fr minmax(260px,420px);gap:16px;align-items:start;margin-top:8px}
+.rep-media{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;align-items:start}
+.play-gif,.vod{margin:0;border:1px solid var(--line-weak);border-radius:var(--radius);overflow:hidden;background:var(--bg-sub)}
+.play-gif img,.vod img{display:block;width:100%;height:auto}
+.play-gif figcaption,.vod figcaption{font-size:14px;padding:3px 8px}
+.placement-wrap{display:grid;gap:12px}
+.handtxt ul{margin:4px 0 0;padding-left:1.2em}
 .handtxt li{font-size:14px;line-height:1.7;margin:0 0 4px}
 .handtxt .s{margin:0 0 6px}
 .rolewrap{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start}
 .appendix{display:grid;gap:10px}
 .appendix table{font-size:14px}
 figure{margin:0}
-@media (max-width:900px){.handfig,.rolewrap{grid-template-columns:1fr}}
+@media (max-width:900px){.boards3,.phase-body,.claims,.rolewrap{grid-template-columns:1fr}}
 """
     return _bump_css(D.CSS + MF.CSS + v5)
 
@@ -1120,30 +1754,34 @@ def generate(reports: list[dict], map_name: str, out, cfg: dict, log=print) -> P
     comp_rows = sorted(env_stats.items(), key=lambda kv: -kv[1]["total"])
 
     base_items = _items_for(base_rounds, allr, ctx0["model"])
-    ctx = {**ctx0, "map": map_name, "base_rounds": base_rounds, "base_items": base_items, "unknown": unknown,
-           "css": _css(), "js": _motion_js()}
+    ctx = {**ctx0, "map": map_name, "out": out, "base_rounds": base_rounds, "base_items": base_items,
+            "unknown": unknown, "css": _css()}
 
     pages, skipped, page_meta = [], [], []
-    for comp in sorted(env_by, key=lambda k: -len(env_by[k])):
-        rounds = env_by[comp]
-        items = _items_for(rounds, allr, ctx0["model"])
-        stat = comp_stats(rounds, items)
-        stat["pistol"] = sum(1 for r in rounds if r.get("pistol"))
-        ok, reason = gate_ok(stat)
-        if not ok:
-            skipped.append({"key": comp, "agents": agents_of(comp), "total": stat["total"],
-                            "full5": stat["full5"], "reason": reason})
-            continue
-        html_page, manifest = build_page(ctx, comp, rounds, items, stat, comp_rows)
-        slug = re.sub(r"[^A-Za-z0-9]+", "-", comp).strip("-").lower() or "comp"
-        fn = f"comp_{slug}.html"
-        (out / fn).write_text(html_page, encoding="utf-8")
-        manifest["file"] = fn
-        manifest["wins"] = stat["wins"]
-        page_meta.append(manifest)
-        pages.append({"agents": agents_of(comp), "teams": stat["teams"], "total": stat["total"],
-                      "wins": stat["wins"], "dates": stat["dates"], "file": fn})
-        log(f"  ページを作成: {fn}（{stat['total']} ラウンド）")
+    try:
+        for comp in sorted(env_by, key=lambda k: -len(env_by[k])):
+            rounds = env_by[comp]
+            items = _items_for(rounds, allr, ctx0["model"])
+            stat = comp_stats(rounds, items)
+            stat["pistol"] = sum(1 for r in rounds if r.get("pistol"))
+            ok, reason = gate_ok(stat)
+            if not ok:
+                skipped.append({"key": comp, "agents": agents_of(comp), "total": stat["total"],
+                                "full5": stat["full5"], "reason": reason})
+                continue
+            html_page, manifest = build_page(ctx, comp, rounds, items, stat, comp_rows)
+            slug = re.sub(r"[^A-Za-z0-9]+", "-", comp).strip("-").lower() or "comp"
+            fn = f"comp_{slug}.html"
+            (out / fn).write_text(html_page, encoding="utf-8")
+            manifest["file"] = fn
+            manifest["wins"] = stat["wins"]
+            page_meta.append(manifest)
+            pages.append({"agents": agents_of(comp), "teams": stat["teams"], "total": stat["total"],
+                          "wins": stat["wins"], "flow_classified": stat["flow_classified"],
+                          "dates": stat["dates"], "file": fn})
+            log(f"  ページを作成: {fn}（全{stat['total']}R / フェーズ分類{stat['flow_classified']}R）")
+    finally:
+        BI.close()
 
     old_meta = [{"key": k, "agents": agents_of(k), "total": len(v),
                  "teams": sorted({str(r.get("tag") or r.get("team")) for r in v})} for k, v in old_by.items()]

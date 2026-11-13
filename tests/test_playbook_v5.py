@@ -1,6 +1,12 @@
-"""プレイブック v5 の純粋関数（ネットワークなし）。docs/PLAYBOOK_v5.md の「テスト」節。"""
+"""プレイブック v5 の純粋関数と段階B（フェーズ3部構成・3枚図・文面・GIF/VOD・検証）のテスト（ネットワークなし）。"""
 from collections import Counter
+import json
 
+import numpy as np
+
+from scripts import validate_playbook_v5 as V5
+from vreplay import kb as K
+from vreplay import phases as P
 from vreplay import playbook_v5 as PB
 
 
@@ -9,11 +15,84 @@ def _rec(comp_key, win=True, side="攻撃", date="2026-10-01", n=1, pistol=False
 
 
 def _item(*, win=True, su=5, n=1, match_id="m", order=1, tag="LOUD", opp_tag="PRX",
-          side="攻撃", pistol=False, cls=None):
-    setup = {f"A{i}": (0.1 * i, 0.1 * i, "A") for i in range(su)} if su else None
+          side="攻撃", pistol=False, cls=None, flow=None, yt="https://youtu.be/wX7SJF9xoCM?t=79",
+          comp_key="Fade|Neon|Omen|Viper|Yoru", raw_round=None):
+    agents = ("Fade", "Neon", "Omen", "Viper", "Yoru")
+    setup = {agents[i]: (0.20 + 0.02 * i, 0.25 + 0.02 * i, "A Main") for i in range(su)} if su else None
     r = {"match_id": match_id, "order": order, "n": n, "win": win, "tag": tag, "opp_tag": opp_tag,
-         "side": side, "pistol": pistol, "comp_key": "x"}
-    return {"r": r, "su": setup, "cls": cls or {}, "opp": {}}
+         "side": side, "pistol": pistol, "comp_key": comp_key, "yt": yt, "date": "2026-10-05",
+         "plant_site": "A"}
+    if raw_round is not None:
+        r["_round"] = raw_round
+    if flow is None and raw_round is not None:
+        flow = P.classify_flow(raw_round)
+    return {"r": r, "su": setup, "cls": cls or {}, "opp": {}, "flow": flow,
+            "flow_skip": None if flow else "no_tracks"}
+
+
+def _sample_pt(e, x, y, zone, callout=None):
+    return [e, x, y, 0.9, "det", zone, callout if callout is not None else zone]
+
+
+def _synth_round(*, n=1, kind="default", plant_t=130.0, kills=None):
+    """合成 tracks を持つ report.json のラウンド要素を作る。"""
+    agents1 = ("Fade", "Neon", "Omen", "Viper", "Yoru")
+    agents2 = ("Raze", "Sage", "Skye", "Killjoy", "Chamber")
+    t1 = {}
+    if kind == "rush":
+        for i, ag in enumerate(agents1):
+            z = "A" if i < 4 else "Mid"
+            c = "A Site" if i < 3 else "A Main"
+            t1[ag] = [
+                _sample_pt(0, 0.50, 0.85, "攻撃側", "Spawn"),
+                _sample_pt(5, 0.28, 0.55, z, "A Main"),
+                _sample_pt(10, 0.28, 0.28, z, c),
+                _sample_pt(15, 0.28, 0.26, z, c),
+                _sample_pt(20, 0.28, 0.25, z, c),
+                _sample_pt(30, 0.28, 0.25, z, c),
+                _sample_pt(40, 0.28, 0.25, z, c),
+            ]
+    else:
+        # 序盤 A デフォルト → 中盤 リグループセット / フリーズ → 終盤 サイト耐え / 下がる
+        for i, ag in enumerate(agents1):
+            z0 = "A" if i < 3 else "Mid"
+            c_late = "A Site" if (kind == "hold_site" and i < 3) else "A Main"
+            t1[ag] = [
+                _sample_pt(0, 0.50, 0.85, "攻撃側", "Spawn"),
+                _sample_pt(5, 0.30, 0.55, z0, f"{z0} Main"),
+                _sample_pt(10, 0.30, 0.55, z0, f"{z0} Main"),
+                _sample_pt(15, 0.30, 0.50, "A", "A Main"),
+                _sample_pt(20, 0.29, 0.45, "A", "A Main"),
+                _sample_pt(25, 0.28, 0.28, "A", "A Site"),
+                _sample_pt(30, 0.28, 0.28, "A", c_late),
+                _sample_pt(40, 0.28, 0.35, "A", c_late),
+            ]
+    t2 = {
+        ag: [
+            _sample_pt(0, 0.50, 0.15, "防衛側", "Spawn"),
+            _sample_pt(5, 0.30, 0.25, "A", "A Site"),
+            _sample_pt(10, 0.30, 0.25, "A", "A Site"),
+            _sample_pt(20, 0.65, 0.25, "B", "B Site"),
+            _sample_pt(30, 0.35, 0.25, "A", "A Heaven"),
+            _sample_pt(40, 0.30, 0.25, "A", "A Site"),
+        ]
+        for ag in agents2
+    }
+    if kills is None:
+        kills = [{"t": 110.0, "killer_team": "LOUD"}]
+    return {
+        "n": n,
+        "side1": "攻撃",
+        "duration": "0:50",
+        "t_drop": 100.0,
+        "plant_t": plant_t,
+        "winner": "LOUD",
+        "side": "攻撃",
+        "winner_no": 1,
+        "kills": kills,
+        "yt_url": f"https://youtu.be/wX7SJF9xoCM?t={70 + n}",
+        "tactics": {"tracks": {"1": t1, "2": t2}, "plant_site": "A" if plant_t else None},
+    }
 
 
 # ---------------------------------------------------------------- 構成グルーピング
@@ -71,7 +150,6 @@ def test_glossary_replaces_internal_terms_without_abbrev():
 
 
 def test_defense_type_names_exclude_attack_only_phrases():
-    # 守りの型名・手札名に攻め専用の言い回しが残らない
     for nid in PB.DEFENSE_NODES:
         word = PB.glossary_word_side(nid, PB.DEFENSE)
         assert word
@@ -79,7 +157,6 @@ def test_defense_type_names_exclude_attack_only_phrases():
             assert ph not in word, (nid, word)
     name = PB.pattern_name(Counter({"B": 3}), PB.glossary_word_side("fast_deep", PB.DEFENSE), PB.DEFENSE)
     assert "置いて" in name and "深くまで早く入って" not in name
-    # 攻め側は元の言い回しのまま
     assert PB.glossary_word_side("fast_deep", PB.ATTACK) == PB.GLOSSARY["fast_deep"]
 
 
@@ -175,3 +252,168 @@ def test_unique_name_makes_collisions_distinct():
     assert a == base
     assert len({a, b, c}) == 3
     assert all(x.startswith(base) for x in (a, b, c))
+
+
+# ================================================================ 段階B: 3枚図・フェーズ3部・文面・検証
+def test_phase_board_times_picks_early_mid_late_and_omits_missing_late():
+    rr_with_plant = _synth_round(n=1, kind="default", plant_t=130.0)
+    times = PB.phase_board_times(rr_with_plant)
+    assert [seg for seg, _lbl, _t in times] == ["early", "mid", "late"]
+    # 序盤=開幕後最初の安定サンプル(5.0s)、中盤=区間中央に最も近いサンプル(15.0s)、終盤=プラント直後(30.0s)
+    assert times[0][2] == 5.0
+    assert times[1][2] == 15.0
+    assert times[2][2] == 30.0
+
+    # プラント無しのラウンドでは終盤を出さない
+    rr_no_plant = _synth_round(n=2, kind="default", plant_t=None)
+    times_no_plant = PB.phase_board_times(rr_no_plant)
+    assert [seg for seg, _lbl, _t in times_no_plant] == ["early", "mid"]
+
+
+def test_single_time_board_has_one_step_agent_icons_and_no_arrows():
+    dots = [
+        {"label": "Fade", "xy": [[0.25, 0.30]]},
+        {"label": "Neon", "xy": [[0.28, 0.32]]},
+        {"label": "Omen", "xy": [[0.50, 0.50]]},
+        {"label": "Viper", "xy": [[0.70, 0.30]]},
+        {"label": "Yoru", "xy": [[0.30, 0.45]]},
+    ]
+    b = PB.single_time_board("Split", "序盤 A デフォルト", "序盤 1:35", dots, PB.ATTACK)
+    assert b is not None
+    assert len(b["steps"]) == 1
+    els = b["steps"][0]["elements"]
+    assert len(els) == 5
+    assert all(e["type"] == "agent" for e in els)
+    assert all((e.get("data") or {}).get("agentId") for e in els)
+    assert not any(e["type"] == "arrow" for e in els)
+
+
+def test_phase_type_description_is_action_reaction_and_excludes_old_node_phrases():
+    it = _item(raw_round=_synth_round(n=1, kind="default"))
+    for seg, typ in [
+        ("early", "A デフォルト"),
+        ("early", "A ラッシュ"),
+        ("early", "詰め待ち"),
+        ("mid", "フリーズ"),
+        ("mid", "リグループセット"),
+        ("mid", "フェイクセット"),
+        ("late", "プッシュ"),
+        ("late", "サイト耐え"),
+        ("late", "下がる"),
+    ]:
+        desc = PB.phase_type_description(seg, typ, [it])
+        assert "アクション：" in desc and "リアクション：" in desc
+        assert PB.has_abbrev(desc) is False
+        for old_ph in PB.OLD_NODE_PHRASES:
+            assert old_ph not in desc, (seg, typ, old_ph, desc)
+
+
+def test_build_phase_sections_orders_by_count_and_tracks_denominator():
+    r_def1 = _item(n=1, raw_round=_synth_round(n=1, kind="default"))
+    r_def2 = _item(n=2, raw_round=_synth_round(n=2, kind="hold_site"))
+    r_rush = _item(n=3, raw_round=_synth_round(n=3, kind="rush"))
+    r_no_tracks = _item(n=4, raw_round={"n": 4, "side1": "攻撃", "tactics": {}})
+
+    data = PB.build_phase_sections([r_def1, r_def2, r_rush, r_no_tracks])
+    assert data["total"] == 4
+    assert data["classified"] == 3
+    assert data["skipped"] == 1
+    assert [s["seg"] for s in data["sections"]] == ["early", "mid", "late"]
+    early_types = data["sections"][0]["types"]
+    assert [t["type"] for t in early_types] == ["A デフォルト", "A ラッシュ"]
+    assert [t["n"] for t in early_types] == [2, 1]
+    assert len(early_types[0]["reps"]) == 2
+
+
+class _DummyFig:
+    ok = True
+    fillable = False
+    k = 3
+    view = np.zeros((64, 64, 4), dtype=np.uint8)
+    _uri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+
+    def defs(self):
+        return ""
+
+    def svg(self, layers=None, **kw):
+        return '<figure class="mapfig"><svg class="mapsvg" font-size="14"></svg></figure>'
+
+
+class _DummyModel:
+    def vitals(self):
+        return ["A Ramps", "MID"]
+
+    def half(self, area):
+        return False
+
+
+def test_build_page_and_validate_stage_b_with_synthetic_fixture(tmp_path):
+    comp = "Fade|Neon|Omen|Viper|Yoru"
+    items = []
+    # tracks あり 24 件（攻撃 12・防衛 12）、tracks 無し 10 件 → 合計 34 件
+    for i in range(1, 13):
+        kind = "rush" if i in (1, 2) else ("hold_site" if i % 2 == 0 else "default")
+        rr = _synth_round(n=i, kind=kind, plant_t=130.0)
+        items.append(_item(match_id="m1", n=i, side="攻撃", win=(i % 3 != 0), comp_key=comp, raw_round=rr))
+    for i in range(13, 25):
+        rr = _synth_round(n=i, kind="default", plant_t=130.0)
+        items.append(_item(match_id="m1", n=i, side="防衛", win=(i % 2 == 0), comp_key=comp, raw_round=rr))
+    for i in range(25, 35):
+        items.append(_item(match_id="m2", n=i, side="攻撃" if i % 2 == 0 else "防衛",
+                           win=True, comp_key=comp, raw_round=None))
+
+    rounds = [it["r"] for it in items]
+    stat = PB.comp_stats(rounds, items)
+    stat["pistol"] = 0
+    ctx = {
+        "map": "Split",
+        "out": tmp_path,
+        "fig": _DummyFig(),
+        "model": _DummyModel(),
+        "kb": K.load({}),
+        "k": 3,
+        "vitals": ["A Ramps", "MID"],
+        "bg": _DummyFig._uri,
+        "cfg": {"tactival": {"render": False}},
+        "log": lambda *_a, **_k: None,
+        "base_rounds": rounds,
+        "base_items": items,
+        "unknown": 0,
+        "css": PB._css(),
+    }
+    comp_rows = [(comp, stat)]
+    page_html, page_manifest = PB.build_page(ctx, comp, rounds, items, stat, comp_rows)
+    fn = "comp_fade-neon-omen-viper-yoru.html"
+    (tmp_path / fn).write_text(page_html, encoding="utf-8")
+    page_manifest["file"] = fn
+    page_manifest["wins"] = stat["wins"]
+
+    pages = [{
+        "agents": PB.agents_of(comp),
+        "teams": stat["teams"],
+        "total": stat["total"],
+        "wins": stat["wins"],
+        "flow_classified": stat["flow_classified"],
+        "dates": stat["dates"],
+        "file": fn,
+    }]
+    (tmp_path / "index.html").write_text(PB._index_page(ctx, pages, [], []), encoding="utf-8")
+    top_manifest = {
+        "map": "Split",
+        "env_start": PB.ENV_START,
+        "env_label": PB.ENV_LABEL,
+        "settings": [{"name": k, "value": v, "note": d} for k, v, d in PB.SETTINGS],
+        "unknown_rounds": 0,
+        "pages": [page_manifest],
+        "skipped": [],
+        "old_env": [],
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(top_manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # 検証スクリプトが段階B追加項目ふくめ全PASSすること
+    rc = V5.main([str(tmp_path), "--strict"])
+    assert rc == 0
+
+
+def test_validate_skips_when_real_data_folder_missing(tmp_path):
+    assert V5.main([str(tmp_path / "missing_real_data_output")]) == 0
