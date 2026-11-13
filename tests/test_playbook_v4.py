@@ -704,3 +704,47 @@ def test_sunset_a_site_region_keeps_the_elbow_band():
     assert MF.contains(reg["A Site"], elbow["x"], elbow["y"])
     assert not MF.contains(reg.get("A Main", []), elbow["x"], elbow["y"])
     assert "A Elbow" in D._area_xy(cs)
+
+
+# ====================================================================== setup.callouts の配線（2026-11-13）
+def test_setup_callouts_wired_into_booklet(tmp_path, monkeypatch):
+    """setup.callouts を持つ行から生成した v4 ブックに「よく映る場所：<実コールアウト名>」が出ること。
+    対応が取れないラウンドは空のまま従来どおり省略されること。"""
+    FX.syn_patch(monkeypatch)
+    rep = FX.report_v4("m1", "LOUD", "PRX", 1)
+    # チーム 1（LOUD）：前半（n <= 12）は攻撃、後半（n >= 13）は防衛
+    atk_su = {"name": "A Main テイクデフォ", "shape": "A3 Mid1 B1", "code": "3-1-1",
+              "zones": {"A": 3, "Mid": 1, "B": 1}, "areas": {"A Main": 2, "A Lobby": 1, "Mid Courtyard": 1},
+              "area": "A Main", "area_zone": "A",
+              "callouts": ["A Lobby", "A Main", "A Main", "Mid Courtyard"],
+              "who_area": {"A Lobby": ["Raze"], "A Main": ["Sage", "Fade"], "Mid Courtyard": ["Skye"]}}
+    def_su = {"name": "守りデフォ（1-3-1）", "shape": "A1 Mid3 B1", "code": "1-3-1",
+              "zones": {"A": 1, "Mid": 3, "B": 1}, "areas": {"A Site": 1, "B Site": 1},
+              "area": "A Site", "area_zone": "A",
+              "callouts": ["A Elbow"]}
+    for rr in rep["rounds"]:
+        n = rr["n"]
+        if 2 <= n <= 6:
+            rr["tactics"]["setups"] = {"1": atk_su}
+        elif 14 <= n <= 18:
+            # rounds[i].tactics.setups が空でも top-level tactics.rounds[str(n)].setups から引けることも確認
+            rep["tactics"]["rounds"][str(n)]["setups"] = {"1": def_su}
+    cfg = {"output": {"dir": str(tmp_path)}}
+    d = PB.prepare([rep], "LOUD", "Split", cfg, log=lambda *a: None)
+    by_n = {i["r"]["n"]: i for i in d["items"]}
+    assert by_n[2]["r"]["setup"]["callouts"] == ["A Lobby", "A Main", "A Main", "Mid Courtyard"]
+    assert by_n[14]["r"]["setup"]["callouts"] == ["A Elbow"]
+    assert not (by_n[10]["r"].get("setup") or {}).get("callouts")
+
+    page = PB.build([rep], "LOUD", "Split", tmp_path / "LOUD", cfg, log=lambda *a: None).read_text("utf-8")
+    callout_lines = re.findall(r"よく映る場所：[^<]+", page)
+    assert callout_lines
+    assert "よく映る場所：A Elbow" in callout_lines
+    assert any(all(c in ln for c in ("A Lobby", "A Main", "Mid Courtyard")) for ln in callout_lines)
+
+
+def test_setup_callouts_fallback_when_unmatched(pages):
+    """setup が未設定（対応が取れない）のとき、「よく映る場所：」行が出ずフォールバックが壊れないこと。"""
+    for page in pages:
+        assert "よく映る場所：" not in page
+

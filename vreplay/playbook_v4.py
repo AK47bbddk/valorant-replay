@@ -66,8 +66,67 @@ def _match(r: dict, team: str) -> bool:
     return t == (r.get("team") or "").lower() or t == (r.get("tag") or "").lower()
 
 
+def _pick_team_setup(sus, no: int, team: str = "", tag: str = "") -> dict | None:
+    if not isinstance(sus, dict) or not sus:
+        return None
+    if "callouts" in sus or "shape" in sus or "zones" in sus:
+        return sus
+    for k in (str(no), no, team, tag):
+        if k and isinstance(sus.get(k), dict):
+            return sus[k]
+    return None
+
+
+def _resolve_setup(rep: dict, r: dict) -> dict | None:
+    """report.json の tactics.setups（ラウンドごと・チーム番号 '1'/'2'）から行 r の setup を特定する。"""
+    if isinstance(r.get("setup"), dict) and r["setup"]:
+        return r["setup"]
+    n, no = r.get("n"), r.get("no")
+    team, tag = r.get("team") or "", r.get("tag") or ""
+    for rr in rep.get("rounds") or []:
+        if int(rr.get("n") or 0) == n:
+            if (su := _pick_team_setup((rr.get("tactics") or {}).get("setups"), no, team, tag)):
+                return su
+    tac = rep.get("tactics") or {}
+    tr = (tac.get("rounds") or {}).get(str(n)) or (tac.get("rounds") or {}).get(n) or {}
+    if (su := _pick_team_setup(tr.get("setups"), no, team, tag)):
+        return su
+    ts = tac.get("setups")
+    if isinstance(ts, dict):
+        by_n = ts.get(str(n)) or ts.get(n)
+        if (su := _pick_team_setup(by_n, no, team, tag) or _pick_team_setup(ts, no, team, tag)):
+            return su
+    return None
+
+
+def _deck_row(i: dict) -> dict:
+    r = i.get("r") if isinstance(i, dict) and "r" in i else i
+    su = (i.get("setup") if isinstance(i, dict) and "r" in i and i.get("setup") is not None else None) or r.get("setup")
+    return {
+        **r,
+        "win": bool(r.get("win")),
+        "buy": r.get("buy") or "?",
+        "plant_site": r.get("plant_site"),
+        "setup": su if isinstance(su, dict) else None,
+    }
+
+
+def _callout_line(name: str, its: list[dict], side: str) -> str | None:
+    rs = [row for i in its if ((row := _deck_row(i)).get("setup") or {}).get("callouts")]
+    if not rs:
+        return None
+    g = D._cluster(name, rs)
+    return next((ln for ln in D._lines_default(g, side) if ln.startswith("よく映る場所：")), None)
+
+
 def prepare(reports: list[dict], team: str, map_name: str, cfg: dict, log=print) -> dict:
-    allr = [r for rep in reports if str(rep.get("map") or "").lower() == map_name.lower() for r in D.records(rep)]
+    allr = []
+    for rep in reports:
+        if str(rep.get("map") or "").lower() != map_name.lower():
+            continue
+        for r in D.records(rep):
+            r["setup"] = _resolve_setup(rep, r)
+            allr.append(r)
     mine = [r for r in allr if _match(r, team)]
     if not mine:
         raise ValueError(f"{team} の {map_name} のラウンドがありません")
@@ -88,7 +147,7 @@ def prepare(reports: list[dict], team: str, map_name: str, cfg: dict, log=print)
         c = GM.classify(r, opp, model)
         form = GM.def_formation(r, model, opp) if r["side"] == DEFENSE else None
         ev = GM.events(r, opp, model)
-        items.append({"r": r, "opp": opp, "su": su, "cls": c, "form": form, "ev": ev,
+        items.append({"r": r, "opp": opp, "su": su, "setup": r.get("setup"), "cls": c, "form": form, "ev": ev,
                       "ev_areas": {x["area"] for x in ev if x["area"]}})
     fig.load_icons([a for r in mine for _, a in r["players"]])
     maps = sorted({(r["match_id"], r["order"], r["date"], r["opp"]) for r in mine}, key=lambda x: str(x[2]))
@@ -489,6 +548,8 @@ def formation(d: dict, t: dict) -> str:
     if first:
         nid, c = first.most_common(1)[0]
         lis.append(_s(_safe(DEFENSE, f"{t['name']} の序盤は {_node(d, DEFENSE, 'buildup', nid)} が {c} 回（{rep_ag} 視点の見本）。")))
+    if (cl := _callout_line(t["name"], its, DEFENSE)):
+        lis.append(f'<li class="s">{_e(cl)}</li>')
     lis += [f'<li class="s">{_e(x)}</li>' for x in lines]
     svg = _fig(d, rep, alt=f"{t['name']} の 1:40 → 1:30 → 1:20")
     return D._slide("守り / 1:40 の配置", t["name"],
@@ -553,12 +614,15 @@ def lean_buildup(d: dict) -> str:
         return ""
     lis = []
     for code, n in leans.most_common(4):
-        w = sum(1 for i in its if i["cls"].get("setup") == code and i["r"]["win"])
-        sites = Counter(i["r"]["plant_site"] for i in its if i["cls"].get("setup") == code and i["r"]["plant_site"])
-        who = Counter(a for i in its if i["cls"].get("setup") == code for a in i["su"])
+        sub = [i for i in its if i["cls"].get("setup") == code]
+        w = sum(1 for i in sub if i["r"]["win"])
+        sites = Counter(i["r"]["plant_site"] for i in sub if i["r"]["plant_site"])
+        who = Counter(a for i in sub for a in i["su"])
         lis.append(_s(f"{'・'.join(a for a, _ in who.most_common(5))} が 1:40 に {code}（A-MID-B）で並んだのは {n} ラウンド、{_wl(w, n)}、"
                       f"設置先は"
                       + ("・".join(f"{s} {c}" for s, c in sites.most_common()) or "なし") + "。"))
+        if (cl := _callout_line(code, sub, ATTACK)):
+            lis.append(f'<li class="s">{_e(cl)}</li>')
     sl = node_slide(d, ATTACK, "buildup", "ビルドアップ", "攻め / ビルドアップ")
     top = next(i for i in its if i["cls"].get("setup") == leans.most_common(1)[0][0])
     svg = _fig(d, top, alt="攻めの 1:40 の寄り")
@@ -602,8 +666,9 @@ def pistol(d: dict) -> str:
     for i in its[:6]:
         r = i["r"]
         tag = (i["form"][0] + " " + i["form"][1]) if i["form"] else (i["cls"].get("setup") or "?")
+        cl = _callout_line(tag, [i], r["side"])
         lis.append(_s(f"R{r['n']}（{r['side']}）：1:40 は {tag}、{'勝ち' if r['win'] else '負け'}、"
-                      f"{'・'.join(sorted(i['su']))[:40]}。"))
+                      f"{'・'.join(sorted(i['su']))[:40]}" + (f"（{cl}）" if cl else "") + "。"))
     return D._slide("Pistol", "ピストルラウンド", f'<ul class="plain">{"".join(lis)}</ul>', d["foot"])
 
 
