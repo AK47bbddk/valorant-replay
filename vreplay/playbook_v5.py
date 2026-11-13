@@ -1,9 +1,9 @@
 """プレイブック v5：マップ × 5人構成のページ。図（3枚TactiValボード・実プレイGIF・VODカード）を主役にする。
 
 v4（`playbook_v4.py`）はチーム単位で集計を文章で並べていた。v5 は単位を「マップ × 5人構成」に変え、
-構成ごとに 1 ページを作る。段階Bでは、構成ページを「なぜこの構成か（基本配置・役割表は現行維持）」＋
-「序盤」「中盤」「終盤」の3部構成とし、各区間の型（`phases.classify_flow`）を件数順に並べる。
-図は1枚1時刻の TactiVal ボード3枚（序盤・中盤・終盤）とし、文面は「アクション→リアクション」の応酬で組み立てる。
+構成ごとに 1 ページを作る。段階Cでは、基本配置・役割表を残したうえで、構成のラウンドを
+攻撃／防衛のサイド別に分割し、各サイドで「序盤」「中盤」「終盤」の3部構成（上位3型まで）を作る。
+図は1枚1時刻の TactiVal ボード3枚（序盤・中盤・終盤）をサイド別に用意し、文面は「アクション→リアクション」で組み立てる。
 """
 from __future__ import annotations
 
@@ -804,14 +804,83 @@ def _observed_action_reaction(members: list[dict], seg: str) -> tuple[str, str] 
     return pairs.most_common(1)[0][0] if pairs else None
 
 
-def phase_type_description(seg: str, typ: str, members: list[dict] | None = None) -> str:
+def _defense_late_kind(members: list[dict]) -> tuple[str, int, int]:
+    """防衛の終盤ラウンド群から「寄せ」「リテイク」の別と件数を判定する。"""
+    rotate_n = 0
+    retake_n = 0
+    for it in members:
+        fl = it.get("flow") or {}
+        late_start = ((fl.get("segments") or {}).get("late") or {}).get("start")
+        if late_start is None:
+            continue
+        evs = [
+            ev for ev in (fl.get("events") or [])
+            if ev.get("side") == DEFENSE and float(ev.get("t") or 0.0) >= float(late_start) - 1e-9
+        ]
+        if any(ev.get("kind") == "ローテート" for ev in evs):
+            rotate_n += 1
+        if any(ev.get("kind") in ("取り返し", "テイク") for ev in evs):
+            retake_n += 1
+    if retake_n > rotate_n:
+        return "リテイク", rotate_n, retake_n
+    if rotate_n > 0:
+        return "寄せ", rotate_n, retake_n
+    return "寄せ／リテイク", rotate_n, retake_n
+
+
+def phase_type_description(seg: str, typ: str, members: list[dict] | None = None,
+                           side: str = ATTACK) -> str:
     """フェーズの型と流れ要約から「アクション→リアクション」の形で説明文を組み立てる。
 
     旧ノード表（glossary_word 系）は使わない。
     """
     members = members or []
     t = str(typ or "").strip()
-    if seg == "early":
+    if side == DEFENSE:
+        if seg == "early":
+            if t.endswith("ラッシュ"):
+                z = t.split()[0]
+                base = (f"アクション：相手が開幕{int(P.RUSH_SECONDS)}秒以内に {z} サイトへラッシュしてくる。"
+                        f"リアクション：防衛は {z} サイト内でスキルを使って足止めし、逆サイトからの寄せで取り返す")
+            elif t.endswith("デフォルト"):
+                z = t.split()[0]
+                base = (f"アクション：相手が {z} 側を中心にデフォルト展開してエリアを探る。"
+                        f"リアクション：防衛は前目のプッシュやローテートで情報を集め、手薄な側へ人数を寄せて備える")
+            elif t == "詰め待ち":
+                base = ("アクション：相手が開幕に踏み込まず後方で詰め待ちする。"
+                        "リアクション：防衛は無理に前へ出すぎず、ラインを保って中盤の仕掛けに備える")
+            else:
+                base = (f"アクション：序盤に相手が {t} の形で展開してくる。"
+                        f"リアクション：防衛は初期配置から相手の位置を把握し、中盤のローテート判断につなげる")
+        elif seg == "mid":
+            if t == "フリーズ":
+                base = (f"アクション：ピック後に相手が{int(P.FREEZE_SECONDS)}秒以上動きを止めて間を置く。"
+                        f"リアクション：防衛は相手の本命サイドを見極め、ローテートと再配置で受けの形を整える")
+            elif t == "リグループセット":
+                base = ("アクション：散っていた相手が1つのゾーンに3人以上で集まり直してセットに入る。"
+                        "リアクション：防衛は寄りを間に合わせ、サイト入口のスキルとクロスファイアで進入を止める")
+            elif t == "フェイクセット":
+                base = ("アクション：相手が片側のゾーンを取ってフェイクの圧をかける。"
+                        "リアクション：防衛は全員で寄り切らず逆サイトの守りを残し、本命のエントリーに対応する")
+            else:
+                base = (f"アクション：中盤に相手が {t} を仕掛けてくる。"
+                        f"リアクション：防衛は情報に合わせてローテートし、強い形で迎え撃つ")
+        else:
+            kind, rot_n, ret_n = _defense_late_kind(members)
+            detail = f"{kind}：寄せ {rot_n} 件・リテイク {ret_n} 件"
+            if t == "プッシュ":
+                base = (f"アクション：プラント後に相手がサイト奥へプッシュしてくる（{detail}）。"
+                        f"リアクション：防衛は奥の相手を人数かけて処理してからサイトへ{kind}で入る")
+            elif t == "サイト耐え":
+                base = (f"アクション：プラント後に相手がサイト内に2人以上で残って耐える（{detail}）。"
+                        f"リアクション：防衛は味方の合流を待ち、複数方向から{kind}でサイト内を崩す")
+            elif t == "下がる":
+                base = (f"アクション：プラント後に相手がメインや後方へ引いて解除待ちをする（{detail}）。"
+                        f"リアクション：防衛は素早くサイトへ{kind}してエリアを確保し、スモークやカバーで解除を通す")
+            else:
+                base = (f"アクション：終盤に相手が {t} の形で守る（{detail}）。"
+                        f"リアクション：防衛はタイミングを合わせて{kind}を仕掛ける")
+    elif seg == "early":
         if t.endswith("ラッシュ"):
             z = t.split()[0]
             base = (f"アクション：開幕{int(P.RUSH_SECONDS)}秒以内に攻撃が {z} サイトへ2人以上で一気にエントリーする。"
@@ -904,15 +973,21 @@ def _pick_phase_reps(members: list[dict], seg: str, used_leads: set[str], max_re
     return reps
 
 
-def build_phase_sections(items: list[dict]) -> dict:
-    """構成のラウンド群を `phases.classify_flow` で集計し、序盤・中盤・終盤の3部データを返す。"""
-    total = len(items)
-    classified = [it for it in items if it.get("flow") is not None]
+def build_phase_sections(items: list[dict], side: str | None = None,
+                         max_types: int | None = 3) -> dict:
+    """構成のラウンド群を `phases.classify_flow` で集計し、序盤・中盤・終盤の3部データを返す。
+
+    `side` を指定した場合はそのサイド（ATTACK/DEFENSE）のラウンドだけで集計し、各区間上位 `max_types` 型に絞る。
+    """
+    pool = [it for it in items if side is None or (it.get("r") or {}).get("side") == side]
+    total = len(pool)
+    classified = [it for it in pool if it.get("flow") is not None]
     cls_n = len(classified)
     skipped_n = total - cls_n
     used_leads: set[str] = set()
     raw_sections = []
     all_entries = []
+    desc_side = side or ATTACK
     for seg_key, seg_label in SEGS:
         by_type: dict[str, list[dict]] = defaultdict(list)
         for it in classified:
@@ -920,13 +995,18 @@ def build_phase_sections(items: list[dict]) -> dict:
             if typ:
                 by_type[str(typ)].append(it)
         typed_n = sum(len(v) for v in by_type.values())
+        sorted_types = sorted(by_type.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+        if max_types is not None:
+            sorted_types = sorted_types[:max_types]
         types_out = []
-        for typ, members in sorted(by_type.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        for typ, members in sorted_types:
             n = len(members)
             w = sum(1 for it in members if it["r"].get("win"))
             rate = w / n if n else 0.0
             share = n / cls_n if cls_n else 0.0
+            late_kind = _defense_late_kind(members)[0] if (desc_side == DEFENSE and seg_key == "late") else None
             entry = {
+                "side": side,
                 "seg": seg_key,
                 "seg_label": seg_label,
                 "type": typ,
@@ -934,7 +1014,8 @@ def build_phase_sections(items: list[dict]) -> dict:
                 "w": w,
                 "rate": rate,
                 "share": share,
-                "description": phase_type_description(seg_key, typ, members),
+                "defense_late_kind": late_kind,
+                "description": phase_type_description(seg_key, typ, members, side=desc_side),
                 "lead": None,
                 "reps": [],
                 "members": members,
@@ -942,6 +1023,7 @@ def build_phase_sections(items: list[dict]) -> dict:
             types_out.append(entry)
             all_entries.append(entry)
         raw_sections.append({
+            "side": side,
             "seg": seg_key,
             "label": seg_label,
             "typed_rounds": typed_n,
@@ -954,6 +1036,7 @@ def build_phase_sections(items: list[dict]) -> dict:
         entry["reps"] = reps
         entry["lead"] = reps[0] if reps else None
     return {
+        "side": side,
         "total": total,
         "classified": cls_n,
         "skipped": skipped_n,
@@ -1231,10 +1314,12 @@ def _base_vital_rate(base_rounds: list[dict], model, vit: list[str]):
 
 
 # ============================================================== スライド
-def _slide(eyebrow: str, title: str, body: str, foot: str = "", h1: bool = False, cls: str = "") -> str:
+def _slide(eyebrow: str, title: str, body: str, foot: str = "", h1: bool = False,
+           cls: str = "", data_side: str | None = None) -> str:
     h = f"<h1>{_e(title)}</h1>" if h1 else f"<h2>{_e(title)}</h2>"
     klass = f"slide {cls}".strip()
-    return (f'<section class="{klass}"><div class="eyebrow">{_e(eyebrow)}</div>{h}{body}'
+    side_attr = f' data-side="{_e(data_side)}"' if data_side else ""
+    return (f'<section class="{klass}"{side_attr}><div class="eyebrow">{_e(eyebrow)}</div>{h}{body}'
             f'<div class="foot"><span>{_e(foot)}</span><span>vreplay プレイブック v5</span></div></section>')
 
 
@@ -1412,12 +1497,31 @@ def _role_slide(ctx, comp, items) -> str:
     return _slide("真似る手順", "役割表", body, ctx["map"])
 
 
+SIDE_SECTION_TITLES = {
+    ATTACK: {
+        "early": "序盤の型",
+        "mid": "エントリーの仕方（中盤）",
+        "late": "終盤：ポストプラントの形",
+    },
+    DEFENSE: {
+        "early": "序盤の型",
+        "mid": "中盤の強い動き",
+        "late": "終盤：寄せ方・リテイクの仕方",
+    },
+}
+
+
 def _phase_type_slide(ctx: dict, sec: dict, t_info: dict, idx: int,
                       total_rounds: int, classified_rounds: int) -> tuple[str, dict]:
     """序盤・中盤・終盤の各型のスライド（3枚図＋アクション→リアクション説明＋代表ラウンド複数件＋実プレイGIF＋VODカード）。"""
+    side = sec.get("side") or ATTACK
+    side_label = side
+    side_slug = "atk" if side == ATTACK else "def"
     seg_key = sec["seg"]
     seg_label = sec["label"]
+    sec_title = SIDE_SECTION_TITLES.get(side, {}).get(seg_key, seg_label)
     typ = t_info["type"]
+    late_kind = t_info.get("defense_late_kind")
     n = t_info["n"]
     w = t_info["w"]
     rate = t_info["rate"]
@@ -1426,8 +1530,8 @@ def _phase_type_slide(ctx: dict, sec: dict, t_info: dict, idx: int,
     reps = t_info["reps"]
     sk_n = total_rounds - classified_rounds
 
-    slug_prefix = f"{ctx['comp_slug']}_{seg_key}_{idx}_{_slug(typ)}"
-    boards_html, boards_meta = build_phase_boards(ctx, lead, f"{seg_label} {typ}", slug_prefix)
+    slug_prefix = f"{ctx['comp_slug']}_{side_slug}_{seg_key}_{idx}_{_slug(typ)}"
+    boards_html, boards_meta = build_phase_boards(ctx, lead, f"{side_label} {seg_label} {typ}", slug_prefix)
 
     # 代表ラウンド（複数件）の流れ要約行と VOD カード、実プレイ例の GIF
     rep_lines = []
@@ -1461,9 +1565,9 @@ def _phase_type_slide(ctx: dict, sec: dict, t_info: dict, idx: int,
         })
 
     # スライド本文は p.s 2行 + li 最大3行 = 最大5行以内を守る
-    stat_line = (f"{seg_label}の型「{typ}」：{n} 件・勝率 {rate:.0%}（{_wl(w, n)}／"
-                 f"フェーズ分類できた {classified_rounds} ラウンド中 {share:.0%}、"
-                 f"全 {total_rounds} ラウンド中 tracks 無し {sk_n} 件は対象外）。")
+    stat_line = (f"{side_label} {seg_label}の型「{typ}」：{n} 件・勝率 {rate:.0%}（{_wl(w, n)}／"
+                 f"{side_label} 分類{classified_rounds}/{total_rounds}R中 {share:.0%}・"
+                 f"tracks 無し {sk_n} 件は対象外）。")
     desc_line = t_info["description"]
 
     media_row = f'<div class="rep-media">{gif_html}{"".join(vod_cards)}</div>'
@@ -1474,11 +1578,20 @@ def _phase_type_slide(ctx: dict, sec: dict, t_info: dict, idx: int,
         f'{media_row}'
         f'</div>'
     )
-    eyebrow = f"{seg_label} / フェーズ型（{n} 件・勝率 {rate:.0%}・分類 {classified_rounds}/{total_rounds}R）"
-    slide_html = _slide(eyebrow, f"{seg_label}：{typ}", body, ctx["map"], cls=f"phase-slide phase-{seg_key}")
+    eyebrow = f"{side_label} / {sec_title}（{n} 件・勝率 {rate:.0%}・{side_label} 分類{classified_rounds}/{total_rounds}R）"
+    title = f"{side_label}・{seg_label}（{late_kind}）：{typ}" if late_kind else f"{side_label}・{seg_label}：{typ}"
+    slide_html = _slide(
+        eyebrow, title, body, ctx["map"],
+        cls=f"phase-slide phase-{seg_key} phase-{side_slug}", data_side=side_label,
+    )
     meta = {
+        "side": side,
+        "side_label": side_label,
         "seg": seg_key,
         "seg_label": seg_label,
+        "section_title": sec_title,
+        "title": title,
+        "defense_late_kind": late_kind,
         "type": typ,
         "n": n,
         "w": w,
@@ -1494,15 +1607,24 @@ def _phase_type_slide(ctx: dict, sec: dict, t_info: dict, idx: int,
 
 
 def _phase_empty_slide(ctx: dict, sec: dict, total_rounds: int, classified_rounds: int) -> str:
+    side = sec.get("side") or ATTACK
+    side_label = side
+    side_slug = "atk" if side == ATTACK else "def"
+    seg_key = sec["seg"]
     seg_label = sec["label"]
+    sec_title = SIDE_SECTION_TITLES.get(side, {}).get(seg_key, seg_label)
     sk_n = total_rounds - classified_rounds
     body = (
-        _s(f"{seg_label}の該当する型はありません（フェーズ分類できた {classified_rounds} / 全 {total_rounds} ラウンド、"
+        _s(f"{side_label} {seg_label}の該当する型はありません（{side_label} 分類{classified_rounds}/{total_rounds}R、"
            f"tracks 無し {sk_n} 件は対象外）。") +
         _s("この区間に該当するイベント（プラント等）が発生したラウンドがありませんでした。")
     )
-    return _slide(f"{seg_label} / フェーズ型（0 件・分類 {classified_rounds}/{total_rounds}R）",
-                  f"{seg_label}：該当型なし", body, ctx["map"], cls=f"phase-slide phase-{sec['seg']}")
+    return _slide(
+        f"{side_label} / {sec_title}（0 件・{side_label} 分類{classified_rounds}/{total_rounds}R）",
+        f"{side_label}・{seg_label}：該当型なし",
+        body, ctx["map"],
+        cls=f"phase-slide phase-{seg_key} phase-{side_slug}", data_side=side_label,
+    )
 
 
 def _appendix_slide(ctx, stat, singles, unknown, def_pats, atk_pats) -> str:
@@ -1555,46 +1677,61 @@ def build_page(ctx, comp: str, rounds: list[dict], items: list[dict], stat: dict
     slides.append(_pattern_slide(ctx, def_pats, atk_pats))
     slides.append(_role_slide(ctx, comp, items))
 
-    # 序盤・中盤・終盤の3部構成（phases.classify_flow による型表示）
-    phase_data = build_phase_sections(items)
+    # サイド別（攻撃・防衛）× 序盤・中盤・終盤の3部構成（上位3型まで）
     phase_sections_meta = []
+    side_blocks_meta = {}
     hands_compat_meta = []
-    for sec in phase_data["sections"]:
-        sec_types_meta = []
-        if not sec["types"]:
-            slides.append(_phase_empty_slide(ctx, sec, phase_data["total"], phase_data["classified"]))
-        else:
-            for idx, t_info in enumerate(sec["types"], 1):
-                s_html, t_meta = _phase_type_slide(
-                    ctx, sec, t_info, idx, phase_data["total"], phase_data["classified"]
-                )
-                slides.append(s_html)
-                sec_types_meta.append(t_meta)
-                for rep_it in t_info["reps"]:
-                    sample_keys.add(rep_it["r"]["comp_key"])
-                if t_meta["representatives"]:
-                    lead_rep = t_meta["representatives"][0]
-                    hands_compat_meta.append({
-                        "side": lead_rep["side"],
-                        "id": f"{sec['seg']}:{t_info['type']}",
-                        "name": f"{sec['label']}：{t_info['type']}",
-                        "n": t_info["n"],
-                        "w": t_info["w"],
-                        "rate": t_meta["rate"],
-                        "sample_round": lead_rep["round"],
-                        "sample_full5": True,
-                        "sample_status": "ok",
-                        "sample_team": lead_rep["team"],
-                        "sample_opp": lead_rep["opp"],
-                        "sample_label": lead_rep["label"],
-                    })
-        phase_sections_meta.append({
-            "seg": sec["seg"],
-            "label": sec["label"],
-            "typed_rounds": sec["typed_rounds"],
-            "untyped_rounds": sec["untyped_rounds"],
-            "types": sec_types_meta,
-        })
+    for side_key in (ATTACK, DEFENSE):
+        phase_data = build_phase_sections(items, side=side_key, max_types=3)
+        block_sections_meta = []
+        for sec in phase_data["sections"]:
+            sec_types_meta = []
+            if not sec["types"]:
+                slides.append(_phase_empty_slide(ctx, sec, phase_data["total"], phase_data["classified"]))
+            else:
+                for idx, t_info in enumerate(sec["types"], 1):
+                    s_html, t_meta = _phase_type_slide(
+                        ctx, sec, t_info, idx, phase_data["total"], phase_data["classified"]
+                    )
+                    slides.append(s_html)
+                    sec_types_meta.append(t_meta)
+                    for rep_it in t_info["reps"]:
+                        sample_keys.add(rep_it["r"]["comp_key"])
+                    if t_meta["representatives"]:
+                        lead_rep = t_meta["representatives"][0]
+                        hands_compat_meta.append({
+                            "side": lead_rep["side"],
+                            "id": f"{side_key}:{sec['seg']}:{t_info['type']}",
+                            "name": t_meta["title"],
+                            "n": t_info["n"],
+                            "w": t_info["w"],
+                            "rate": t_meta["rate"],
+                            "sample_round": lead_rep["round"],
+                            "sample_full5": True,
+                            "sample_status": "ok",
+                            "sample_team": lead_rep["team"],
+                            "sample_opp": lead_rep["opp"],
+                            "sample_label": lead_rep["label"],
+                        })
+            sec_meta = {
+                "side": side_key,
+                "seg": sec["seg"],
+                "label": sec["label"],
+                "section_title": SIDE_SECTION_TITLES[side_key][sec["seg"]],
+                "typed_rounds": sec["typed_rounds"],
+                "untyped_rounds": sec["untyped_rounds"],
+                "types": sec_types_meta,
+            }
+            block_sections_meta.append(sec_meta)
+            phase_sections_meta.append(sec_meta)
+        side_blocks_meta[side_key] = {
+            "side": side_key,
+            "label": side_key,
+            "total": phase_data["total"],
+            "classified": phase_data["classified"],
+            "skipped": phase_data["skipped"],
+            "sections": block_sections_meta,
+        }
 
     slides.append(_appendix_slide(ctx, stat, def_singles + atk_singles, ctx["unknown"], def_pats, atk_pats))
 
@@ -1625,6 +1762,7 @@ def build_page(ctx, comp: str, rounds: list[dict], items: list[dict], stat: dict
         "hands": hands_compat_meta,
         "placements": placement_meta,
         "claims": claims_meta,
+        "side_blocks": side_blocks_meta,
         "phase_sections": phase_sections_meta,
         "sample_comp_keys": sorted(k for k in sample_keys if k),
     }

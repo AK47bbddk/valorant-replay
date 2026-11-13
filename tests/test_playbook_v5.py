@@ -410,9 +410,127 @@ def test_build_page_and_validate_stage_b_with_synthetic_fixture(tmp_path):
     }
     (tmp_path / "manifest.json").write_text(json.dumps(top_manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    # 検証スクリプトが段階B追加項目ふくめ全PASSすること
+    # 検証スクリプトが段階B/C追加項目ふくめ全PASSすること
     rc = V5.main([str(tmp_path), "--strict"])
     assert rc == 0
+
+
+def test_build_phase_sections_splits_sides_and_limits_top3():
+    # 攻撃 4 件（序盤4型: Aラッシュ/Bラッシュ/Midデフォルト/Aデフォルト → 上位3型に絞られる）+ 防衛 2 件
+    atk_items = [
+        _item(n=1, side="攻撃", raw_round=_synth_round(n=1, kind="rush")),
+        _item(n=2, side="攻撃", raw_round=_synth_round(n=2, kind="rush")),
+        _item(n=3, side="攻撃", raw_round=_synth_round(n=3, kind="default")),
+        _item(n=4, side="攻撃", raw_round=_synth_round(n=4, kind="default")),
+        _item(n=5, side="攻撃", raw_round=_synth_round(n=5, kind="hold_site")),
+        _item(n=6, side="攻撃", flow={"events": [], "segments": {"early": {"start": 0.0, "end": 10.0},
+              "mid": {"start": 10.0, "end": 20.0}, "late": {"start": None, "end": None}},
+              "phases": {"early": {"type": "B デフォルト"}, "mid": {"type": None}, "late": {"type": None}},
+              "flow": {"early": "", "mid": "", "late": ""}}),
+        _item(n=7, side="攻撃", flow={"events": [], "segments": {"early": {"start": 0.0, "end": 10.0},
+              "mid": {"start": 10.0, "end": 20.0}, "late": {"start": None, "end": None}},
+              "phases": {"early": {"type": "Mid デフォルト"}, "mid": {"type": None}, "late": {"type": None}},
+              "flow": {"early": "", "mid": "", "late": ""}}),
+        _item(n=8, side="攻撃", raw_round={"n": 8, "side1": "攻撃", "tactics": {}}),
+    ]
+    def_items = [
+        _item(n=9, side="防衛", raw_round=_synth_round(n=9, kind="default")),
+        _item(n=10, side="防衛", raw_round={"n": 10, "side1": "防衛", "tactics": {}}),
+    ]
+    all_items = atk_items + def_items
+
+    atk_sec = PB.build_phase_sections(all_items, side=PB.ATTACK, max_types=3)
+    assert atk_sec["total"] == 8
+    assert atk_sec["classified"] == 7
+    assert atk_sec["skipped"] == 1
+    early_atk = atk_sec["sections"][0]["types"]
+    assert len(early_atk) == 3
+    assert [t["n"] for t in early_atk] == sorted([t["n"] for t in early_atk], reverse=True)
+    for t in early_atk:
+        assert all(rep["r"]["side"] == PB.ATTACK for rep in t["reps"])
+
+    def_sec = PB.build_phase_sections(all_items, side=PB.DEFENSE, max_types=3)
+    assert def_sec["total"] == 2
+    assert def_sec["classified"] == 1
+    assert def_sec["skipped"] == 1
+    for sec in def_sec["sections"]:
+        for t in sec["types"]:
+            assert all(rep["r"]["side"] == PB.DEFENSE for rep in t["reps"])
+
+
+def test_defense_phase_description_excludes_attack_only_and_marks_retake_or_rotate():
+    it_retake = _item(
+        side="防衛",
+        flow={
+            "events": [
+                {"t": 32.0, "kind": "ローテート", "zone": "A", "side": "防衛"},
+                {"t": 36.0, "kind": "取り返し", "zone": "A", "side": "防衛"},
+            ],
+            "segments": {"early": {"start": 0.0, "end": 10.0}, "mid": {"start": 10.0, "end": 30.0},
+                         "late": {"start": 30.0, "end": 45.0}},
+            "phases": {"early": {"type": "A デフォルト"}, "mid": {"type": "リグループセット"},
+                       "late": {"type": "サイト耐え"}},
+            "flow": {"early": "", "mid": "", "late": "防衛 ローテート→防衛 A 取り返し"},
+        },
+    )
+    for seg, typ in [("early", "A デフォルト"), ("mid", "リグループセット"), ("late", "サイト耐え")]:
+        desc = PB.phase_type_description(seg, typ, [it_retake], side=PB.DEFENSE)
+        assert "アクション：" in desc and "リアクション：" in desc
+        assert PB.has_abbrev(desc) is False
+        for ph in PB.ATTACK_ONLY_PHRASES + PB.OLD_NODE_PHRASES:
+            assert ph not in desc
+        if seg == "late":
+            assert "リテイク" in desc or "寄せ" in desc
+
+
+def test_validate_detects_side_mismatch(tmp_path):
+    # 攻撃ブロックに防衛の代表例が混入した場合、サイド整合チェックが FAIL になること
+    fake_manifest = {
+        "agents": ["Fade", "Neon", "Omen", "Viper", "Yoru"],
+        "teams": ["LOUD"],
+        "total": 2,
+        "used_def": 1,
+        "used_atk": 1,
+        "excluded": 0,
+        "flow_classified": 2,
+        "flow_skipped": 0,
+        "patterns": [],
+        "placements": [{"side": "防衛", "reason_kind": "no_rounds", "reason": "型の成立に必要な"},
+                       {"side": "攻撃", "reason_kind": "no_rounds", "reason": "型の成立に必要な"}],
+        "hands": [],
+        "claims": [],
+        "side_blocks": {
+            "攻撃": {
+                "side": "攻撃", "total": 1, "classified": 1, "skipped": 0,
+                "sections": [
+                    {"seg": "early", "label": "序盤", "types": [
+                        {"side": "攻撃", "seg": "early", "seg_label": "序盤", "type": "A デフォルト",
+                         "title": "攻撃・序盤：A デフォルト", "n": 1,
+                         "description": "アクション：テスト。リアクション：テスト。",
+                         "boards": [], "expected_boards": 0,
+                         "representatives": [{"label": "LOUD vs PRX R1○", "side": "防衛", "has_vod": False}]}
+                    ]},
+                    {"seg": "mid", "label": "中盤", "types": []},
+                    {"seg": "late", "label": "終盤", "types": []},
+                ],
+            },
+            "防衛": {
+                "side": "防衛", "total": 1, "classified": 1, "skipped": 0,
+                "sections": [
+                    {"seg": "early", "label": "序盤", "types": []},
+                    {"seg": "mid", "label": "中盤", "types": []},
+                    {"seg": "late", "label": "終盤", "types": []},
+                ],
+            },
+        },
+        "phase_sections": [],
+        "sample_comp_keys": [],
+    }
+    results, fail = [], []
+    html_txt = '<section class="slide" data-side="攻撃"><ul><li>代表 LOUD vs PRX R1○（守り）：テスト</li></ul></section>'
+    V5.check_page("comp_test.html", html_txt, fake_manifest, results, fail, out_dir=tmp_path)
+    side_res = [ok for lbl, ok, _d in results if "サイド整合" in lbl]
+    assert side_res == [False]
 
 
 def test_validate_skips_when_real_data_folder_missing(tmp_path):

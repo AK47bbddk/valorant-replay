@@ -1,10 +1,10 @@
-"""プレイブック v5 の出力フォルダを機械検査する（docs/PLAYBOOK_v5.md 8 節 + 段階B）。
+"""プレイブック v5 の出力フォルダを機械検査する（docs/PLAYBOOK_v5.md 8 節 + 段階B/段階C）。
 
     python scripts/validate_playbook_v5.py <出力フォルダ>
 
 構成ページ（comp_*.html）と index.html を、禁止文字列・空要素・図の枚数・スライドの行数・
-manifest との整合・段階B（フェーズ3部構成・型ごとの3枚図（1枚1時刻）・旧ノード表の文言なし・
-代表ラウンドのVODカードと実プレイGIF・分母の明示）で見る。
+manifest との整合・段階B/C（サイド別×フェーズ3部構成・上位3型・型ごとの3枚図（1枚1時刻）・
+旧ノード表の文言なし・代表ラウンドのVODカードと実プレイGIF・サイド別分母の明示・サイド整合）で見る。
 FAIL があれば終了コード 1。データが無い環境で出力フォルダ自体が未生成の場合は SKIP（終了コード 0）。
 """
 import argparse
@@ -167,7 +167,15 @@ def check_page(name: str, page: str, manifest_entry: dict, results: list, fail: 
                 no_sample_bad.append(f"{h.get('name')}:{status}")
     rec(not label_bad, "見本ラベルのチーム照合",
         str(label_bad) if label_bad else f"{len(sample_rounds)} 件")
-    max_unique = min(len(sample_rounds), int(m.get("flow_classified") or len(sample_rounds)))
+    side_blocks = m.get("side_blocks") or {}
+    if side_blocks:
+        max_unique = 0
+        for s_key in (ATTACK, DEFENSE):
+            s_rounds = [h.get("sample_round") for h in hands if h.get("side") == s_key and h.get("sample_round")]
+            s_cls = int((side_blocks.get(s_key) or {}).get("classified") or 0)
+            max_unique += min(len(s_rounds), s_cls) if s_cls else len(s_rounds)
+    else:
+        max_unique = min(len(sample_rounds), int(m.get("flow_classified") or len(sample_rounds)))
     rec(len(set(sample_rounds)) >= max_unique, "見本ラウンドの重複なし",
         f"{len(sample_rounds)} 件 / 一意 {len(set(sample_rounds))}")
     rec(not full5_bad, "見本は full5", str(full5_bad) if full5_bad else "")
@@ -206,31 +214,47 @@ def check_page(name: str, page: str, manifest_entry: dict, results: list, fail: 
                if p.get("side") == DEFENSE and any(ph in p["name"] for ph in ATTACK_ONLY_PHRASES)]
     rec(not atk_bad, "守りの型名に攻め専用表現なし", str(atk_bad) if atk_bad else "")
 
-    # 12. [段階B] 型が序盤・中盤・終盤の3部に分かれて件数順に出る
-    seg_keys = [s.get("seg") for s in phase_sections]
-    seg_labels = [s.get("label") for s in phase_sections]
-    three_parts_ok = (
-        seg_keys == ["early", "mid", "late"]
-        and seg_labels == ["序盤", "中盤", "終盤"]
-        and all(f"{lbl} / フェーズ型" in text for lbl in ("序盤", "中盤", "終盤"))
-    )
+    # 12. [段階B/C] サイド別（攻撃・防衛）× 序盤・中盤・終盤の3部構成（上位3型まで・件数順）
+    side_blocks = m.get("side_blocks") or {}
+    expected_sec_titles = {
+        ATTACK: ("序盤の型", "エントリーの仕方（中盤）", "終盤：ポストプラントの形"),
+        DEFENSE: ("序盤の型", "中盤の強い動き", "終盤：寄せ方・リテイクの仕方"),
+    }
+    three_parts_ok = ATTACK in side_blocks and DEFENSE in side_blocks
     order_bad = []
     action_reaction_bad = []
-    for sec in phase_sections:
-        tps = sec.get("types") or []
-        ns = [t.get("n", 0) for t in tps]
-        if ns != sorted(ns, reverse=True):
-            order_bad.append(f"{sec.get('label')}:{ns}")
-        for t in tps:
-            head = f"{sec.get('label')}：{t.get('type')}"
-            desc = t.get("description") or ""
-            if head not in text:
-                order_bad.append(f"missing:{head}")
-            if "アクション：" not in desc or "リアクション：" not in desc or desc not in text:
-                action_reaction_bad.append(head)
-    rec(three_parts_ok and not order_bad and not action_reaction_bad,
-        "フェーズ3部構成（序盤・中盤・終盤）",
-        f"parts={seg_labels} order_bad={order_bad} ar_bad={action_reaction_bad}")
+    top3_bad = []
+    def_late_bad = []
+    for side_key in (ATTACK, DEFENSE):
+        blk = side_blocks.get(side_key) or {}
+        secs = blk.get("sections") or []
+        seg_keys = [s.get("seg") for s in secs]
+        seg_labels = [s.get("label") for s in secs]
+        if seg_keys != ["early", "mid", "late"] or seg_labels != ["序盤", "中盤", "終盤"]:
+            three_parts_ok = False
+        for sec_t in expected_sec_titles[side_key]:
+            if f"{side_key} / {sec_t}" not in text:
+                three_parts_ok = False
+        for sec in secs:
+            tps = sec.get("types") or []
+            if len(tps) > 3:
+                top3_bad.append(f"{side_key}:{sec.get('label')}:len={len(tps)}")
+            ns = [t.get("n", 0) for t in tps]
+            if ns != sorted(ns, reverse=True):
+                order_bad.append(f"{side_key}:{sec.get('label')}:{ns}")
+            for t in tps:
+                head = t.get("title") or f"{side_key}・{sec.get('label')}：{t.get('type')}"
+                desc = t.get("description") or ""
+                if head not in text:
+                    order_bad.append(f"missing:{head}")
+                if "アクション：" not in desc or "リアクション：" not in desc or desc not in text:
+                    action_reaction_bad.append(head)
+                if side_key == DEFENSE and sec.get("seg") == "late":
+                    if ("寄せ" not in head and "リテイク" not in head) or ("寄せ" not in desc and "リテイク" not in desc):
+                        def_late_bad.append(head)
+    rec(three_parts_ok and not order_bad and not action_reaction_bad and not top3_bad and not def_late_bad,
+        "サイド別3部構成（上位3型・序盤中盤終盤）",
+        f"parts_ok={three_parts_ok} top3={top3_bad} order={order_bad} ar={action_reaction_bad} def_late={def_late_bad}")
 
     # 13. [段階B] 図が型ごとに3枚（1枚1時刻・TactiValボードJSONおよび画像または未生成明示）
     board_bad = []
@@ -299,18 +323,51 @@ def check_page(name: str, page: str, manifest_entry: dict, results: list, fail: 
     rec(not rep_gif_bad, "代表ラウンドのGIF実在",
         str(rep_gif_bad[:5]) if rep_gif_bad else f"{len(all_phase_types)} 型")
 
-    # 16. [段階B] 分母（分類できたラウンド数／全ラウンド数）がページに明示される
+    # 16. [段階B/C] 分母（分類できたラウンド数／全ラウンド数＋サイド別分母）がページに明示される
     cls_n = m.get("flow_classified")
     sk_n = m.get("flow_skipped")
     tot_n = m.get("total")
+    side_denom_bad = []
+    for side_key in (ATTACK, DEFENSE):
+        blk = side_blocks.get(side_key) or {}
+        s_tot = blk.get("total")
+        s_cls = blk.get("classified")
+        s_sk = blk.get("skipped")
+        if s_tot is None or s_cls is None or s_sk is None or s_cls + s_sk != s_tot:
+            side_denom_bad.append(f"{side_key}:sum")
+        elif f"{side_key} 分類{s_cls}/{s_tot}R" not in text:
+            side_denom_bad.append(f"{side_key}:missing_text")
     denom_ok = (
         cls_n is not None
         and sk_n is not None
         and cls_n + sk_n == tot_n
         and f"フェーズ分類できたラウンド数：{cls_n} / 全 {tot_n} ラウンド" in text
+        and not side_denom_bad
     )
-    rec(denom_ok, "分母（分類ラウンド数）の明示",
-        f"classified={cls_n} skipped={sk_n} total={tot_n}")
+    rec(denom_ok, "分母（分類ラウンド数・サイド別）の明示",
+        f"classified={cls_n} skipped={sk_n} total={tot_n} side_bad={side_denom_bad}")
+
+    # 17. [段階C] サイド整合チェック（攻撃ブロックの代表例は攻撃のみ、防衛ブロックの代表例は防衛のみ）
+    side_mix_bad = []
+    for side_key, expect_ja, wrong_ja in ((ATTACK, "攻め", "守り"), (DEFENSE, "守り", "攻め")):
+        blk = side_blocks.get(side_key) or {}
+        for sec in blk.get("sections") or []:
+            for t in sec.get("types") or []:
+                if t.get("side") != side_key:
+                    side_mix_bad.append(f"type_side:{side_key}:{t.get('type')}={t.get('side')}")
+                for rp in t.get("representatives") or []:
+                    if rp.get("side") != side_key:
+                        side_mix_bad.append(f"rep_side:{side_key}:{rp.get('label')}={rp.get('side')}")
+        for sec_html in re.findall(
+            rf'<section class="slide[^"]*" data-side="{side_key}">(.*?)</section>', page, re.S
+        ):
+            for li in re.findall(r"<li>(.*?)</li>", sec_html, re.S):
+                li_txt = strip_tags(li)
+                if li_txt.startswith("代表 "):
+                    if f"（{wrong_ja}）" in li_txt or f"（{expect_ja}）" not in li_txt:
+                        side_mix_bad.append(f"html:{side_key}:{li_txt[:40]}")
+    rec(not side_mix_bad, "サイド整合（攻撃/防衛の混線なし）",
+        str(side_mix_bad[:5]) if side_mix_bad else "")
 
 
 def main(argv=None):
