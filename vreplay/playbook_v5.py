@@ -1031,7 +1031,9 @@ def _postplant_clusters(classified: list[dict], k: int = 0) -> list[tuple[str, l
     return out
 
 
-def _build_early_branches(members: list[dict], max_rep_branches: int = 3) -> list[dict]:
+def _build_early_branches(members: list[dict], max_rep_branches: int = 3,
+                          used_samples: set[str] | None = None,
+                          assign_reps: bool = True) -> list[dict]:
     """攻撃・開幕の各型について、段階Dのエントリー型を軸に展開の分岐（件数・勝率・代表）を集計する。"""
     groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
     total = len(members)
@@ -1047,19 +1049,11 @@ def _build_early_branches(members: list[dict], max_rep_branches: int = 3) -> lis
 
     sorted_groups = sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0][1]))
     out: list[dict] = []
-    rep_used: set[str] = set()
-    rep_budget = max_rep_branches
     for (ent_type, label), b_members in sorted_groups:
         n = len(b_members)
         w = sum(1 for it in b_members if it["r"].get("win"))
         rate = w / n if n else 0.0
         share = n / total if total else 0.0
-        rep = None
-        if n >= 2 and rep_budget > 0:
-            reps = _pick_phase_reps(b_members, "entry", rep_used, max_reps=1)
-            if reps:
-                rep = reps[0]
-                rep_budget -= 1
         out.append({
             "type": ent_type,
             "label": label,
@@ -1067,13 +1061,35 @@ def _build_early_branches(members: list[dict], max_rep_branches: int = 3) -> lis
             "w": w,
             "rate": rate,
             "share": share,
-            "rep": rep,
+            "rep": None,
+            "_members": b_members,
         })
+    if assign_reps:
+        rep_used = used_samples if used_samples is not None else set()
+        _assign_early_branch_reps(out, rep_used, max_rep_branches=max_rep_branches)
     return out
 
 
+def _assign_early_branch_reps(branches: list[dict], used_samples: set[str],
+                              max_rep_branches: int = 3) -> None:
+    """ページ内で未使用のラウンドから分岐の見本を選ぶ。未使用が無ければ見本なしのままにする。"""
+    rep_budget = max_rep_branches
+    for b in branches:
+        b_members = b.pop("_members", None) or []
+        if b["n"] >= 2 and rep_budget > 0:
+            unused = [it for it in b_members if sample_key(it) not in used_samples]
+            if unused:
+                reps = _pick_phase_reps(unused, "entry", set(), max_reps=1)
+                if reps:
+                    b["rep"] = reps[0]
+                    used_samples.add(sample_key(reps[0]))
+                    rep_budget -= 1
+
+
 def build_phase_sections(items: list[dict], side: str | None = None,
-                         max_types: int | None = 3, k: int = 0) -> dict:
+                         max_types: int | None = 3, k: int = 0,
+                         used_leads: set[str] | None = None,
+                         assign_branches: bool = True) -> dict:
     """構成のラウンド群を `phases.classify_flow` で集計し、サイド別の3部データを返す。
 
     - 攻撃: 開幕（5種）／エントリー（サイト別セット・スプリット）／ポストプラント（サイト別上位2種）
@@ -1084,7 +1100,8 @@ def build_phase_sections(items: list[dict], side: str | None = None,
     classified = [it for it in pool if it.get("flow") is not None]
     cls_n = len(classified)
     skipped_n = total - cls_n
-    used_leads: set[str] = set()
+    if used_leads is None:
+        used_leads = set()
     raw_sections = []
     all_entries = []
     desc_side = side or ATTACK
@@ -1133,7 +1150,11 @@ def build_phase_sections(items: list[dict], side: str | None = None,
                 rate = w / n if n else 0.0
                 share = n / cls_n if cls_n else 0.0
                 late_kind = _defense_late_kind(members)[0] if (desc_side == DEFENSE and seg_key == "late") else None
-                branches = _build_early_branches(members) if (desc_side == ATTACK and seg_key == "early") else []
+                branches = (
+                    _build_early_branches(members, assign_reps=False)
+                    if (desc_side == ATTACK and seg_key == "early")
+                    else []
+                )
                 entry = {
                     "side": side,
                     "seg": seg_key,
@@ -1165,6 +1186,10 @@ def build_phase_sections(items: list[dict], side: str | None = None,
         reps = _pick_phase_reps(entry["members"], entry["seg"], used_leads, max_reps=3)
         entry["reps"] = reps
         entry["lead"] = reps[0] if reps else None
+    if assign_branches:
+        for entry in all_entries:
+            if entry.get("branches"):
+                _assign_early_branch_reps(entry["branches"], used_leads)
     return {
         "side": side,
         "total": total,
@@ -1343,11 +1368,16 @@ def build_patterns(items: list[dict], model, k: int, side: str,
 
 
 # ============================================================== なぜこの構成か
-def _pick_claim_example(cands: list[dict]) -> dict | None:
+def _pick_claim_example(cands: list[dict], used: set[str] | None = None) -> dict | None:
     if not cands:
         return None
+    pool = cands
+    if used:
+        unused = [it for it in cands if sample_key(it) not in used]
+        if unused:
+            pool = unused
     ordered = sorted(
-        cands,
+        pool,
         key=lambda it: (
             not bool(yt_id(it["r"].get("yt"))),
             not _has_all_3_segments(it),
@@ -1577,7 +1607,7 @@ def _placement_slide(ctx, side, patterns, items, used) -> tuple[str, dict]:
     item, boards_html, boards_meta, reason = None, "", [], ""
     reason_kind = ""
     if chosen:
-        item = _pick_claim_example(chosen["members"]) or chosen["medoid"]
+        item = _pick_claim_example(chosen["members"], used=used) or chosen["medoid"]
         if item:
             used.add(sample_key(item))
             boards_html, boards_meta = build_phase_boards(
@@ -1892,12 +1922,13 @@ def build_page(ctx, comp: str, rounds: list[dict], items: list[dict], stat: dict
     why_html, claims_meta = _why_slide(ctx, claims)
     slides = [_cover_slide(ctx, comp, stat), _env_slide(ctx, comp, comp_rows), why_html]
 
+    used_samples: set[str] = set()
     sample_keys = set()
     for c in claims:
         if c.get("item"):
             sample_keys.add(c["item"]["r"]["comp_key"])
+            used_samples.add(sample_key(c["item"]))
 
-    used_samples: set[str] = set()
     placement_meta: list[dict] = []
     for side, pats in ((DEFENSE, def_pats), (ATTACK, atk_pats)):
         html_pl, meta_pl = _placement_slide(ctx, side, pats, items, used_samples)
@@ -1907,11 +1938,24 @@ def build_page(ctx, comp: str, rounds: list[dict], items: list[dict], stat: dict
     slides.append(_role_slide(ctx, comp, items))
 
     # サイド別（攻撃・防衛）× 序盤・中盤・終盤の3部構成（上位3型まで）
+    # 両サイドの主代表を先に確定し、そのあとで未使用ラウンドから展開の分岐の見本を選ぶ
+    side_phases = []
+    for side_key in (ATTACK, DEFENSE):
+        phase_data = build_phase_sections(
+            items, side=side_key, max_types=3, k=ctx["k"],
+            used_leads=used_samples, assign_branches=False,
+        )
+        side_phases.append((side_key, phase_data))
+    for _side_key, phase_data in side_phases:
+        for sec in phase_data["sections"]:
+            for t_info in sec["types"]:
+                if t_info.get("branches"):
+                    _assign_early_branch_reps(t_info["branches"], used_samples)
+
     phase_sections_meta = []
     side_blocks_meta = {}
     hands_compat_meta = []
-    for side_key in (ATTACK, DEFENSE):
-        phase_data = build_phase_sections(items, side=side_key, max_types=3, k=ctx["k"])
+    for side_key, phase_data in side_phases:
         block_sections_meta = []
         for sec in phase_data["sections"]:
             sec_types_meta = []

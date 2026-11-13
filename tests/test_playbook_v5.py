@@ -600,6 +600,7 @@ def test_early_branches_sum_and_regroup_label():
         atk_item(3, True, "Bメインデフォルト", "B", "Aセット", "A"),
         atk_item(4, True, "Bメインデフォルト", "B", "Aセット", "A"),
         atk_item(5, False, "Bメインデフォルト", "B", None, None),
+        atk_item(6, True, "Bメインデフォルト", "B", "Aセット", "A"),
     ]
     sec = PB.build_phase_sections(items, side=PB.ATTACK, max_types=3)
     early_types = sec["sections"][0]["types"]
@@ -607,9 +608,109 @@ def test_early_branches_sum_and_regroup_label():
     t = early_types[0]
     assert t["type"] == "Bメインデフォルト"
     branches = t["branches"]
-    assert sum(b["n"] for b in branches) == t["n"] == 5
+    assert sum(b["n"] for b in branches) == t["n"] == 6
     by_lbl = {b["label"]: b for b in branches}
     assert set(by_lbl) == {"Bセット", "リグループしてAセット", "エントリーなし"}
     assert by_lbl["Bセット"]["n"] == 2 and by_lbl["Bセット"]["rep"] is not None
-    assert by_lbl["リグループしてAセット"]["n"] == 2 and by_lbl["リグループしてAセット"]["rep"] is not None
+    assert by_lbl["リグループしてAセット"]["n"] == 3 and by_lbl["リグループしてAセット"]["rep"] is not None
     assert by_lbl["エントリーなし"]["n"] == 1 and by_lbl["エントリーなし"]["rep"] is None
+
+
+def test_early_branches_omits_rep_when_no_unused_round():
+    """未使用ラウンドが無ければ分岐は見本なし（rep=None）になり、他型の主代表と重複しない。"""
+    def atk_item(n, win, early_type, early_zone, entry_type, entry_zone):
+        return _item(
+            n=n,
+            side="攻撃",
+            win=win,
+            flow={
+                "events": [],
+                "segments": {"early": {"start": 0.0, "end": 10.0},
+                             "mid": {"start": 10.0, "end": 20.0},
+                             "late": {"start": None, "end": None}},
+                "phases": {
+                    "early": {"type": early_type, "zone": early_zone},
+                    "entry": {"type": entry_type, "zone": entry_zone},
+                    "postplant": None,
+                },
+                "flow": {"early": "", "mid": "", "late": ""},
+            },
+        )
+
+    # 4件 (R1..R4) に対して、型が3つ（Aセット 2件, Bセット 2件, Bメインデフォルト 4件）で
+    # 主代表に3件使われるため、Aセット側（R3, R4が両方消費された場合）は未使用が残らず rep=None になる
+    items = [
+        atk_item(1, True, "Bメインデフォルト", "B", "Bセット", "B"),
+        atk_item(2, False, "Bメインデフォルト", "B", "Bセット", "B"),
+        atk_item(3, True, "Bメインデフォルト", "B", "Aセット", "A"),
+        atk_item(4, True, "Bメインデフォルト", "B", "Aセット", "A"),
+    ]
+    sec = PB.build_phase_sections(items, side=PB.ATTACK, max_types=3)
+    early_t = sec["sections"][0]["types"][0]
+    entry_leads = {PB.sample_key(t["lead"]) for t in sec["sections"][1]["types"] if t.get("lead")}
+    all_leads = entry_leads | ({PB.sample_key(early_t["lead"])} if early_t.get("lead") else set())
+    assert len(all_leads) == 3
+
+    by_lbl = {b["label"]: b for b in early_t["branches"]}
+    assert by_lbl["リグループしてAセット"]["n"] == 2
+    assert by_lbl["リグループしてAセット"]["rep"] is None
+    branch_keys = [PB.sample_key(b["rep"]) for b in early_t["branches"] if b.get("rep")]
+    assert len(branch_keys) == len(set(branch_keys))
+    assert not (set(branch_keys) & all_leads)
+
+
+def test_build_page_sample_rounds_unique_across_mirror_sides_and_branches(tmp_path):
+    """ミラー構成で攻撃・防衛に同一 sample_key があっても、ページ内の全見本ラウンドが一意になる。"""
+    comp = "Fade|Neon|Omen|Viper|Yoru"
+    items = []
+    # m1 の R1..R6 は攻撃・防衛の両方に同一 sample_key で出現するミラーラウンド
+    for i in range(1, 7):
+        kind = "rush" if i in (1, 2) else ("hold_site" if i % 2 == 0 else "default")
+        rr = _synth_round(n=i, kind=kind, plant_t=130.0)
+        items.append(_item(match_id="m1", n=i, side="攻撃", win=(i % 2 == 1), comp_key=comp, raw_round=rr))
+        items.append(_item(match_id="m1", n=i, side="防衛", win=(i % 2 == 0), comp_key=comp, raw_round=rr))
+    for i in range(7, 15):
+        kind = "rush" if i in (7, 8) else "default"
+        rr = _synth_round(n=i, kind=kind, plant_t=130.0)
+        items.append(_item(match_id="m2", n=i, side="攻撃", win=True, comp_key=comp, raw_round=rr))
+        items.append(_item(match_id="m3", n=i, side="防衛", win=True, comp_key=comp, raw_round=rr))
+
+    rounds = [it["r"] for it in items]
+    stat = PB.comp_stats(rounds, items)
+    stat["pistol"] = 0
+    ctx = {
+        "map": "Split",
+        "out": tmp_path,
+        "fig": _DummyFig(),
+        "model": _DummyModel(),
+        "kb": K.load({}),
+        "k": 3,
+        "vitals": ["A Ramps", "MID"],
+        "bg": _DummyFig._uri,
+        "cfg": {"tactival": {"render": False}},
+        "log": lambda *_a, **_k: None,
+        "base_rounds": rounds,
+        "base_items": items,
+        "unknown": 0,
+        "css": PB._css(),
+    }
+    _html, m = PB.build_page(ctx, comp, rounds, items, stat, [(comp, stat)])
+
+    hand_rounds = [h["sample_round"] for h in m["hands"] if h.get("sample_round")]
+    assert len(hand_rounds) == len(set(hand_rounds))
+
+    page_samples = []
+    for c in m.get("claims") or []:
+        if c.get("sample_round"):
+            page_samples.append(c["sample_round"])
+    for p in m.get("placements") or []:
+        if p.get("sample_round"):
+            page_samples.append(p["sample_round"])
+    for sec in m.get("phase_sections") or []:
+        for t in sec.get("types") or []:
+            if t.get("lead_round"):
+                page_samples.append(t["lead_round"])
+            for b in t.get("branches") or []:
+                if b.get("rep_round"):
+                    page_samples.append(b["rep_round"])
+    assert len(page_samples) == len(set(page_samples))
