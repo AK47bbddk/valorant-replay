@@ -139,6 +139,20 @@ PRX 構成（44R・full5=8）は「データ不足」で index 行きが正し�
 `manifest.json` には構成ごとの total / used_def / used_atk / excluded / full5 / dates / teams /
 ページの有無と理由、見本ラウンドの `comp_key` などが入る。
 
+### 対象外の大会の除外（2026-11-14 決定）
+
+2026 VCT Tier 1 の対象定義の外にある大会の試合は、データ（report.json・warehouse）には残したまま、
+プレイブック生成の対象から外す。判定は report.json の `event`（大会名）に対する正規表現（大文字小文字無視）で、
+既定は `vreplay/playbook_v5.py` の `EVENT_EXCLUDE`：
+
+- `\bThreshold\b` … VCT China 2026 Threshold
+- `\bVCT 2027\b.*\bKickoff\b.*\bQualifier\b` … VCT 2027 Kickoff の予選（EMEA Europe Qualifier・NA Open Qualifier など）
+
+対象を足すときは `EVENT_EXCLUDE` に書くか、config の `playbook.event_exclude` に正規表現を並べる（両方が使われる）。
+外した試合は消えたことが追えるように、生成ログ（件数と大会ごとの内訳）、index.html の
+「対象外として除外した試合」の表（大会・ステージ・日付・チーム・ラウンド数・理由）、
+manifest.json の `excluded_events`（patterns / matches / maps / rounds / events / list）に残す。
+
 ## 使い方
 
 生成：

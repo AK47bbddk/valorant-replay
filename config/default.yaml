@@ -79,6 +79,9 @@ llm:
 
 playbook:
   notion_parent: ""     # Notion に書くときの親ページ URL（vreplay playbook --notion でも指定できる）
+  # プレイブック v5 の生成から外す大会名の正規表現（大文字小文字は無視）。
+  # コード内の既定（vreplay/playbook_v5.py の EVENT_EXCLUDE: Threshold・VCT 2027 Kickoff 予選）に足される。
+  event_exclude: []
 
 warehouse:
   # 空なら output.dir/warehouse.sqlite3。大量の試合メタデータと解析結果を 1 つにまとめる。

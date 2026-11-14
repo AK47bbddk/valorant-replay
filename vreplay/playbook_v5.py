@@ -48,6 +48,14 @@ PATTERN_DIST = 0.09
 HAND_MIN_N = 3
 HAND_MIN_WINRATE = 0.5
 
+# 2026 VCT Tier 1 の対象外として、プレイブック生成から外す大会（report.json の event に対する正規表現・大文字小文字無視）。
+# データ（report.json・warehouse）は消さず、生成の対象から外すだけ。外した試合は index.html と manifest.json に残す。
+# 足すときはここに書くか、config の playbook.event_exclude に正規表現を並べる（両方が使われる）。
+EVENT_EXCLUDE = [
+    (r"\bThreshold\b", "VCT China 2026 Threshold（Tier 1 の対象外）"),
+    (r"\bVCT 2027\b.*\bKickoff\b.*\bQualifier\b", "VCT 2027 Kickoff の予選（2026 Tier 1 の対象外）"),
+]
+
 SETTINGS = [
     ("ENV_START", ENV_START, "これ以降の日付のラウンドだけをページ集計に入れる"),
     ("ENV_LABEL", ENV_LABEL, "現在の環境の呼び名"),
@@ -1290,6 +1298,51 @@ def build_phase_sections(items: list[dict], side: str | None = None,
 
 
 # ============================================================== データの組み立て
+def event_exclude_patterns(cfg: dict | None = None) -> list[tuple[str, str]]:
+    """除外に使う (正規表現, 理由) の一覧。コード内の EVENT_EXCLUDE に config の playbook.event_exclude を足す。"""
+    pats = list(EVENT_EXCLUDE)
+    for p in (((cfg or {}).get("playbook") or {}).get("event_exclude") or []):
+        if p and p not in [x for x, _ in pats]:
+            pats.append((str(p), "config の playbook.event_exclude"))
+    return pats
+
+
+def excluded_event_reason(event, patterns: list[tuple[str, str]]) -> tuple[str, str] | None:
+    """大会名が除外パターンのどれかに当たれば (パターン, 理由)、当たらなければ None。"""
+    ev = str(event or "")
+    for pat, why in patterns:
+        if re.search(pat, ev, flags=re.IGNORECASE):
+            return pat, why
+    return None
+
+
+def split_excluded(reports: list[dict], map_name: str, patterns: list[tuple[str, str]]
+                   ) -> tuple[list[dict], list[dict]]:
+    """map_name の report を、生成に使うものと対象外として外すものに分ける。他マップの report はそのまま残す。"""
+    kept, excluded = [], []
+    for rep in reports:
+        hit = None
+        if str(rep.get("map") or "").lower() == map_name.lower():
+            hit = excluded_event_reason(rep.get("event"), patterns)
+        if hit is None:
+            kept.append(rep)
+            continue
+        excluded.append({"event": rep.get("event") or "", "stage": rep.get("stage") or "",
+                         "date": rep.get("date") or "", "match_id": str(rep.get("match_id") or ""),
+                         "order": rep.get("order"),
+                         "teams": [str(rep.get("tag1") or rep.get("team1") or ""),
+                                   str(rep.get("tag2") or rep.get("team2") or "")],
+                         "rounds": len(rep.get("rounds") or []), "pattern": hit[0], "reason": hit[1]})
+    return kept, excluded
+
+
+def excluded_summary(excluded: list[dict], patterns: list[tuple[str, str]]) -> dict:
+    return {"patterns": [{"pattern": p, "reason": w} for p, w in patterns],
+            "matches": len({e["match_id"] for e in excluded}), "maps": len(excluded),
+            "rounds": sum(e["rounds"] for e in excluded),
+            "events": dict(Counter(e["event"] for e in excluded)), "list": excluded}
+
+
 def _prepare(reports: list[dict], map_name: str, cfg: dict, log=print) -> dict:
     allr = []
     match_yts = []
@@ -2139,7 +2192,20 @@ def build_page(ctx, comp: str, rounds: list[dict], items: list[dict], stat: dict
 
 
 # ============================================================== index
-def _index_page(ctx, pages: list[dict], skipped: list[dict], old: list[dict]) -> str:
+def _excluded_table(excluded: list[dict]) -> str:
+    rows = []
+    for x in sorted(excluded, key=lambda e: (e["event"], e["date"], e["match_id"], e.get("order") or 0)):
+        rows.append(f'<tr><td>{_e(x["event"])}</td><td>{_e(x["stage"])}</td><td>{_e(x["date"])}</td>'
+                    f'<td>{_e("・".join(t for t in x["teams"] if t))}</td><td>{x["rounds"]}</td>'
+                    f'<td>{_e(x["reason"])}</td></tr>')
+    if not rows:
+        return '<p class="s">対象外として除外した試合はない。</p>'
+    return ('<table><thead><tr><th>大会</th><th>ステージ</th><th>日付</th><th>チーム</th><th>ラウンド</th>'
+            f'<th>除外の理由</th></tr></thead><tbody>{"".join(rows)}</tbody></table>')
+
+
+def _index_page(ctx, pages: list[dict], skipped: list[dict], old: list[dict],
+                excluded: list[dict] | None = None) -> str:
     rows = []
     for p in sorted(pages, key=lambda x: -x["total"]):
         wr = p["wins"] / p["total"] if p["total"] else 0
@@ -2167,7 +2233,8 @@ def _index_page(ctx, pages: list[dict], skipped: list[dict], old: list[dict]) ->
     body = (f'<p class="s">{_e(lead)}</p>'
             f'<h2>{_e(ENV_LABEL)} の構成（{ENV_START} 以降）</h2>{main_table}'
             f'<h2>ページを見送った構成</h2>{sk_table}'
-            f'<h2>旧環境（{ENV_START} より前）</h2>{old_table}')
+            f'<h2>旧環境（{ENV_START} より前）</h2>{old_table}'
+            f'<h2>対象外として除外した試合（2026 VCT Tier 1 の外）</h2>{_excluded_table(excluded or [])}')
     page = (f'<!doctype html><html lang="ja"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width,initial-scale=1">'
             f'<title>{_e(ctx["map"])} プレイブック v5</title><style>{ctx["css"]}</style></head>'
@@ -2249,6 +2316,11 @@ def generate(reports: list[dict], map_name: str, out, cfg: dict, log=print) -> P
     cfg.setdefault("output", {})
     cfg["output"]["dir"] = str(work)
 
+    ex_pats = event_exclude_patterns(cfg)
+    reports, excluded = split_excluded(reports, map_name, ex_pats)
+    ex_sum = excluded_summary(excluded, ex_pats)
+    log(f"  対象外として除外: {ex_sum['maps']} マップ（{ex_sum['matches']} 試合・{ex_sum['rounds']}R）"
+        + "".join(f"\n    - {ev}: {n} マップ" for ev, n in ex_sum["events"].items()))
     ctx0 = _prepare(reports, map_name, cfg, log)
     allr = ctx0["allr"]
     by_comp, unknown = group_by_comp(allr)
@@ -2296,12 +2368,13 @@ def generate(reports: list[dict], map_name: str, out, cfg: dict, log=print) -> P
 
     old_meta = [{"key": k, "agents": agents_of(k), "total": len(v),
                  "teams": sorted({str(r.get("tag") or r.get("team")) for r in v})} for k, v in old_by.items()]
-    (out / "index.html").write_text(_index_page(ctx, pages, skipped, old_meta), encoding="utf-8")
+    (out / "index.html").write_text(_index_page(ctx, pages, skipped, old_meta, excluded), encoding="utf-8")
 
     manifest = {"map": map_name, "env_start": ENV_START, "env_label": ENV_LABEL,
                 "settings": [{"name": k, "value": v, "note": d} for k, v, d in SETTINGS],
                 "barrier_filter": base_stat.get("barrier_filter") or {"outside_home": 0, "jump": 0, "dropped": 0},
-                "unknown_rounds": unknown, "pages": page_meta, "skipped": skipped, "old_env": old_meta}
+                "unknown_rounds": unknown, "pages": page_meta, "skipped": skipped, "old_env": old_meta,
+                "excluded_events": ex_sum}
     (out / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     log(f"プレイブック v5: {out / 'index.html'}")
     return out / "index.html"

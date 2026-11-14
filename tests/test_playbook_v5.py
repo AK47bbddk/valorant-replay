@@ -753,3 +753,50 @@ def test_play_gif_card_uses_video_gif_when_present(tmp_path):
     assert PB.gif_source(ctx, rel) == "video"
     assert 'data-gif-source="video"' in card and "試合映像のミニマップ" in card
     assert card.startswith('<figure class="play-gif">')   # バリデータの数え方（figure の形）は変えない
+
+
+# ---------------------------------------------------------------- 対象外の大会の除外
+def _rep(event, map_name="Lotus", mid="1", n_rounds=3):
+    return {"event": event, "stage": "s", "date": "2026-11-06", "map": map_name, "match_id": mid, "order": 1,
+            "tag1": "AAA", "tag2": "BBB", "rounds": [{"n": i + 1} for i in range(n_rounds)]}
+
+
+def test_event_exclude_hits_threshold_and_2027_kickoff_qualifiers():
+    pats = PB.event_exclude_patterns({})
+    hit = lambda ev: PB.excluded_event_reason(ev, pats) is not None   # noqa: E731
+    assert hit("VCT 2026: China Threshold")
+    assert hit("VCT 2027: EMEA Kickoff - Europe Qualifier")
+    assert hit("VCT 2027: America Kickoff - North America Open Qualifier")
+    # Tier 1 は外さない
+    for ev in ("Valorant Champions 2026", "Valorant Masters London 2026", "Valorant Masters Santiago 2026",
+               "VCT 2026: EMEA Stage 2", "VCT 2026: China Stage 1", "VCT 2026: Pacific Kickoff",
+               "VCT 2027: EMEA Kickoff"):
+        assert not hit(ev), ev
+
+
+def test_event_exclude_config_adds_patterns():
+    pats = PB.event_exclude_patterns({"playbook": {"event_exclude": ["Showmatch"]}})
+    assert PB.excluded_event_reason("Champions 2026 Showmatch", pats)[0] == "Showmatch"
+    assert len(PB.event_exclude_patterns({})) == len(PB.EVENT_EXCLUDE)
+
+
+def test_split_excluded_only_for_target_map_and_keeps_record():
+    pats = PB.event_exclude_patterns({})
+    reps = [_rep("Valorant Champions 2026", mid="1"), _rep("VCT 2026: China Threshold", mid="2", n_rounds=22),
+            _rep("VCT 2027: EMEA Kickoff - Europe Qualifier", map_name="Split", mid="3")]
+    kept, ex = PB.split_excluded(reps, "Lotus", pats)
+    assert [r["match_id"] for r in kept] == ["1", "3"]           # 他マップの report は触らない
+    assert len(ex) == 1 and ex[0]["match_id"] == "2" and ex[0]["rounds"] == 22
+    s = PB.excluded_summary(ex, pats)
+    assert s["maps"] == 1 and s["matches"] == 1 and s["rounds"] == 22
+    assert s["events"] == {"VCT 2026: China Threshold": 1}
+    assert len(reps) == 3 and reps[1]["event"] == "VCT 2026: China Threshold"   # 入力は消さない
+
+
+def test_index_page_lists_excluded_matches():
+    pats = PB.event_exclude_patterns({})
+    _kept, ex = PB.split_excluded([_rep("VCT 2026: China Threshold")], "Lotus", pats)
+    ctx = {"map": "Lotus", "css": ""}
+    h = PB._index_page(ctx, [], [], [], ex)
+    assert "対象外として除外した試合" in h and "VCT 2026: China Threshold" in h and "AAA・BBB" in h
+    assert "対象外として除外した試合はない" in PB._index_page(ctx, [], [], [])
