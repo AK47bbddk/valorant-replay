@@ -213,7 +213,7 @@ vreplay playbook --sync --team G2 --map Split
   （`--group flag` で 1 本目と同じ組分け）。見落としの理由（`misses`）と設定の掃き出し（`--sweep`）・
   背景なしの切り分け（`--no-background`、`ghosts_sheet.jpg`）も出せる。
   目視で確かめるには `python tools/agents_check_html.py <dump_dir> --out _review/agents_check_<map>.html --team1 <tag> --team2 <tag>`
-  HTML ではミニマップをクリックして検知漏れ（候補の点が無い所のエージェント）を黄色の星で足せる。判定はブラウザに自動保存（同じタイトルで作り直せば前の判定が残る）。書き出し JSON はフレームごとの配列で、各フレームに `missing: [{frame, round, t, team, team_name, agent, x, y}]`（0〜1 の正規化座標）が付く。書き出した JSON は読み込んで戻せる。
+  HTML ではミニマップをクリックして検知漏れ（候補の点が無い所のエージェント）を黄色の星で足せる。判定はブラウザに自動保存（同じタイトルで作り直せば前の判定が残る）。書き出し JSON はフレームごとの配列で、各フレームに `missing: [{frame, round, t, team, team_name, agent, x, y}]`（0〜1 の正規化座標）が付く。書き出した JSON は読み込んで戻せる。v3 では点の正誤（○/×）もミニマップの点をクリックして出る判定パネルで付け（重なった点は Tab や再クリックで切り替え、点ごとのメモも可）、判定済みの点は ○ 青い輪・× 灰色で小さく描く。フレームごと・全体の「判定済み n / 全点 m」を出し、表は「表で見る」に折りたたむ。書き出しの points には点メモ `memo` が増えただけで、`check` などは v2 と同じ（v1/v2 の JSON も読み込める）。
   で、今のコード（`config/default.yaml` の `tactics.agent_match`）で照合をやり直した結果を、番号つきの点・採用/棄却と理由・
   両チームの構成とともに 1 枚の HTML（画像埋め込み）に書き出す（○/× の目視結果は JSON で保存できる）。
   2 本目（agents-recall）で、見落としを減らすスイッチを `tactics.agent_match` に足した（すべて既定は切で、
