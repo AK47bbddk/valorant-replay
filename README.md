@@ -244,6 +244,24 @@ vreplay playbook
 - `batch` は `status='done'` のマップを飛ばします。`--no-retry` で失敗済みも飛ばします。`--shard 1/4` のように分けると、別プロセス・別出力で並列に回せます（同じ DB に同時書き込みしないでください）。
 - `playbook` は `output.dir/playbook/index.html` に出ます。`--min-maps 3` で少ないサンプルのチーム・構成を省けます。チーム別ページにはサイト集計に加えて、初期配置・ローテーション・リテイク・デフォルト・中盤・最終セット・ポストプラント・1ピックの型を出します。
 - 動画解析の出力は従来どおり日付フォルダに `report.json` と画像が残ります。`batch` は最後に日付ごとの HTML も作ります。
+- `batch --ids-file ids.txt` で、ファイルに書いた試合 ID（1 行 1 つ）だけを回します。`--dry-run` は対象のマップを並べるだけで、試合ページ・動画は読まず DB も変えません。
+
+#### 2026 VCT Tier 1 をまとめて回す（`tools/tier1.py`）
+
+`backfill` の結果一覧は予選（VCT 2027 の Qualifier など）も拾うので、Tier 1 だけを大会単位で回すときはこちらを使います。
+Tier 1 ＝ vlr.gg の `/vct-2026` に並ぶ Champions・Masters・4 地域の Kickoff・Stage 1・Stage 2（プレイオフ込み）。
+
+```powershell
+# 1) 全試合を並べ、解析済み（warehouse・report.json・data/by_map）と照合 → _review/tier1_2026_matches.csv / .json
+python tools/tier1.py list --warehouse G:/マイドライブ/valorant-replay/warehouse.sqlite3 --reports G:/マイドライブ/valorant-replay --by-map data/by_map
+# 2) 残りの試合を DB に登録（試合ページだけ読む）し、大会ごとの ID ファイル _review/tier1_ids/ids_*.txt を作る
+python tools/tier1.py seed --order importance          # --dry-run なら ID ファイルだけ
+# 3) 大会ごとに vreplay batch --ids-file を順に回す。ログは _review/tier1_logs/
+python tools/tier1.py run --order importance --dry-run  # 外すと本当に解析する
+```
+
+- 一覧の日付・時刻は閲覧者の地域の時間帯で出るので、海外（Colab など）から `list` するときは `--display-tz America/New_York` などに合わせてください（正確な日時は `seed` で試合ページから DB に入ります）。
+- `--order` は `importance`（Champions → Masters → Stage 2 → Stage 1 → Kickoff）・`newest`・`oldest`。`--event "VCT 2026: EMEA Stage 2"` で大会を絞れます。
 
 ### プレイブック（Notion）
 
