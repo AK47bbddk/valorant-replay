@@ -4,9 +4,18 @@
 しきい値などは config/default.yaml の tactics.agent_match）でやり直し、フレームごとに
 検出点（番号つき）・照合結果（エージェント・確信度・採用/棄却と理由）・両チームの構成を並べる。
 
+HTML での目視：行ごとに ○/×・フレームごとにメモ。候補の点が無い所にいるエージェント（検知漏れ）は
+ミニマップをクリックしてチームとエージェントを選ぶと黄色の星で追加できる（位置は 0〜1 の正規化座標）。
+判定はブラウザ（localStorage）に自動保存。保存キーは v1 と同じ（"agents_check_" + タイトル。--store-key で変更可）
+なので、同じタイトルで作り直せば前の判定が残る。書き出した JSON を「JSON を読み込む」で戻すこともできる。
+
+書き出し JSON（フレームごとの配列。v1 の形に missing を足しただけ）:
+  [{"file", "memo", "points": [{n, kept, agent, team, reason, x, y, check}],
+    "missing": [{frame, round, t, team, team_name, agent, x, y}]}]
+
 使い方:
   python tools/agents_check_html.py <dump_dir> --out _review/agents_check_sunset.html
-      [--team1 LOUD --team2 VIT] [--title ...] [--config config/default.yaml]
+      [--team1 LOUD --team2 VIT] [--title ...] [--store-key ...] [--config config/default.yaml]
 
 ネットワークは使わない。画像のパスに日本語が入ると cv2 が読めないので、dump は ASCII のパスに置く。
 """
@@ -42,7 +51,8 @@ def _config_params(cfg_path: str | None) -> dict:
     return {k: v for k, v in am.items() if k in E.PARAM_KEYS}
 
 
-def build(dump_dir: str, team_names: dict[int, str], title: str, cfg_path: str | None) -> tuple[str, dict]:
+def build(dump_dir: str, team_names: dict[int, str], title: str, cfg_path: str | None,
+          store_key: str | None = None) -> tuple[str, dict]:
     d = Path(dump_dir)
     meta = json.loads((d / "meta.json").read_text("utf-8"))
     params = _config_params(cfg_path)
@@ -91,7 +101,7 @@ def build(dump_dir: str, team_names: dict[int, str], title: str, cfg_path: str |
     stat["frames"] = len(frames)
     stat["cand"] = stat["kept"] + stat["rej"]
 
-    data = {"title": title, "teams": {str(k): v for k, v in teams.items()},
+    data = {"title": title, "store_key": store_key or title, "teams": {str(k): v for k, v in teams.items()},
             "team_names": {str(k): v for k, v in team_names.items()},
             "icons": icons, "icon_frac": float(meta.get("icon_frac") or 0.058),
             "params": {**{k: v for k, v in (meta.get("params") or {}).items() if k in E.PARAM_KEYS}, **params},
@@ -127,6 +137,17 @@ tr.hl{background:#3a3f4a}
 select{background:#2b2f37;color:#ddd;border:1px solid #444}
 textarea{width:100%;background:#2b2f37;color:#ddd;border:1px solid #444;height:34px}
 .small{color:#999;font-size:12px}
+.mapwrap{cursor:crosshair}
+.pop{position:absolute;z-index:20;background:#262a32;border:1px solid #666;border-radius:8px;padding:6px;box-shadow:0 4px 14px #000a;font-size:12px}
+.pop .row{display:flex;gap:4px;align-items:center;margin:3px 0}
+.pop .row span{width:46px}
+.pop button{padding:3px 6px;font-size:12px}
+.pop button.b1{background:#1f4f80}.pop button.b2{background:#80501f}
+.pop button.cancel{background:#555}
+.miss{margin:6px 0 2px;font-size:13px}
+.miss li{margin:2px 0}
+.miss li.hl{background:#3a3f4a}
+.miss button{background:#733;padding:1px 7px;font-size:12px;margin-left:6px}
 button{background:#2f6fd0;color:#fff;border:0;padding:5px 10px;border-radius:5px;cursor:pointer}
 </style></head><body>
 <h1>__TITLE__</h1>
@@ -137,14 +158,24 @@ button{background:#2f6fd0;color:#fff;border:0;padding:5px 10px;border-radius:5px
  <label>棄却の確信度 ≥ <select id="rejMin"><option value="0" selected>0（全部）</option><option>0.3</option><option>0.4</option><option>0.5</option></select></label>
  <label>倍率 <select id="zoom"><option>1.5</option><option selected>2</option><option>2.5</option><option>3</option></select></label>
  <button id="exp">チェック結果を JSON で保存</button>
- <span class="small">○/× は自動でブラウザに保存されます（localStorage）</span>
+ <button id="imp">JSON を読み込む</button><input type="file" id="impFile" accept=".json,application/json" style="display:none">
+ <span class="small">v2：○/×・メモ・検知漏れは自動でブラウザに保存されます（localStorage・v1 と同じ保存先）。検知漏れはミニマップをクリックして追加</span>
 </div>
 <div id="frames"></div>
 <script>
 const D = __DATA__;
-const KEY = "agents_check_" + D.title;
+const KEY = "agents_check_" + (D.store_key || D.title);
+const MKEY = KEY + "#missing";  // 検知漏れ {file: [{id, team, agent, x, y}]}（v1 の marks とは別のキー）
 let marks = JSON.parse(localStorage.getItem(KEY) || "{}");
+let missing = JSON.parse(localStorage.getItem(MKEY) || "{}");
 const save = () => localStorage.setItem(KEY, JSON.stringify(marks));
+const saveMiss = () => localStorage.setItem(MKEY, JSON.stringify(missing));
+const ESC = {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"};
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ESC[c]);
+const r4 = v => Math.round(v*10000)/10000;
+let missSeq = Date.now();
+function closePop(){ document.querySelectorAll(".pop").forEach(e => e.remove()); }
+document.addEventListener("keydown", e => { if (e.key === "Escape") closePop(); });
 const tn = t => t ? (D.team_names[t] || ("T" + t)) : "-";
 const f2 = v => (v === undefined || v === null) ? "" : (+v).toFixed(2);
 function summary(){
@@ -154,7 +185,7 @@ function summary(){
    `フレーム <b>${s.frames}</b>・候補 <b>${s.cand}</b>・採用 <b>${s.kept}</b>（${tn(1)} ${s.kept_t1||0} / ${tn(2)} ${s.kept_t2||0}）・棄却 <b>${s.rej}</b>（${r}）<br>`+
    `照合の設定：${Object.entries(D.params).map(([k,v])=>k+"="+v).join(", ")}　icon_frac=${D.icon_frac}<br>`+
    `<span class="t1">${tn(1)}</span>：${D.teams[1].join(" / ")}　　<span class="t2">${tn(2)}</span>：${D.teams[2].join(" / ")}<br>`+
-   `<span class="small">点：緑の実線＝採用・赤の破線＝棄却（理由つき）・番号は表の # と同じ。黄色の点線＝以前のラベル。表の行にマウスを乗せると点が光ります。</span>`;
+   `<span class="small">点：緑の実線＝採用・赤の破線＝棄却（理由つき）・番号は表の # と同じ。黄色の点線＝以前のラベル。黄色の星＝目視で足した検知漏れ。表の行にマウスを乗せると点が光ります。</span>`;
 }
 function render(){
   const z = +document.getElementById("zoom").value, showRej = document.getElementById("showRej").checked,
@@ -169,8 +200,13 @@ function render(){
     const nk = fr.pts.filter(p=>p.kept).length;
     div.innerHTML = `<h2>R${fr.round}　${fr.t}s　<span class="small">${fr.file}・採用 ${nk}・棄却 ${fr.pts.length-nk}・${alive}</span></h2>`;
     const wrap = document.createElement("div"); wrap.className = "mapwrap";
-    const img = new Image(); img.src = fr.img; wrap.appendChild(img);
-    img.onload = () => {
+    const img = new Image(); wrap.appendChild(img);
+    const fm = () => (missing[fr.file] = missing[fr.file] || []);
+    const star = (cx, cy, r) => { const q = []; for (let i = 0; i < 10; i++) { const a = -Math.PI/2 + i*Math.PI/5, rr = i%2 ? r*0.45 : r;
+      q.push((cx + rr*Math.cos(a)).toFixed(1) + "," + (cy + rr*Math.sin(a)).toFixed(1)); } return q.join(" "); };
+    let listMiss = () => {};
+    const draw = () => {
+      if (!img.naturalWidth) return;
       const W = img.naturalWidth*z, H = img.naturalHeight*z; img.width = W; img.height = H;
       const R = D.icon_frac*img.naturalHeight*z*0.5;
       let s = `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">`;
@@ -185,7 +221,42 @@ function render(){
              `<rect x="${x+R*0.6}" y="${y-R-12}" width="${p.n>9?18:12}" height="13" fill="#000a"/>`+
              `<text x="${x+R*0.6+2}" y="${y-R-2}" fill="${col}" font-size="12" font-weight="bold">${p.n}</text></g>`;
       });
+      (missing[fr.file] || []).forEach((m, i) => {
+        const x = m.x*W, y = m.y*H, col = m.team == 2 ? "#ffb070" : "#7cc4ff";
+        s += `<g class="miss" data-id="${m.id}"><polygon points="${star(x, y, R*0.95)}" fill="#ffe600" fill-opacity="0.85" stroke="#000" stroke-width="1.5"/>`+
+             `<text x="${x}" y="${y+R+12}" fill="#ffe600" stroke="#000" stroke-width="3" paint-order="stroke" font-size="11" font-weight="bold" text-anchor="middle">★${i+1} ${esc(m.agent)}</text>`+
+             `<circle cx="${x}" cy="${y}" r="2" fill="${col}"/></g>`;
+      });
       wrap.innerHTML = ""; wrap.appendChild(img); wrap.insertAdjacentHTML("beforeend", s + "</svg>");
+    };
+    img.onload = draw; img.src = fr.img;
+    // 検知漏れの追加：ミニマップをクリック → チームとエージェントを選ぶ
+    wrap.onclick = ev => {
+      closePop();
+      const rc = img.getBoundingClientRect();
+      const nx = (ev.clientX - rc.left)/rc.width, ny = (ev.clientY - rc.top)/rc.height;
+      if (!(nx >= 0 && nx <= 1 && ny >= 0 && ny <= 1)) return;
+      ev.stopPropagation();
+      const pop = document.createElement("div"); pop.className = "pop";
+      pop.style.left = (ev.pageX + 8) + "px"; pop.style.top = (ev.pageY + 8) + "px";
+      let h = `<div class="small">検知漏れを追加（${nx.toFixed(3)}, ${ny.toFixed(3)}）</div>`;
+      [1, 2].forEach(t => {
+        h += `<div class="row"><span class="t${t}">${esc(tn(t))}</span>` +
+             D.teams[t].map(a => `<button class="b${t}" data-team="${t}" data-agent="${esc(a)}" title="${esc(a)}">` +
+               (D.icons[a] ? `<img src="${D.icons[a]}" style="width:16px;height:16px;vertical-align:middle;border-radius:50%"> ` : "") + `${esc(a)}</button>`).join("") + `</div>`;
+      });
+      h += `<div class="row"><button class="cancel">やめる（Esc）</button></div>`;
+      pop.innerHTML = h;
+      pop.onclick = e => {
+        e.stopPropagation();
+        const b = e.target.closest("button"); if (!b) return;
+        if (b.dataset.agent) {
+          fm().push({id: String(++missSeq), team: +b.dataset.team, agent: b.dataset.agent, x: r4(nx), y: r4(ny)});
+          saveMiss(); draw(); listMiss();
+        }
+        closePop();
+      };
+      document.body.appendChild(pop);
     };
     div.appendChild(wrap);
     const side = document.createElement("div"); side.className = "side";
@@ -203,8 +274,28 @@ function render(){
             `<td class="t${p.team||0}">${tn(p.team)}</td><td>${f2(p.score)}</td><td>${second}</td><td>${f2(p.ring)}</td><td>${p.color||""}</td>`+
             `<td><select data-k="${k}"><option value=""></option><option value="ok" ${m==="ok"?"selected":""}>○ 正しい</option><option value="ng" ${m==="ng"?"selected":""}>× 違う</option></select></td></tr>`;
     });
-    tb += `</table><div class="small">見落とし・メモ</div><textarea data-k="${fr.file}#memo">${marks[fr.file+"#memo"]||""}</textarea>`;
+    tb += `</table><div class="miss"><b style="color:#ffe600">★ 検知漏れ</b> <span class="small">（候補の点が無い所にいるエージェント。ミニマップをクリックして追加）</span><ul class="mlist"></ul></div>`;
+    tb += `<div class="small">見落とし・メモ</div><textarea data-k="${fr.file}#memo">${marks[fr.file+"#memo"]||""}</textarea>`;
     side.innerHTML = tb; div.appendChild(side); root.appendChild(div);
+    const ul = side.querySelector(".mlist");
+    listMiss = () => {
+      const ms = missing[fr.file] || [];
+      ul.innerHTML = ms.length ? ms.map((m, i) => `<li data-id="${m.id}">★${i+1} <span class="t${m.team}">${esc(tn(m.team))}</span> ` +
+        `<img src="${D.icons[m.agent]||""}" style="width:16px;height:16px;vertical-align:middle;border-radius:50%"> ${esc(m.agent)} ` +
+        `<span class="small">(${(+m.x).toFixed(3)}, ${(+m.y).toFixed(3)})</span><button data-del="${m.id}">削除</button></li>`).join("")
+        : `<li class="small">なし</li>`;
+      ul.querySelectorAll("button[data-del]").forEach(b => b.onclick = () => {
+        missing[fr.file] = (missing[fr.file] || []).filter(m => m.id !== b.dataset.del);
+        if (!missing[fr.file].length) delete missing[fr.file];
+        saveMiss(); draw(); listMiss();
+      });
+      ul.querySelectorAll("li[data-id]").forEach(li => {
+        const g = () => wrap.querySelector(`g.miss[data-id="${li.dataset.id}"] polygon`);
+        li.onmouseenter = () => { li.classList.add("hl"); const e = g(); if (e) e.setAttribute("stroke-width", "4"); };
+        li.onmouseleave = () => { li.classList.remove("hl"); const e = g(); if (e) e.setAttribute("stroke-width", "1.5"); };
+      });
+    };
+    listMiss();
     side.querySelectorAll("select").forEach(el => el.onchange = () => {
       marks[el.dataset.k] = el.value; save();
       const tr = el.closest("tr"); tr.classList.toggle("ok", el.value==="ok"); tr.classList.toggle("ng", el.value==="ng");
@@ -219,12 +310,48 @@ function render(){
 document.getElementById("exp").onclick = () => {
   const out = D.frames.map(fr => ({file: fr.file, memo: marks[fr.file+"#memo"]||"",
     points: fr.pts.map(p => ({n: p.n, kept: p.kept, agent: p.agent, team: p.team, reason: p.reason||null,
-      x: +p.x.toFixed(4), y: +p.y.toFixed(4), check: marks[fr.file+"#"+p.n]||""}))}));
+      x: +p.x.toFixed(4), y: +p.y.toFixed(4), check: marks[fr.file+"#"+p.n]||""})),
+    missing: (missing[fr.file] || []).map(m => ({frame: fr.file, round: fr.round, t: fr.t, team: m.team,
+      team_name: tn(m.team), agent: m.agent, x: m.x, y: m.y}))}));
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([JSON.stringify(out, null, 1)], {type: "application/json"}));
   a.download = "agents_check_result.json"; a.click();
 };
-["showRej","showLab","zoom","rejMin"].forEach(id => document.getElementById(id).onchange = render);
+// 書き出した JSON（v1 / v2）を読み込んで判定を戻す。点は座標（4 桁）で突き合わせ、合わなければ番号で。
+function importResult(arr){
+  if (!Array.isArray(arr)) throw new Error("フレームの配列ではありません");
+  const byFile = Object.fromEntries(D.frames.map(f => [f.file, f]));
+  let nc = 0, nm = 0, nmiss = 0, skip = 0;
+  arr.forEach(fe => {
+    const fr = byFile[fe.file]; if (!fr) { skip++; return; }
+    if (fe.memo) { marks[fr.file+"#memo"] = fe.memo; nm++; }
+    (fe.points || []).forEach(q => {
+      if (!q.check) return;
+      let p = fr.pts.find(p => r4(p.x) === r4(q.x) && r4(p.y) === r4(q.y));
+      if (!p) p = fr.pts.find(p => p.n === q.n && Math.abs(p.x-q.x) < 0.01 && Math.abs(p.y-q.y) < 0.01);
+      if (!p) { skip++; return; }
+      marks[fr.file+"#"+p.n] = q.check; nc++;
+    });
+    (fe.missing || []).forEach(q => {
+      const ms = (missing[fr.file] = missing[fr.file] || []);
+      if (ms.some(m => m.agent === q.agent && +m.team === +q.team && Math.abs(m.x-q.x) < 1e-4 && Math.abs(m.y-q.y) < 1e-4)) return;
+      ms.push({id: String(++missSeq), team: +q.team, agent: q.agent, x: r4(+q.x), y: r4(+q.y)}); nmiss++;
+    });
+    if (!missing[fr.file]?.length) delete missing[fr.file];
+  });
+  save(); saveMiss(); render();
+  return {checks: nc, memos: nm, missing: nmiss, skipped: skip};
+}
+document.getElementById("imp").onclick = () => document.getElementById("impFile").click();
+document.getElementById("impFile").onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  try { const r = importResult(JSON.parse(await f.text()));
+    alert(`読み込み：○× ${r.checks}・メモ ${r.memos}・検知漏れ ${r.missing}（合わずに飛ばした ${r.skipped}）`);
+  } catch (err) { alert("読み込めませんでした：" + err.message); }
+  e.target.value = "";
+};
+document.addEventListener("click", e => { if (!e.target.closest(".pop")) closePop(); });
+["showRej","showLab","zoom","rejMin"].forEach(id => document.getElementById(id).onchange = () => { closePop(); render(); });
 summary(); render();
 </script></body></html>
 """
@@ -237,9 +364,11 @@ def main(argv=None):
     ap.add_argument("--team1", default="Team1")
     ap.add_argument("--team2", default="Team2")
     ap.add_argument("--title", default="エージェント照合の目視チェック")
+    ap.add_argument("--store-key", default=None,
+                    help="ブラウザ保存のキー（既定はタイトル。前の版の判定を引き継ぐには前と同じにする）")
     ap.add_argument("--config", default=str(Path(__file__).resolve().parent.parent / "config" / "default.yaml"))
     a = ap.parse_args(argv)
-    page, stat = build(a.dump_dir, {1: a.team1, 2: a.team2}, a.title, a.config)
+    page, stat = build(a.dump_dir, {1: a.team1, 2: a.team2}, a.title, a.config, a.store_key)
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(page, "utf-8")
