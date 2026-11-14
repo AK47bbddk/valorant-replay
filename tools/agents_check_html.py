@@ -652,6 +652,8 @@ kbd{background:#444;border-radius:3px;padding:0 3px;font-size:11px}
  <label>一致とみなす距離 <select id="tol"><option value="0.75">アイコン 0.75 個</option><option value="1" selected>アイコン 1 個</option><option value="1.5">アイコン 1.5 個</option><option value="2">アイコン 2 個</option></select></label>
  <label><input type="checkbox" id="doneOnly"> 集計は「完了」にしたフレームだけ</label>
  <label>倍率 <select id="zoom"><option>1.5</option><option selected>2</option><option>2.5</option><option>3</option></select></label>
+ <button id="expLiteCopy">配置だけコピー（軽い）</button>
+ <button id="expLiteDl">配置だけ保存（軽い）</button>
  <button id="exp">配置と照合結果を JSON で保存</button>
  <button id="expCopy">JSON をコピー</button>
  <button id="expShow">JSON を表示</button>
@@ -935,8 +937,31 @@ opt("expCopy").onclick = async () => {
   catch(e){ expMsg("コピーに失敗: " + e.message + " 。「JSON を表示」から手でコピーしてください", true); showExpText(); }
 };
 opt("expShow").onclick = showExpText;
+// 軽い書き出し（配置だけ・配列形式で小さくする）。照合の集計は受け取り側で再計算できる
+function lightExport(){
+  return {format: "agents_blind_place_v1", title: D.title, exported_at: new Date().toISOString(),
+    frames: D.frames.filter(fr => places(fr).length || S.done[fr.fid]).map(fr => ({file: fr.file,
+      label: (D.groups[fr.g] || {}).label || "", done: !!S.done[fr.fid],
+      placed: places(fr).map(p => [p.team, p.agent, r4(p.x), r4(p.y)])}))};
+}
+opt("expLiteCopy").onclick = async () => {
+  try { await navigator.clipboard.writeText(JSON.stringify(lightExport())); expMsg("配置だけの軽い JSON をコピーしました。そのままチャットに貼れます"); }
+  catch(e){ expMsg("コピーに失敗: " + e.message, true); }
+};
+opt("expLiteDl").onclick = () => {
+  try {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(lightExport())], {type: "application/json"}));
+    a.download = "agents_blind_place.json"; a.click();
+    expMsg("配置だけの軽い JSON を保存しました（ダウンロードが始まらない場合は「配置だけコピー」を使ってください）");
+  } catch(e){ expMsg("保存に失敗: " + e.message + " 。「配置だけコピー」を使ってください", true); }
+};
 // 書き出した JSON を読み込んで配置・完了を戻す（JSON に入っているフレームは置き換え）
 function importResult(o){
+  if (o && o.format === "agents_blind_place_v1" && Array.isArray(o.frames)) {
+    o = {frames: o.frames.map(fe => ({file: fe.file, label: fe.label, done: fe.done,
+      placed: (fe.placed || []).map(a => ({team: a[0], agent: a[1], x: a[2], y: a[3]}))}))};
+  }
   if (!o || !Array.isArray(o.frames)) throw new Error("agents_blind の書き出しではありません");
   const byFid = Object.fromEntries(D.frames.map(f => [f.fid, f]));
   let nf = 0, np = 0, skip = 0;
