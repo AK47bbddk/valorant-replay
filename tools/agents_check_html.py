@@ -11,6 +11,9 @@ HTML での目視（v3）：ミニマップの点をクリックすると判定�
 クリックしてチームとエージェントを選ぶと黄色の星で追加できる（位置は 0〜1 の正規化座標）。
 判定はブラウザ（localStorage）に自動保存。保存キーは v1/v2 と同じ（"agents_check_" + タイトル。--store-key で変更可）
 なので、同じタイトルで作り直せば前の判定が残る。書き出した JSON（v1/v2/v3）を「JSON を読み込む」で戻すこともできる。
+保存は 3 通り（アプリのサンドボックスでダウンロードが黙って止められることがあるため）：「JSON で保存」（ダウンロード）・
+「クリップボードにコピー」（navigator.clipboard → 予備の execCommand → だめならテキストエリア表示）・「JSON を表示」
+（テキストエリアに出して手でコピー）。失敗したら理由をページ上に赤字で出す。中身の JSON はどれも同じ。
 
 書き出し JSON（フレームごとの配列。v2 の形の points に点メモ memo を足しただけ。check の名前と意味は同じ）:
   [{"file", "memo", "points": [{n, kept, agent, team, reason, x, y, check, memo}],
@@ -184,17 +187,36 @@ kbd{background:#444;border-radius:3px;padding:0 3px;font-size:11px}
  <label>棄却の確信度 ≥ <select id="rejMin"><option value="0" selected>0（全部）</option><option>0.3</option><option>0.4</option><option>0.5</option></select></label>
  <label>倍率 <select id="zoom"><option>1.5</option><option selected>2</option><option>2.5</option><option>3</option></select></label>
  <button id="exp">チェック結果を JSON で保存</button>
+ <button id="copyExp">クリップボードにコピー</button>
+ <button id="showExp">JSON を表示（手でコピー）</button>
  <button id="imp">JSON を読み込む</button><input type="file" id="impFile" accept=".json,application/json" style="display:none">
+ <div id="expMsg" style="width:100%;font-size:13px"></div>
+ <div id="expBox" style="display:none;width:100%"><textarea id="expText" readonly style="height:160px;font:12px monospace"></textarea>
+  <button id="selExp">全選択</button> <button id="closeExp" class="cancel" style="background:#555">閉じる</button></div>
  <div class="legend" id="legend"></div>
 </div>
 <div id="frames"></div>
 <script>
+// 予期しないエラーも黙らせず、ページ上に赤字で出す
+window.addEventListener("error", e => { const el = document.getElementById("expMsg");
+  if (el) { el.style.color = "#ff5555"; el.style.fontWeight = "bold"; el.textContent = "エラー：" + (e.message || e.error || "不明"); } });
+window.addEventListener("unhandledrejection", e => { const el = document.getElementById("expMsg");
+  if (el) { el.style.color = "#ff5555"; el.style.fontWeight = "bold"; el.textContent = "エラー：" + ((e.reason && e.reason.message) || e.reason || "不明"); } });
 const D = __DATA__;
 const KEY = "agents_check_" + (D.store_key || D.title);
 const MKEY = KEY + "#missing";  // 検知漏れ {file: [{id, team, agent, x, y}]}（v1 の marks とは別のキー）
 // marks（v1 と同じ形）: {"<file>#<n>": "ok"|"ng"|"", "<file>#memo": "..."}。v3 で点ごとのメモ "<file>#<n>#memo" を足した
-let marks = JSON.parse(localStorage.getItem(KEY) || "{}");
-let missing = JSON.parse(localStorage.getItem(MKEY) || "{}");
+// 読み込みは壊れていても落とさない（壊れた中身は #broken に退避して、上書きで消えないようにする）
+function loadStore(k){
+  let raw = null;
+  try { raw = localStorage.getItem(k); } catch (e) { return {}; }
+  if (!raw) return {};
+  try { const v = JSON.parse(raw); if (v && typeof v === "object" && !Array.isArray(v)) return v; } catch (e) {}
+  try { localStorage.setItem(k + "#broken", raw); } catch (e) {}
+  return {};
+}
+let marks = loadStore(KEY);
+let missing = loadStore(MKEY);
 const save = () => localStorage.setItem(KEY, JSON.stringify(marks));
 const saveMiss = () => localStorage.setItem(MKEY, JSON.stringify(missing));
 const ESC = {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"};
@@ -473,17 +495,70 @@ function render(){
   });
   progress();
 }
-// 書き出し（v1/v2 と同じ形。points に v3 の点メモ memo を足しただけ）
-document.getElementById("exp").onclick = () => {
-  const out = D.frames.map(fr => ({file: fr.file, memo: marks[fr.file+"#memo"]||"",
-    points: fr.pts.map(p => ({n: p.n, kept: p.kept, agent: p.agent, team: p.team, reason: p.reason||null,
-      x: +p.x.toFixed(4), y: +p.y.toFixed(4), check: marks[fr.file+"#"+p.n]||"", memo: marks[pmk(fr, p)]||""})),
-    missing: (missing[fr.file] || []).map(m => ({frame: fr.file, round: fr.round, t: fr.t, team: m.team,
-      team_name: tn(m.team), agent: m.agent, x: m.x, y: m.y}))}));
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([JSON.stringify(out, null, 1)], {type: "application/json"}));
-  a.download = "agents_check_result.json"; a.click();
+// 書き出し（v1/v2/v3 と同じ形。points に v3 の点メモ memo を足しただけ）
+// 想定外の状態（座標の無い点・文字列でないメモ・壊れた検知漏れ）があっても落ちないように組み立てる
+const sstr = v => (v === undefined || v === null) ? "" : (typeof v === "string" ? v : String(v));
+const n4 = v => { const f = Number(v); return Number.isFinite(f) ? +f.toFixed(4) : null; };
+function buildExport(){
+  return (Array.isArray(D.frames) ? D.frames : []).map(fr => {
+    let ms = missing[fr.file]; if (!Array.isArray(ms)) ms = [];
+    return {file: fr.file, memo: sstr(marks[fr.file+"#memo"]),
+      points: (Array.isArray(fr.pts) ? fr.pts : []).filter(p => p && typeof p === "object").map(p => ({n: p.n, kept: p.kept, agent: p.agent, team: p.team, reason: p.reason||null,
+        x: n4(p.x), y: n4(p.y), check: sstr(marks[fr.file+"#"+p.n]), memo: sstr(marks[pmk(fr, p)])})),
+      missing: ms.filter(m => m && typeof m === "object").map(m => ({frame: fr.file, round: fr.round, t: fr.t, team: m.team,
+        team_name: tn(m.team), agent: m.agent, x: m.x, y: m.y}))};
+  });
+}
+const exportText = () => JSON.stringify(buildExport(), null, 1);
+function expMsg(text, bad){
+  const el = opt("expMsg"); el.textContent = text; el.style.color = bad ? "#ff5555" : "#7f7";
+  el.style.fontWeight = bad ? "bold" : "normal";
+}
+const errText = e => (e && (e.name ? e.name + ": " : "") + (e.message || e)) || "不明なエラー";
+// (c) テキストエリアに出して手でコピー
+function showExport(text){
+  const box = opt("expBox"), ta = opt("expText");
+  ta.value = text; box.style.display = "block";
+  box.scrollIntoView({block: "nearest"}); ta.focus(); ta.select();
+}
+// (a) 従来のダウンロード（サンドボックスで黙って止められることがあるので、他の手段も案内する）
+opt("exp").onclick = () => {
+  try {
+    const text = exportText();
+    const url = URL.createObjectURL(new Blob([text], {type: "application/json"}));
+    const a = document.createElement("a");
+    a.href = url; a.download = "agents_check_result.json"; a.style.display = "none";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    expMsg("ダウンロードを開始しました（agents_check_result.json）。ファイルができていなければ「クリップボードにコピー」か「JSON を表示」を使ってください。", false);
+  } catch (e) { expMsg("ダウンロードに失敗しました：" + errText(e) + "。「クリップボードにコピー」か「JSON を表示」を使ってください。", true); }
 };
+// (b) クリップボードにコピー。navigator.clipboard → execCommand("copy") → テキストエリア表示の順に試す
+opt("copyExp").onclick = async () => {
+  let text;
+  try { text = exportText(); } catch (e) { expMsg("書き出しデータを作れませんでした：" + errText(e), true); return; }
+  let why = "";
+  try {
+    if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error("navigator.clipboard が使えません");
+    await navigator.clipboard.writeText(text);
+    expMsg(`クリップボードにコピーしました（${text.length} 文字）。メモ帳などに貼り付けて .json で保存してください。`, false); return;
+  } catch (e) { why = errText(e); }
+  try {
+    const ta = document.createElement("textarea"); ta.value = text; ta.setAttribute("readonly", "");
+    ta.style.position = "fixed"; ta.style.left = "-9999px"; document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand && document.execCommand("copy"); ta.remove();
+    if (ok) { expMsg(`クリップボードにコピーしました（予備の方法・${text.length} 文字）。`, false); return; }
+    why += " / execCommand も失敗";
+  } catch (e) { why += " / " + errText(e); }
+  try { showExport(text); } catch (e) {}
+  expMsg("クリップボードにコピーできませんでした（" + why + "）。下に JSON を出したので、全選択してコピーしてください。", true);
+};
+opt("showExp").onclick = () => {
+  try { showExport(exportText()); expMsg("下に JSON を出しました（選択済み）。Ctrl+C でコピーしてください。", false); }
+  catch (e) { expMsg("書き出しデータを作れませんでした：" + errText(e), true); }
+};
+opt("selExp").onclick = () => { const ta = opt("expText"); ta.focus(); ta.select(); };
+opt("closeExp").onclick = () => { opt("expBox").style.display = "none"; };
 // 書き出した JSON（v1 / v2 / v3）を読み込んで判定を戻す。点は座標（4 桁）で突き合わせ、合わなければ番号で。
 function importResult(arr){
   if (!Array.isArray(arr)) throw new Error("フレームの配列ではありません");
