@@ -238,6 +238,7 @@ kbd{background:#444;border-radius:3px;padding:0 3px;font-size:11px}
  <button id="exp">チェック結果を JSON で保存</button>
  <button id="expCopy">JSON をコピー</button>
  <button id="expShow">JSON を表示</button>
+ <button id="expTab">JSON をタブで開く</button>
  <span id="expMsg"></span>
  <button id="imp">JSON を読み込む</button><input type="file" id="impFile" accept=".json,application/json" style="display:none">
  <div class="legend" id="legend"></div>
@@ -540,13 +541,28 @@ function buildExport(){
 }
 function expMsg(s, err){ const e = document.getElementById("expMsg"); e.textContent = s; e.style.color = err ? "#f66" : "#6f6"; }
 function showExpText(){ try { const t = document.getElementById("expText"); t.value = JSON.stringify(buildExport(), null, 1); t.style.display = "block"; t.select(); expMsg("JSON を表示しました。全選択済みなので、そのままコピーして送ってください"); } catch(e){ expMsg("表示に失敗: " + e.message, true); } }
-document.getElementById("exp").onclick = () => {
-  try {
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([JSON.stringify(buildExport(), null, 1)], {type: "application/json"}));
-    a.download = "agents_check_result.json"; a.click();
-    expMsg("保存しました（ダウンロードが始まらない場合は「JSON をコピー」か「JSON を表示」を使ってください）");
-  } catch(e){ expMsg("保存に失敗: " + e.message + " 。「JSON を表示」からコピーしてください", true); showExpText(); }
+async function saveText(name, text){
+  const blob = new Blob([text], {type: "application/json"});
+  if (window.showSaveFilePicker) {
+    try { const h = await window.showSaveFilePicker({suggestedName: name, types: [{description: "JSON", accept: {"application/json": [".json"]}}]});
+      const w = await h.createWritable(); await w.write(blob); await w.close(); return "保存ダイアログで保存しました"; }
+    catch(e){ if (e && e.name === "AbortError") return "保存をやめました"; }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a"); a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+  return "ダウンロードを開始しました（始まらない場合はコピーかタブで開くを使ってください）";
+}
+document.getElementById("exp").onclick = async () => {
+  try { expMsg(await saveText("agents_check_result.json", JSON.stringify(buildExport(), null, 1))); }
+  catch(e){ expMsg("保存に失敗: " + e.message + " 。「JSON を表示」からコピーしてください", true); showExpText(); }
+};
+document.getElementById("expTab").onclick = () => {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(buildExport(), null, 1)], {type: "application/json"}));
+  const w = window.open(url, "_blank");
+  if (w) expMsg("新しいタブで開きました。そのタブで Ctrl+S を押すとファイルで保存できます");
+  else expMsg("タブが開けませんでした（ポップアップが止められています）。コピーを使ってください", true);
 };
 document.getElementById("expCopy").onclick = async () => {
   try { await navigator.clipboard.writeText(JSON.stringify(buildExport(), null, 1)); expMsg("JSON をクリップボードにコピーしました。そのままチャットに貼れます"); }
@@ -654,6 +670,7 @@ kbd{background:#444;border-radius:3px;padding:0 3px;font-size:11px}
  <label>倍率 <select id="zoom"><option>1.5</option><option selected>2</option><option>2.5</option><option>3</option></select></label>
  <button id="expLiteCopy">配置だけコピー（軽い）</button>
  <button id="expLiteDl">配置だけ保存（軽い）</button>
+ <button id="expLiteTab">配置だけタブで開く</button>
  <button id="exp">配置と照合結果を JSON で保存</button>
  <button id="expCopy">JSON をコピー</button>
  <button id="expShow">JSON を表示</button>
@@ -924,13 +941,22 @@ function exportData(){
 // ダウンロードがアプリの表示枠で止められる場合に備え、コピーと表示も用意する（v3fix と同じ対策）
 function expMsg(s, err){ const e = document.getElementById("expMsg"); e.textContent = s; e.style.color = err ? "#f66" : "#6f6"; }
 function showExpText(){ try { const t = document.getElementById("expText"); t.value = JSON.stringify(exportData(), null, 1); t.style.display = "block"; t.select(); expMsg("JSON を表示しました。全選択済みなので、そのままコピーして送ってください"); } catch(e){ expMsg("表示に失敗: " + e.message, true); } }
-opt("exp").onclick = () => {
-  try {
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([JSON.stringify(exportData(), null, 1)], {type: "application/json"}));
-    a.download = "agents_blind_result.json"; a.click();
-    expMsg("保存しました（ダウンロードが始まらない場合は「JSON をコピー」か「JSON を表示」を使ってください）");
-  } catch(e){ expMsg("保存に失敗: " + e.message + " 。「JSON を表示」からコピーしてください", true); showExpText(); }
+async function saveText(name, text){
+  const blob = new Blob([text], {type: "application/json"});
+  if (window.showSaveFilePicker) {
+    try { const h = await window.showSaveFilePicker({suggestedName: name, types: [{description: "JSON", accept: {"application/json": [".json"]}}]});
+      const w = await h.createWritable(); await w.write(blob); await w.close(); return "保存ダイアログで保存しました"; }
+    catch(e){ if (e && e.name === "AbortError") return "保存をやめました"; }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a"); a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+  return "ダウンロードを開始しました（始まらない場合はコピーかタブで開くを使ってください）";
+}
+opt("exp").onclick = async () => {
+  try { expMsg(await saveText("agents_blind_result.json", JSON.stringify(exportData(), null, 1))); }
+  catch(e){ expMsg("保存に失敗: " + e.message + " 。「JSON を表示」からコピーしてください", true); showExpText(); }
 };
 opt("expCopy").onclick = async () => {
   try { await navigator.clipboard.writeText(JSON.stringify(exportData(), null, 1)); expMsg("JSON をクリップボードにコピーしました。そのままチャットに貼れます"); }
@@ -948,13 +974,15 @@ opt("expLiteCopy").onclick = async () => {
   try { await navigator.clipboard.writeText(JSON.stringify(lightExport())); expMsg("配置だけの軽い JSON をコピーしました。そのままチャットに貼れます"); }
   catch(e){ expMsg("コピーに失敗: " + e.message, true); }
 };
-opt("expLiteDl").onclick = () => {
-  try {
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([JSON.stringify(lightExport())], {type: "application/json"}));
-    a.download = "agents_blind_place.json"; a.click();
-    expMsg("配置だけの軽い JSON を保存しました（ダウンロードが始まらない場合は「配置だけコピー」を使ってください）");
-  } catch(e){ expMsg("保存に失敗: " + e.message + " 。「配置だけコピー」を使ってください", true); }
+opt("expLiteDl").onclick = async () => {
+  try { expMsg(await saveText("agents_blind_place.json", JSON.stringify(lightExport()))); }
+  catch(e){ expMsg("保存に失敗: " + e.message + " 。「配置だけコピー」を使ってください", true); }
+};
+opt("expLiteTab").onclick = () => {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(lightExport())], {type: "application/json"}));
+  const w = window.open(url, "_blank");
+  if (w) expMsg("新しいタブで開きました。そのタブで Ctrl+S を押すとファイルで保存できます");
+  else expMsg("タブが開けませんでした（ポップアップが止められています）。コピーを使ってください", true);
 };
 // 書き出した JSON を読み込んで配置・完了を戻す（JSON に入っているフレームは置き換え）
 function importResult(o){
