@@ -714,3 +714,42 @@ def test_build_page_sample_rounds_unique_across_mirror_sides_and_branches(tmp_pa
                 if b.get("rep_round"):
                     page_samples.append(b["rep_round"])
     assert len(page_samples) == len(set(page_samples))
+
+
+# ---------------------------------------------------------------- 実プレイ GIF（試合映像のミニマップ）への差し替え
+def _fake_gif(path, n=3):
+    from PIL import Image
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frames = [Image.new("RGB", (32, 32), (10 * i, 0, 0)) for i in range(n)]
+    frames[0].save(path, format="GIF", save_all=True, append_images=frames[1:], duration=100, loop=0)
+    return path
+
+
+def test_resolve_asset_rewrites_colab_path_to_local_root(tmp_path):
+    real = _fake_gif(tmp_path / "2026-10-07" / "754733_1_Split" / "r05_minimap.gif")
+    colab = "/content/drive/MyDrive/valorant-replay/2026-10-07/754733_1_Split/r05_minimap.gif"
+    assert PB.resolve_asset(colab, [tmp_path]) == real
+    assert PB.resolve_asset(colab, []) is None
+    assert PB.resolve_asset(None, [tmp_path]) is None
+    assert PB.resolve_asset(str(real), []) == real          # 手元にあるパスはそのまま
+
+
+def test_real_gif_path_falls_back_to_match_round(tmp_path):
+    real = _fake_gif(tmp_path / "2026-10-07" / "754733_2_Split" / "r12_minimap.gif")
+    r = {"date": "2026-10-07", "match_id": "754733", "order": 2, "map": "Split", "n": 12, "gif": None}
+    assert PB.real_gif_path(r, [tmp_path]) == real
+    r2 = dict(r, n=13)
+    assert PB.real_gif_path(r2, [tmp_path]) is None
+
+
+def test_play_gif_card_uses_video_gif_when_present(tmp_path):
+    root, out = tmp_path / "drive", tmp_path / "out"
+    _fake_gif(root / "2026-10-05" / "m_1_Split" / "r01_minimap.gif")
+    it = _item(n=1)
+    it["r"].update({"map": "Split", "gif": "/content/drive/MyDrive/valorant-replay/2026-10-05/m_1_Split/r01_minimap.gif"})
+    ctx = {"out": out, "asset_roots": [root]}
+    card, rel = PB.play_gif_card(ctx, it)
+    assert rel == "gifs/m_1_1.gif" and (out / rel).is_file()
+    assert PB.gif_source(ctx, rel) == "video"
+    assert 'data-gif-source="video"' in card and "試合映像のミニマップ" in card
+    assert card.startswith('<figure class="play-gif">')   # バリデータの数え方（figure の形）は変えない

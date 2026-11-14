@@ -636,25 +636,113 @@ def build_phase_boards(ctx: dict, item: dict, title: str, slug_prefix: str) -> t
     return f'<div class="boards3">{"".join(cards)}</div>', meta_list
 
 
+# 日次パイプラインは Colab の <output.dir>（/content/drive/MyDrive/valorant-replay）に
+# <日付>/<試合ID>_<マップ順>_<マップ>/rNN_minimap.gif を書き、そのパスを report.json の assets.minimap_gif に残す。
+# Notion にはこのファイルを File Upload で載せている（Notion 側の URL は期限つきなので使わない）。
+# ローカルでは同じファイルが Google ドライブ for desktop の下にあるので、パスを読み替えて引く。
+LOCAL_DRIVE_ROOTS = ("G:/マイドライブ/valorant-replay", "G:/My Drive/valorant-replay")
+_DATE_DIR = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def asset_roots(cfg: dict | None = None, extra=None) -> list[Path]:
+    """試合フォルダ（<日付>/...）が並ぶ出力ルートの候補のうち、手元に実在するもの（重複なし・優先順）。"""
+    cands = list(extra or [])
+    cands.append(os.environ.get("VREPLAY_ASSETS_DIR"))
+    cands.append(((cfg or {}).get("output") or {}).get("dir"))
+    cands.extend(LOCAL_DRIVE_ROOTS)
+    out, seen = [], set()
+    for c in cands:
+        if not c:
+            continue
+        pth = Path(c)
+        key = str(pth.resolve()) if pth.exists() else None
+        if key and key not in seen and pth.is_dir():
+            seen.add(key)
+            out.append(pth)
+    return out
+
+
+def resolve_asset(path, roots: list[Path]) -> Path | None:
+    """report.json に残った素材のパス（Colab のパスでもよい）を、手元に実在するファイルへ読み替える。"""
+    if not path:
+        return None
+    pth = Path(str(path))
+    if pth.is_file() and pth.stat().st_size > 0:
+        return pth
+    parts = [x for x in str(path).replace("\\", "/").split("/") if x]
+    for i, part in enumerate(parts):
+        if _DATE_DIR.match(part):
+            rel = Path(*parts[i:])
+            for root in roots:
+                c = root / rel
+                if c.is_file() and c.stat().st_size > 0:
+                    return c
+            break
+    return None
+
+
+def real_gif_path(r: dict, roots: list[Path]) -> Path | None:
+    """見本ラウンドに対応する実プレイ GIF（試合映像のミニマップ）のファイル。無ければ None。
+
+    1. 記録の gif（= report.json の rounds[n].assets.minimap_gif）を読み替える
+    2. 無ければ 試合（date・match_id・order・map）とラウンド番号 n から
+       <root>/<date>/<match_id>_<order>_<map>/r<nn>_minimap.gif を組み立てて探す
+    """
+    if not isinstance(r, dict):
+        return None
+    rr = _round_dict_of(r)
+    for cp in (r.get("gif"), (rr.get("assets") or {}).get("minimap_gif") if rr else None):
+        got = resolve_asset(cp, roots)
+        if got is not None:
+            return got
+    date, mid, order, mp, n = (r.get("date"), r.get("match_id"), r.get("order"), r.get("map"), r.get("n"))
+    if not (date and mid and order is not None and mp and n):
+        return None
+    mslug = re.sub(r"[^A-Za-z0-9]+", "-", str(mp)).strip("-")[:40] or "map"
+    rel = Path(str(date)) / f"{mid}_{order}_{mslug}" / f"r{int(n):02d}_minimap.gif"
+    for root in roots:
+        c = root / rel
+        if c.is_file() and c.stat().st_size > 0:
+            return c
+    return None
+
+
+def gif_source(ctx: dict, gif_rel: str) -> str | None:
+    """_ensure_play_gif が用意した GIF の出どころ（"video" = 試合映像のミニマップ / "trajectory" = 軌跡から作図）。"""
+    return (ctx.get("_gif_source") or {}).get(gif_rel)
+
+
 def _ensure_play_gif(ctx: dict, item: dict) -> str:
-    """実プレイ例（代表ラウンド）のアニメーション GIF を `<out>/gifs/` に用意し、相対パスを返す。"""
+    """実プレイ例（代表ラウンド）のアニメーション GIF を `<out>/gifs/` に用意し、相対パスを返す。
+
+    試合映像のミニマップ GIF（日次パイプラインが Drive の試合フォルダに置き、Notion に載せているもの）が
+    手元で見つかればそれをコピーする。見つからなければ従来どおり軌跡から作図する（ファイル名に _traj が付く）。
+    """
     r = item.get("r") if isinstance(item, dict) and "r" in item else item
     rk_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", sample_key(item)).strip("_") or "round"
     gifs_dir = Path(ctx["out"]) / "gifs"
     gifs_dir.mkdir(parents=True, exist_ok=True)
-    dst = gifs_dir / f"{rk_slug}.gif"
-    if dst.exists() and dst.stat().st_size > 0:
-        return f"gifs/{dst.name}"
+    src_map = ctx.setdefault("_gif_source", {})
 
-    # 1. report.json の minimap_gif がディスクにあればそれをコピー
-    rr = _round_dict_of(r)
-    cand_paths = [r.get("gif"), ((rr.get("assets") or {}).get("minimap_gif") if isinstance(rr, dict) else None)]
-    for cp in cand_paths:
-        if cp and Path(cp).is_file() and Path(cp).stat().st_size > 0:
-            shutil.copyfile(cp, dst)
-            return f"gifs/{dst.name}"
+    # 1. 試合映像のミニマップ GIF（report.json の minimap_gif → 手元の Drive に読み替え）
+    if "asset_roots" not in ctx:
+        ctx["asset_roots"] = asset_roots(ctx.get("cfg"))
+    real = real_gif_path(r, ctx["asset_roots"])
+    if real is not None:
+        dst = gifs_dir / f"{rk_slug}.gif"
+        if not (dst.exists() and dst.stat().st_size == real.stat().st_size):
+            shutil.copyfile(real, dst)
+        rel = f"gifs/{dst.name}"
+        src_map[rel] = "video"
+        return rel
 
     # 2. 実プレイの軌跡サンプルからアニメーション GIF を生成
+    dst = gifs_dir / f"{rk_slug}_traj.gif"
+    rel = f"gifs/{dst.name}"
+    src_map[rel] = "trajectory"
+    if dst.exists() and dst.stat().st_size > 0:
+        return rel
+    rr = _round_dict_of(r)
     from PIL import Image, ImageDraw
     size = 280
     fig = ctx.get("fig")
@@ -709,9 +797,11 @@ def play_gif_card(ctx: dict, item: dict, prefix: str = "") -> tuple[str, str]:
     r = item.get("r") if "r" in item else item
     label = sample_label(r)
     gif_rel = _ensure_play_gif(ctx, item)
-    cap = f"{prefix}{label}（実プレイGIF）"
+    src = gif_source(ctx, gif_rel) or "trajectory"
+    how = "試合映像のミニマップ" if src == "video" else "軌跡から作図"
+    cap = f"{prefix}{label}（実プレイGIF・{how}）"
     card = (f'<figure class="play-gif">'
-            f'<img class="gif-img" src="{html.escape(gif_rel, quote=True)}" '
+            f'<img class="gif-img" data-gif-source="{src}" src="{html.escape(gif_rel, quote=True)}" '
             f'alt="{html.escape(f"{label} の実プレイGIF", quote=True)}" loading="lazy">'
             f'<figcaption>{_e(cap)}</figcaption></figure>')
     return card, gif_rel
@@ -1763,6 +1853,7 @@ def _phase_type_slide(ctx: dict, sec: dict, t_info: dict, idx: int,
             "flow": flow_disp,
             "has_vod": bool(vc),
             "gif": g_rel,
+            "gif_source": gif_source(ctx, g_rel),
             "full5": is_full5(rep_it),
         })
 
@@ -1817,6 +1908,7 @@ def _phase_type_slide(ctx: dict, sec: dict, t_info: dict, idx: int,
                 "rep_round": b_rep_key,
                 "rep_label": b_rep_lbl or None,
                 "gif": b_gif_rel or None,
+                "gif_source": gif_source(ctx, b_gif_rel) if b_gif_rel else None,
                 "has_vod": b_has_vod,
             })
         branch_table_html = (
@@ -2152,6 +2244,7 @@ def generate(reports: list[dict], map_name: str, out, cfg: dict, log=print) -> P
     _seed_cache(cfg, out, log)
     work = out / "_work"
     work.mkdir(parents=True, exist_ok=True)
+    roots = asset_roots(cfg)                 # 実プレイ GIF を探す出力ルート（_work に差し替える前の output.dir を含む）
     cfg = copy.deepcopy(cfg)
     cfg.setdefault("output", {})
     cfg["output"]["dir"] = str(work)
@@ -2172,7 +2265,8 @@ def generate(reports: list[dict], map_name: str, out, cfg: dict, log=print) -> P
     base_items = _items_for(base_rounds, allr, ctx0["model"], ranks=ranks)
     base_stat = comp_stats(base_rounds, base_items)
     ctx = {**ctx0, "map": map_name, "out": out, "base_rounds": base_rounds, "base_items": base_items,
-            "unknown": unknown, "css": _css()}
+            "unknown": unknown, "css": _css(), "asset_roots": roots}
+    log(f"  実プレイ GIF の探し先: {', '.join(str(x) for x in roots) or '（なし・軌跡から作図）'}")
 
     pages, skipped, page_meta = [], [], []
     try:
