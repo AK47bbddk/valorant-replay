@@ -43,7 +43,8 @@ PARAM_KEYS = ("thr", "margin", "crowded_margin", "min_face_std",
               "gray_floor", "gray_margin", "gray_face_std", "gray_ring", "face_inner",
               "bg_mode", "cand_nms", "cand_per_color", "face_search",
               "cap_over", "gray_crowded",
-              "face_gray_weight", "tpl_bg_color", "tpl_blur", "filled_max_std", "agent_norm")
+              "face_gray_weight", "tpl_bg_color", "tpl_blur", "filled_max_std", "agent_norm",
+              "temporal_bonus")
 COLORS = ("warm", "cool", "yellow")
 # 見落としの理由。前の 5 つは捨てた候補の理由、後ろは候補が出なかった理由。
 MISS_REASONS = ("filled", "flat", "margin", "thr", "cap",
@@ -86,6 +87,7 @@ def replay(dump_dir: str, use_background: bool = True, **params) -> list[dict]:
     base.update({k: v for k, v in params.items() if k in PARAM_KEYS and v is not None})
     icon_frac = float(meta.get("icon_frac") or 0.058)
     out = []
+    ctx = []
     for fr in meta.get("frames") or []:
         img = cv2.imread(str(Path(dump_dir) / fr["file"]), cv2.IMREAD_COLOR)
         if img is None:
@@ -101,6 +103,26 @@ def replay(dump_dir: str, use_background: bool = True, **params) -> list[dict]:
                          background=bg, debug=dbg, **base)
         out.append({"file": fr["file"], "round": fr.get("round"), "t": fr.get("t"),
                     "icon_frac": icon_frac, "found": found, "rejected": dbg})
+        ctx.append((img, ct, alive, m, bg))
+
+    if float(base.get("temporal_bonus") or 0.0) > 0.0:
+        by_round: dict[int, list[int]] = {}
+        for idx, r in enumerate(out):
+            if r["round"] is not None and r["t"] is not None:
+                by_round.setdefault(int(r["round"]), []).append(idx)
+        for idxs in by_round.values():
+            if len(idxs) < 2:
+                continue
+            rframes = [(float(out[i]["t"]), out[i]["found"], ctx[i][2]) for i in idxs]
+            priors = AG.temporal_priors(rframes)
+            for idx, pr in zip(idxs, priors):
+                if not pr:
+                    continue
+                img, ct, alive, m, bg = ctx[idx]
+                dbg2: list = []
+                out[idx]["found"] = AG.match(img, icons, teams, ct, icon_frac=icon_frac, mask=m,
+                                             alive=alive, background=bg, debug=dbg2, prior=pr, **base)
+                out[idx]["rejected"] = dbg2
     return out
 
 

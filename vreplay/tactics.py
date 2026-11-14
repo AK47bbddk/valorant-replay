@@ -1158,7 +1158,8 @@ def _agent_match_params(cfg: dict) -> dict:
             "filled_rescue", "tpl_fill_min", "margin_exclusive", "margin_pair",
             "gray_floor", "gray_margin", "gray_face_std", "gray_ring", "face_inner",
             "bg_mode", "cand_nms", "cand_per_color", "face_search", "cap_over", "gray_crowded",
-            "face_gray_weight", "tpl_bg_color", "tpl_blur", "filled_max_std", "agent_norm")
+            "face_gray_weight", "tpl_bg_color", "tpl_blur", "filled_max_std", "agent_norm",
+            "temporal_bonus")
     return {k: am[k] for k in keys if k in am}
 
 
@@ -1383,21 +1384,24 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
 
     ct_fn = color_team if callable(color_team) else (lambda n_, _c=color_team: _c)
 
-    def one(item, n=0):
+    def _alive_at(t):
+        if alive_fn is None:
+            return None
+        try:
+            a1, a2 = alive_fn(t)
+            return {1: a1, 2: a2} if a1 is not None and a2 is not None else None
+        except Exception:
+            return None
+
+    def one(item, n=0, prior=None):
         t, mm = item
-        if id(mm) in cache:
+        if prior is None and id(mm) in cache:
             return t, cache[id(mm)]
-        alive = None
-        if alive_fn is not None:
-            try:
-                a1, a2 = alive_fn(t)
-                alive = {1: a1, 2: a2} if a1 is not None and a2 is not None else None
-            except Exception:
-                alive = None
+        alive = _alive_at(t)
         return t, AG.match(mm, icons, agent_teams, ct_fn(n), icon_frac=icon_frac,
                            mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
                            alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None,
-                           **am)
+                           prior=prior, **am)
 
     # 照合（1 枚 0.1〜0.2 秒）は OpenCV が GIL を外すので、スレッドで並べる
     from concurrent.futures import ThreadPoolExecutor
@@ -1408,8 +1412,19 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
     with ThreadPoolExecutor(max_workers=max(1, threads), thread_name_prefix="素材-追跡") as ex:
         res = list(ex.map(lambda x: (x[0], one(x[1], x[0])), todo))
     found_by_n: dict[int, list] = {}
-    for n, tf in res:
+    items_by_n: dict[int, list] = {}
+    for (n, it), (_n, tf) in zip(todo, res):
         found_by_n.setdefault(n, []).append(tf)
+        items_by_n.setdefault(n, []).append(it)
+    if float(am.get("temporal_bonus") or 0.0) > 0.0:
+        for n, found in list(found_by_n.items()):
+            if len(found) < 2:
+                continue
+            rframes = [(t, f_, _alive_at(t)) for t, f_ in found]
+            priors = AG.temporal_priors(rframes)
+            for idx, pr in enumerate(priors):
+                if pr:
+                    found[idx] = one(items_by_n[n][idx], n, prior=pr)
     for n, found in sorted(found_by_n.items()):
         rt = round_tac.get(n)
         if rt is None:

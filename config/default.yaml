@@ -125,6 +125,7 @@ tactics:
     tpl_blur: 0.0
     filled_max_std: 22.0
     agent_norm: true
+    temporal_bonus: 0.05
     bg_mode: subtract        # subtract | flag
     cand_nms: 0.8
     cand_per_color: 16

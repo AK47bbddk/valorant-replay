@@ -376,7 +376,9 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
           cand_nms: float = 0.8, cand_per_color: int = 12, face_search: bool = False,
           cap_over: float | None = None, gray_crowded: bool = False,
           face_gray_weight: float = 0.0, tpl_bg_color: bool = False, tpl_blur: float = 0.0,
-          filled_max_std: float | None = None, agent_norm: bool = False) -> list[dict]:
+          filled_max_std: float | None = None, agent_norm: bool = False,
+          prior: dict[tuple[int, str], tuple[float, float, float]] | None = None,
+          temporal_bonus: float = 0.05) -> list[dict]:
     """ミニマップ 1 枚で、誰がどこにいるか。
     ① 縁の輪（暖色・寒色・観戦中の黄色）から、アイコンらしい場所の候補を多めに拾う（重なったアイコンも
        拾えるよう、近い候補も残す）
@@ -458,6 +460,18 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
             shift = np.clip((ref_bg - col_bg) * 0.5, -0.05, 0.08)
             face = face + shift[None, :]
         S = np.array([[face[i, ags.index(a)] for t, a in slots] for i in range(len(cands))])
+        if prior and temporal_bonus > 0.0:
+            for i, f in enumerate(cands):
+                for j, (t, a) in enumerate(slots):
+                    if caps.get(t, 0) <= 0:
+                        continue
+                    pr = prior.get((t, a))
+                    if pr is None:
+                        continue
+                    px_x, px_y, rad = pr
+                    dist = math.hypot(f["x"] - px_x, f["y"] - px_y)
+                    if dist <= rad:
+                        S[i, j] += temporal_bonus * (1.0 - 0.5 * (dist / max(rad, 1e-6)))
     else:
         face = np.zeros((0, len(ags)))
         S = np.zeros((0, len(slots)))
@@ -812,6 +826,39 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
                           "second_agent": second_agent_of(i), "faces": faces_of(i),
                           "ring": f["ring"], "reason": reasons.get(i, "thr")})
     return out
+
+
+def temporal_priors(round_frames: list[tuple[float, list[dict], dict[int, int] | None]],
+                    max_dt: float = 15.0, min_score: float = 0.65,
+                    min_margin: float = 0.12) -> list[dict[tuple[int, str], tuple[float, float, float]]]:
+    """同一ラウンド内の前後フレームの高確信検出から、各フレームへの事前位置ボーナス用 dict を作る。
+    round_frames: [(t, found, alive), ...]（必ず同一ラウンドのみ渡すこと）。"""
+    priors: list[dict[tuple[int, str], tuple[float, float, float]]] = []
+    for idx, (t, _found, alive) in enumerate(round_frames):
+        pr: dict[tuple[int, str], tuple[float, float, float]] = {}
+        best_dt: dict[tuple[int, str], float] = {}
+        for idx2, (t2, found2, _alive2) in enumerate(round_frames):
+            if idx2 == idx:
+                continue
+            dt = abs(float(t) - float(t2))
+            if dt > max_dt:
+                continue
+            for e in found2:
+                ag = e.get("agent")
+                tm = e.get("team")
+                if not ag or tm not in (1, 2):
+                    continue
+                if alive is not None and alive.get(tm, 5) <= 0:
+                    continue
+                if e.get("overlap") or e.get("score", 0.0) < min_score or e.get("margin", 0.0) < min_margin:
+                    continue
+                key = (tm, ag)
+                if key not in best_dt or dt < best_dt[key]:
+                    best_dt[key] = dt
+                    rad = min(0.15, 0.03 + 0.012 * dt)
+                    pr[key] = (float(e["x"]), float(e["y"]), rad)
+        priors.append(pr)
+    return priors
 
 
 def consensus(frames: list[tuple[float, list[dict]]], max_move: float = 0.08, strong: float = 0.6,
