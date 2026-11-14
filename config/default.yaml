@@ -108,8 +108,8 @@ tactics:
     min_face_std: 12
     # 2 本目（agents-recall）のスイッチ。null / false / 今までの値 なら 1 本目と同じ動き（2026-11-12 は全部切だった）
     # 2026-11-14 3 本目（agents-recall3）：ブラインド配置の正解（Sunset 40 フレーム・294 件）で数え直し、下の組を既定にした
-    # （tools/agents_blind_eval.py。P 97.1→98.0%・R 45.2→67.0%・時間 約 +46%）。face_search を足すと R 74.1%（P 98.2%）だが
-    # 時間が約 1.9 倍になるので既定は切。詳細は PROMPT.md
+    # （tools/agents_blind_eval.py。P 97.1→98.0%・R 45.2→67.0%・時間 約 +46%）。
+    # 2026-11-14 face_search も既定で入にした（青木の決定）：P 98.2%・R 74.1%・FP 4、照合時間は約 1.9 倍。詳細は PROMPT.md
     filled_rescue: 0.62      # 顔そのものが縁と同じ色を含むエージェント（Chamber など）を filled で捨てない（null で切）
     tpl_fill_min: 0.30
     margin_exclusive: true   # 同じフレームで残したエージェントを 2 番目の相手から外す
@@ -123,7 +123,7 @@ tactics:
     bg_mode: subtract        # subtract | flag
     cand_nms: 0.8
     cand_per_color: 16
-    face_search: false
+    face_search: true
     cap_over: 0.62           # HUD の生存人数を超えても、顔の点がこれ以上なら残す（読み違いの 0/0・2/0 対策。null で切）
   # 確かめ用：1 マップにつき何枚のミニマップを _tactics/agents_dump/ に書き出すか（0 で書き出さない）
   agents_dump: 0
