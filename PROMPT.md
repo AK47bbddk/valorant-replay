@@ -216,6 +216,12 @@ vreplay playbook --sync --team G2 --map Split
   HTML ではミニマップをクリックして検知漏れ（候補の点が無い所のエージェント）を黄色の星で足せる。判定はブラウザに自動保存（同じタイトルで作り直せば前の判定が残る）。書き出し JSON はフレームごとの配列で、各フレームに `missing: [{frame, round, t, team, team_name, agent, x, y}]`（0〜1 の正規化座標）が付く。書き出した JSON は読み込んで戻せる。v3 では点の正誤（○/×）もミニマップの点をクリックして出る判定パネルで付け（重なった点は Tab や再クリックで切り替え、点ごとのメモも可）、判定済みの点は ○ 青い輪・× 灰色で小さく描く。フレームごと・全体の「判定済み n / 全点 m」を出し、表は「表で見る」に折りたたむ。書き出しの points には点メモ `memo` が増えただけで、`check` などは v2 と同じ（v1/v2 の JSON も読み込める）。
   で、今のコード（`config/default.yaml` の `tactics.agent_match`）で照合をやり直した結果を、番号つきの点・採用/棄却と理由・
   両チームの構成とともに 1 枚の HTML（画像埋め込み）に書き出す（○/× の目視結果は JSON で保存できる）。
+  v4 のブラインド配置モード `python tools/agents_check_html.py --blind <dump_dir> [<dump_dir2> ...] --out _review/agents_check_blind.html --group "<試合・マップ>|<tag1>|<tag2>" ...`
+  は、システムの点を出さない素のミニマップに目視でエージェントを置き（クリック → チーム・エージェント。印のクリックで変更・削除、Ctrl+Z で戻す、フレームごとに「完了」）、
+  「結果を見る」を押したフレームだけ、配置と採用点をアイコン n 個（既定 1）以内で突き合わせた 一致（緑）・見落とし（黄。近くの棄却候補と理由を添える）・
+  誤検出候補＝システムだけ（赤の破線）・取り違え＝位置は合うがエージェント／チーム違い（紫）を重ねる。「全体の集計」で配置・採用・一致・見落とし・誤検出・取り違えと
+  precision（一致/採用）・recall（一致/配置）を出す。照合はページ内の JS（材料の採用点・棄却点は生成時に埋め込む）。ダンプは試合・マップごとに複数並べられる。
+  書き出し JSON は `format: "agents_blind_v1"` で、`frames[].placed`（team, team_name, agent, x, y）・`frames[].result`（match / miss / false_pos / swap）・`counts`・`summary`（all・by_group）。保存キーは `"agents_blind_" + タイトル`。
   2 本目（agents-recall）で、見落としを減らすスイッチを `tactics.agent_match` に足した（すべて既定は切で、
   全部切なら 1 本目と出力が 1 つも変わらない）：`filled_rescue`（顔そのものが縁の色を多く含むエージェントは
   filled で捨てない。救った検出に `"rescued": "filled"`）、`margin_exclusive`（同じフレームで残した
