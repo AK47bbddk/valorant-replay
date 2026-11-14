@@ -1157,8 +1157,19 @@ def _agent_match_params(cfg: dict) -> dict:
     keys = ("thr", "margin", "crowded_margin", "min_face_std",
             "filled_rescue", "tpl_fill_min", "margin_exclusive", "margin_pair",
             "gray_floor", "gray_margin", "gray_face_std", "gray_ring", "face_inner",
-            "bg_mode", "cand_nms", "cand_per_color", "face_search", "cap_over", "gray_crowded")
+            "bg_mode", "cand_nms", "cand_per_color", "face_search", "cap_over", "gray_crowded",
+            "fs_point", "fs_margin", "gray_w", "self_norm")
     return {k: am[k] for k in keys if k in am}
+
+
+def _agent_temporal(cfg: dict) -> dict | None:
+    """config の tactics.agent_temporal（照合の前に前後のフレームの検出を prior として使う）。切なら None。"""
+    tp = (cfg.get("tactics") or {}).get("agent_temporal") or {}
+    if not tp.get("enabled"):
+        return None
+    return {"window": float(tp.get("window", 2.5)), "strong": float(tp.get("strong", 0.66)),
+            "match": {"prior_bonus": float(tp.get("bonus", 0.08)), "prior_move": float(tp.get("max_move", 0.08)),
+                      "prior_relax": float(tp.get("relax", 0.06)), "prior_search": bool(tp.get("search", True))}}
 
 
 def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed, aspect, T, background,
@@ -1172,6 +1183,7 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
         return None
     icon_frac = icon_frac or ICON_FRAC
     am = _agent_match_params(cfg)
+    tp = _agent_temporal(cfg)
     ct_fn = color_team if callable(color_team) else (lambda n_, _c=color_team: _c)
     base = board_base(background, mask, art=art)
     out = {}
@@ -1191,12 +1203,21 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
             except Exception:
                 alive = None
         per = []
+
+        def mt(mm, **kw):
+            return AG.match(mm, icons, agent_teams, color_team_n, icon_frac=icon_frac,
+                            mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
+                            alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None,
+                            **am, **kw)
         for d_, t_, mm in frames:
-            f_ = AG.match(mm, icons, agent_teams, color_team_n, icon_frac=icon_frac,
-                          mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
-                          alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None,
-                          **am)
-            per.append((t_ - frames[0][1] + d_, f_))
+            per.append((t_ - frames[0][1] + d_, mt(mm)))
+        if tp is not None and len(per) > 1:
+            # 節目の前後の何枚かで、ほかのフレームで確かに見つかった検出を prior にして照合し直す
+            res2 = AG.rematch_with_priors([x[0] for x in per], [x[1] for x in per],
+                                          lambda k, pr: mt(frames[k][2], prior=pr, **tp["match"]),
+                                          window=tp["window"], strong=tp["strong"])
+            per = [(x[0], f2) for x, f2 in zip(per, res2)]
+        for (_d, _t, mm), (_dt, f_) in zip(frames, per):
             if cache is not None:
                 cache[id(mm)] = f_
             if f_ and (first is None or len(f_) > len(first[1])):
@@ -1382,9 +1403,11 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
 
     ct_fn = color_team if callable(color_team) else (lambda n_, _c=color_team: _c)
 
-    def one(item, n=0):
+    tp = _agent_temporal(cfg)
+
+    def one(item, n=0, prior=None):
         t, mm = item
-        if id(mm) in cache:
+        if prior is None and id(mm) in cache:
             return t, cache[id(mm)]
         alive = None
         if alive_fn is not None:
@@ -1396,7 +1419,7 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
         return t, AG.match(mm, icons, agent_teams, ct_fn(n), icon_frac=icon_frac,
                            mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
                            alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None,
-                           **am)
+                           **am, **({"prior": prior, **tp["match"]} if prior else {}))
 
     # 照合（1 枚 0.1〜0.2 秒）は OpenCV が GIL を外すので、スレッドで並べる
     from concurrent.futures import ThreadPoolExecutor
@@ -1406,6 +1429,19 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
                      background, {n: float(rt["start"]) for n, rt in round_tac.items()}, log)
     with ThreadPoolExecutor(max_workers=max(1, threads), thread_name_prefix="素材-追跡") as ex:
         res = list(ex.map(lambda x: (x[0], one(x[1], x[0])), todo))
+        if tp is not None:
+            # 時系列の照合前の統合：同じラウンドの前後 window 秒で確かに見つかった検出を prior にして照合し直す
+            # （ラウンドは跨がない。prior が無いフレームは 1 周目のまま）
+            pri = [None] * len(todo)
+            for n in {n for n, _ in todo}:
+                ks = [k for k, (n2, _) in enumerate(todo) if n2 == n]
+                times = [res[k][1][0] for k in ks]
+                found = [res[k][1][1] for k in ks]
+                for li, k in enumerate(ks):
+                    pri[k] = AG.priors_for(times, found, li, window=tp["window"], strong=tp["strong"]) or None
+            redo = [k for k in range(len(todo)) if pri[k]]
+            for k, r2 in zip(redo, ex.map(lambda k: one(todo[k][1], todo[k][0], prior=pri[k]), redo)):
+                res[k] = (todo[k][0], r2)
     found_by_n: dict[int, list] = {}
     for n, tf in res:
         found_by_n.setdefault(n, []).append(tf)

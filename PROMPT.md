@@ -255,6 +255,25 @@ vreplay playbook --sync --team G2 --map Split
   gray_ring 0.50・gray_crowded・cap_over 0.62 にした。P 97.1→98.0%（133/137→197/201）・R 45.2→67.0%（→197/294）・
   照合時間 約 +46%。face_search を足すと P 98.2%・R 74.1% まで上がるが時間が約 1.9 倍（エージェントごとに顔の応答を
   使い回すようにしたうえで）。当初は既定を切にしたが、同日に青木の決定で face_search も既定で入にした（P 98.2%・R 74.1%・FP 4、時間 約 1.9 倍は了承済み）。gray_margin を 0.12 に下げると FP が 4→8 に増えるので 0.15。
+  4 本目（agents-recall4、2026-11-14）：Argon の助言（4 手）を 3 セット（Sunset 40 枚・294 件／他 5 マップ 30 枚・243 件／
+  Skye・Brimstone 編 12 枚・87 件）で 1 手ずつ数え、効いたものだけ既定にした。足したスイッチ：`fs_point` / `fs_margin`
+  （face_search で要る点 thr+fs_point・差 margin+fs_margin。既定 0.06 / 0 で今までどおり）、`gray_w`（顔の点にグレースケールの
+  CCOEFF をこの重みで混ぜる）、`self_norm`（テンプレートを大きさ D に縮めたものとそれを少しぼかしたものの似ている度合い c_a を
+  `_self_score` で測り、点に `self_norm·(照合先の c の平均 − c_a)` を足す。縮小に弱い Astra・Sova などを底上げ）、
+  `prior` / `prior_bonus` / `prior_move` / `prior_relax` / `prior_search`（前後のフレームで確かに見つかった検出を prior にし、
+  その (チーム, エージェント) の prior_move 以内の候補の点に bonus を足してから割り当て・しきい値を見る。`"prior": True`、
+  出す点は足す前。prior_search なら、それでも見つからないエージェントを前の位置の周りだけ thr − relax で探す。`"source": "prior"`）。
+  時系列は `agents.priors_for` / `rematch_with_priors`（ラウンドを跨がない、前後 window 秒・点 strong 以上・重なり／灰色帯／prior 由来は
+  使わない）と config の `tactics.agent_temporal`（既定 enabled: false）で、節目の前後の数枚（_agent_positions）と追跡（_agent_tracks）の
+  両方に入る。既定は thr 0.62・face_inner 0.38・fs_point 0・fs_margin 0.06・gray_w 0.2・self_norm 2.0：
+  Sunset P 98.2→99.1%・R 74.1→78.9%（FP 4→2）、他 5 マップ P 91.8→97.0%・R 64.2→78.6%（FP 14→6）、Skye・Brimstone 編
+  P 82.8→92.5%・R 60.9→71.3%（FP 11→5）、照合時間 約 +10〜19%。効かなかった・悪化した手（コードは戻した）：割り当ての段差ペナルティ・
+  再割り当て（ほぼ動かず、FP が 1 増える）、gray_ring を 0.22〜0.28 に下げる（Sunset の FP 4→10〜18）、透過部を暗い灰色 45 で埋める
+  （R が 10〜15pt 落ちる）、縮小前のぼかし（Sunset の FP 4→9）、filled の半径 0.22D・std 併用・filled_rescue 0.58（新しい既定では
+  filled の見落としが 0 で変化なし）、マージン連動の連続しきい値・チーム内 Z-score の救済（FP は大きい差を持つものが多く、
+  Sunset の FP 2→9〜32）、候補全体の中央値での列の正規化（self_norm と組むと悪化）。時系列（第 4 手）は単発の評価では prior が
+  空で数字が変わらず、他 5 マップ＋Skye・Brimstone 編の GIF の前後 ±2 コマ（≒ ±2 秒）で数えると R +0.9〜1.5pt・FP +1〜2
+  （同じ場所に出続けるゴーストも自分を支えてしまう）で、照合が約 2 倍になるため既定は切。
 - **公式のマップ画像で合わせる**（`minimap.register_art`）：valorant-api の displayIcon（透過つき、コールアウトと同じ 0..1 の座標）の
   床の縁の点を、放送のミニマップの白い縁の線の距離画像に重ね（chamfer）、回転・倍率・位置を粗→細で詰める（初期値はコールアウトと
   床で合わせた結果か、90 度ごとの向き＋縁の線の外接矩形）。縁の点の 50% 以上が 2px 以内に乗れば成功で、床の 2 値画像は公式の画像を

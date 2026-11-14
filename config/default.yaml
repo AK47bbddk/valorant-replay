@@ -102,7 +102,7 @@ tactics:
   track_threads: 4     # 追跡の照合を何本のスレッドで並べるか
   # エージェントの照合の厳しさ。数字は tools/agents_eval.py で実データを数えてから直す
   agent_match:
-    thr: 0.58
+    thr: 0.62                # 2026-11-14 recall4：face_inner 0.38・self_norm で点が全体に上がるぶん 0.58→0.62
     margin: 0.06
     crowded_margin: 0.10
     min_face_std: 12
@@ -119,12 +119,27 @@ tactics:
     gray_face_std: 18
     gray_ring: 0.50
     gray_crowded: true       # 灰色帯を重なり（crowded）の候補にも使う
-    face_inner: 0.42
+    face_inner: 0.38         # recall4：0.42→0.38（外周のチーム色の輪のにじみを顔の照合に入れない）
     bg_mode: subtract        # subtract | flag
     cand_nms: 0.8
     cand_per_color: 16
     face_search: true
+    fs_point: 0.0            # recall4：face_search の要る点を thr+0.06 → thr に下げ、代わりに差を margin+0.06 に上げる
+    fs_margin: 0.06
+    gray_w: 0.2              # recall4：顔の点にグレースケールの CCOEFF を 2 割混ぜる（照合時間 約 +10〜19%）
+    self_norm: 2.0           # recall4：縮小に弱いテンプレート（Astra・Sova など）の点を c_a の差で底上げ（null で切）
     cap_over: 0.62           # HUD の生存人数を超えても、顔の点がこれ以上なら残す（読み違いの 0/0・2/0 対策。null で切）
+  # 時系列の照合前の統合（recall4 第4手）：同じラウンドの前後 window 秒で点が strong 以上の検出を prior にし、
+  # 近くの候補の点に bonus を足して照合し直す（search なら見失った位置の周りを thr−relax で探し直す）。
+  # 照合をもう 1 回やるので、prior のあるフレームの照合時間が約 2 倍。評価の結果は PROMPT.md
+  agent_temporal:
+    enabled: false
+    window: 2.5
+    strong: 0.66
+    bonus: 0.05
+    relax: 0.04
+    max_move: 0.08
+    search: true
   # 確かめ用：1 マップにつき何枚のミニマップを _tactics/agents_dump/ に書き出すか（0 で書き出さない）
   agents_dump: 0
 

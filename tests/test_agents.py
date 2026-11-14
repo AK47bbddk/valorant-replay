@@ -675,3 +675,84 @@ def test_face_search_recovers_dull_rim_icon_only_when_enabled():
     assert AG.match(blank, icons, teams, ct, icon_frac=frac, face_search=True, mask=fmask) == []
 
 
+
+
+def test_recall4_params_at_default_are_identical():
+    """4 本目のスイッチ（fs_point 0.06・fs_margin 0・gray_w 0・self_norm None・prior None）は無指定と同じ。"""
+    names = ["Sova", "Jett", "Omen"]
+    icons = {n: _icon(i) for i, n in enumerate(names)}
+    places = [("Sova", "warm", 0.2, 0.2), ("Jett", "warm", 0.5, 0.3), ("Omen", "cool", 0.7, 0.7)]
+    img = _minimap(icons, places)
+    teams = {1: ["Sova", "Jett"], 2: ["Omen"]}
+    ct = {"warm": 1, "cool": 2}
+    d1, d2 = [], []
+    a = AG.match(img, icons, teams, ct, debug=d1, face_search=True)
+    b = AG.match(img, icons, teams, ct, debug=d2, face_search=True, fs_point=0.06, fs_margin=0.0,
+                 gray_w=0.0, self_norm=None, prior=None)
+    assert a == b and d1 == d2
+    assert AG.match(img, icons, teams, ct, prior=[]) == AG.match(img, icons, teams, ct)
+
+
+def test_gray_w_and_self_norm_still_find_clean_icons():
+    names = ["Sova", "Jett", "Omen", "Killjoy", "Viper"]
+    icons = {n: _icon(i) for i, n in enumerate(names)}
+    places = [("Sova", "warm", 0.2, 0.2), ("Jett", "warm", 0.5, 0.3), ("Omen", "cool", 0.7, 0.7),
+              ("Killjoy", "cool", 0.3, 0.8), ("Viper", "warm", 0.8, 0.2)]
+    img = _minimap(icons, places)
+    teams = {1: ["Sova", "Jett", "Viper"], 2: ["Omen", "Killjoy"]}
+    got = {f["agent"]: f for f in AG.match(img, icons, teams, {"warm": 1, "cool": 2}, gray_w=0.2, self_norm=2.0)}
+    assert len(got) >= 4
+    for a, col, x, y in places:
+        if a in got:
+            assert abs(got[a]["x"] - x) < 0.03 and got[a]["team"] == (1 if col == "warm" else 2)
+
+
+def test_prior_bonus_keeps_low_score_icon_seen_in_neighbor_frames():
+    """thr 未満の顔でも、前後のフレームで近くに同じ (チーム, エージェント) が確かに見つかっていれば残す。
+    出す点は足す前の点。prior が遠い・別のエージェントなら残さない。"""
+    H = W = 400
+    frac = 0.05
+    D = int(frac * H)
+    jett, sova = _gray(_icon(1)), _gray(_icon(2))
+    noise = _gray(np.random.default_rng(42).integers(0, 255, (64, 64, 3), dtype=np.uint8))
+    face = np.clip(0.3 * jett.astype(np.float32) + 0.7 * noise.astype(np.float32), 0, 255).astype(np.uint8)
+    icons = {"Jett": jett, "Sova": sova}
+    teams = {1: ["Jett", "Sova"], 2: []}
+    ct = {"warm": 1, "cool": 2}
+    img = np.full((H, W, 3), 70, np.uint8)
+    _paste(img, face, 0.5, 0.5, "warm", D)
+    assert AG.match(img, icons, teams, ct, icon_frac=frac) == []
+    near = [{"team": 1, "agent": "Jett", "x": 0.52, "y": 0.49, "score": 0.8}]
+    got = AG.match(img, icons, teams, ct, icon_frac=frac, prior=near, prior_search=False)
+    assert len(got) == 1 and got[0]["agent"] == "Jett" and got[0].get("prior") is True
+    assert got[0]["score"] < 0.58
+    far = [{"team": 1, "agent": "Jett", "x": 0.9, "y": 0.9, "score": 0.8}]
+    assert AG.match(img, icons, teams, ct, icon_frac=frac, prior=far, prior_search=False) == []
+    other = [{"team": 1, "agent": "Sova", "x": 0.5, "y": 0.5, "score": 0.8}]
+    assert AG.match(img, icons, teams, ct, icon_frac=frac, prior=other, prior_search=False) == []
+
+
+def test_priors_for_uses_only_strong_neighbors_in_window():
+    strong = {"team": 1, "agent": "Jett", "x": 0.5, "y": 0.5, "score": 0.8}
+    frames = [[dict(strong)],                                            # 自分（使わない）
+              [dict(strong, x=0.51)],                                    # 1 秒後：使う
+              [dict(strong, agent="Sova", score=0.6)],                   # 弱い：使わない
+              [dict(strong, agent="Omen", overlap=True)],                # 重なり：使わない
+              [dict(strong, agent="Neon", source="prior")],              # prior で残したもの：使わない
+              [dict(strong, agent="Fade")]]                              # 窓の外：使わない
+    times = [0.0, 1.0, -1.0, 2.0, -2.0, 5.0]
+    pr = AG.priors_for(times, frames, 0, window=2.5, strong=0.66)
+    assert [(e["agent"], e["x"]) for e in pr] == [("Jett", 0.51)]
+    calls = []
+    out = AG.rematch_with_priors([0.0, 9.0], [[dict(strong)], [dict(strong, agent="Sova")]],
+                                 lambda k, p: calls.append(k) or ["redo"], window=2.5)
+    assert calls == [] and out[0][0]["agent"] == "Jett"
+
+
+def test_agent_temporal_config_is_off_by_default_and_parsed():
+    assert TT._agent_temporal({}) is None
+    assert TT._agent_temporal({"tactics": {"agent_temporal": {"enabled": False, "bonus": 0.1}}}) is None
+    tp = TT._agent_temporal({"tactics": {"agent_temporal": {"enabled": True, "bonus": 0.05, "search": False}}})
+    assert tp["window"] == 2.5 and tp["match"]["prior_bonus"] == 0.05 and tp["match"]["prior_search"] is False
+    am = TT._agent_match_params({"tactics": {"agent_match": {"gray_w": 0.2, "self_norm": 2.0, "fs_margin": 0.06}}})
+    assert am == {"gray_w": 0.2, "self_norm": 2.0, "fs_margin": 0.06}
