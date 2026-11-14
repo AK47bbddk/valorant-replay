@@ -117,7 +117,7 @@ tactics:
     gray_floor: 0.45         # thr 未満でも条件付きで残す下限（null で切）
     gray_margin: 0.15
     gray_face_std: 18
-    gray_ring: 0.50
+    gray_ring: 0.28
     gray_crowded: true       # 灰色帯を重なり（crowded）の候補にも使う
     face_inner: 0.42
     bg_mode: subtract        # subtract | flag

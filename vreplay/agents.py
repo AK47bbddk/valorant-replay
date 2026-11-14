@@ -337,7 +337,7 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
           strict: bool = True, debug: list | None = None, filled_rescue: float | None = None,
           tpl_fill_min: float = 0.35, margin_exclusive: bool = False, margin_pair: bool = False,
           gray_floor: float | None = None, gray_margin: float = 0.12, gray_face_std: float = 18.0,
-          gray_ring: float = 0.30, face_inner: float = 0.42, bg_mode: str = "subtract",
+          gray_ring: float = 0.28, face_inner: float = 0.42, bg_mode: str = "subtract",
           cand_nms: float = 0.8, cand_per_color: int = 12, face_search: bool = False,
           cap_over: float | None = None, gray_crowded: bool = False) -> list[dict]:
     """ミニマップ 1 枚で、誰がどこにいるか。
@@ -518,20 +518,13 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
             else:
                 ok_rows.append(i)
 
-    total = S + 0.2 * np.array([f["ring"] for f in cands])[:, None]
+    total = S + 0.2 * np.array([f["ring"] for f in cands])[:, None] if cands else np.zeros((0, len(slots)))
     for i, f in enumerate(cands):
         for j, (t, _) in enumerate(slots):
             tc = team_color.get(t)
             if f["color"] == "yellow" or tc is None:
                 continue
             total[i, j] += 0.1 if f["color"] == tc else -9.0     # 縁の色が相手チーム → 割り当てない
-    sub = total[ok_rows] if ok_rows else np.zeros((0, len(slots)))
-    pairs = []
-    for li, j in _assign(sub):
-        i = ok_rows[li]
-        if total[i, j] > -1.0 and S[i, j] >= thr:
-            pairs.append((i, j))
-    pairs.sort(key=lambda ij: -S[ij[0], ij[1]])
 
     def det(i, j, t, a, sec, **extra) -> dict:
         f = cands[i]
@@ -545,7 +538,6 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
 
     out, used, decided = [], {1: 0, 2: 0}, set()
     kept: set = set()                 # 残した (チーム, エージェント)
-    margin_hold: list = []            # 1 周目で margin により保留した組
 
     def bg_ok(i, j) -> bool:
         """段階 5：bg_mode="flag" で、動かない模様と重なる（bg >= 0.15）候補の確かめ。"""
@@ -558,86 +550,95 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
         """生存人数の上限を超えたが、cap_over 以上の点なら残してよい（HUD の読み違い対策）。"""
         return cap_over is not None and float(S[i, j]) >= cap_over and used[slots[j][0]] < 5
 
-    # 1 周目：点の高い順に確かめる
-    for i, j in pairs:
-        t, a = slots[j]
-        extra = {}
-        if used[t] >= caps[t]:              # 生存人数の上限で落ちる
-            if not over_cap(i, j):
-                reasons[i] = "cap"
+    # 多段階割り当て：thr 未満の組が席を奪わないようマスクし、後段（cap / bg / margin / 同一位置の別色重複）で
+    # 落ちた組を除外して、残りの候補と未確定の枠で再割り当てする
+    work_total = np.where(S >= thr, total, -9.0) if cands else np.zeros((0, len(slots)))
+    for stage in range(3):
+        rem_rows = [i for i in ok_rows if i not in decided]
+        rem_cols = [j for j, sl in enumerate(slots) if sl not in kept]
+        if not rem_rows or not rem_cols:
+            break
+        sub = work_total[np.ix_(rem_rows, rem_cols)]
+        pairs = []
+        for li, lj in _assign(sub):
+            i, j = rem_rows[li], rem_cols[lj]
+            if work_total[i, j] <= -1.0:
                 continue
-            extra["over_cap"] = True
-        if not bg_ok(i, j):
-            reasons[i] = "bg"
-            continue
-        sec = second_for(i, a, t)
-        # d. 差の確かめ（そのチームに照合できるエージェントが 1 人だけなら飛ばす）
-        if strict and len(team_agents(cands[i])) > 1 and float(S[i, j]) - sec < margin_limit(i, a):
-            reasons[i] = "margin"
-            if margin_exclusive:
-                margin_hold.append((i, j))
-            continue
-        used[t] += 1
-        out.append(det(i, j, t, a, sec, **extra))
-        kept.add((t, a))
-        decided.add(i)
+            if S[i, j] < thr:
+                work_total[i, j] = -9.0
+                continue
+            pairs.append((i, j))
+        if not pairs:
+            break
+        pairs.sort(key=lambda ij: -S[ij[0], ij[1]])
+        margin_hold: list = []
 
-    # 2 周目（margin_exclusive）：1 周目で残した（チーム, エージェント）を 2 番目の相手から外してやり直す
-    for i, j in margin_hold:
-        if i in decided:
-            continue
-        t, a = slots[j]
-        extra = {"margin_pass": 2}
-        if used[t] >= caps[t]:
-            if not over_cap(i, j):
-                reasons[i] = "cap"
-                continue
-            extra["over_cap"] = True
-        if not bg_ok(i, j):
-            reasons[i] = "bg"
-            continue
-        sec = second_for(i, a, t, exclude=kept)
-        if strict and len(team_agents(cands[i])) > 1 and float(S[i, j]) - sec < margin_limit(i, a):
-            reasons[i] = "margin"
-            continue
-        used[t] += 1
-        out.append(det(i, j, t, a, sec, **extra))
-        kept.add((t, a))
-        decided.add(i)
-
-    # 段階 4：灰色帯（thr 未満でも、crowded でなく縁がチーム色で、差・中身・輪の反応が十分なら残す）
-    if gray_floor is not None:
-        band = []
-        for i in ok_rows:
-            if i in decided:
-                continue
-            f = cands[i]
-            if f["color"] == "yellow" or f.get("bg", 0.0) >= 0.15:
-                continue
-            for j, (t, a) in enumerate(slots):
-                if f["color"] != team_color.get(t) or (t, a) in kept:
-                    continue
-                if gray_floor <= float(S[i, j]) < thr:
-                    band.append((float(S[i, j]), i, j))
-        band.sort(key=lambda x: -x[0])
-        for _sc, i, j in band:
-            if i in decided:
-                continue
+        # 1 周目：点の高い順に確かめる
+        for i, j in pairs:
             t, a = slots[j]
-            if (t, a) in kept or used[t] >= caps[t] or (crowded[i] and not gray_crowded):
+            extra = {"assign_stage": stage + 1} if stage > 0 else {}
+            cx, cy = cands[i]["px"]
+            if any(math.hypot(e["x"] * W - cx, e["y"] * H - cy) < 0.45 * D for e in out):
+                reasons[i] = "nms"
+                work_total[i, :] = -9.0
                 continue
-            f = cands[i]
-            x, y = f["px"]
-            sec = second_for(i, a, t)
-            if (float(S[i, j]) - sec < gray_margin or _face_std(img, x, y, D) < gray_face_std
-                    or f["ring"] < gray_ring):
+            if used[t] >= caps[t]:              # 生存人数の上限で落ちる
+                if not over_cap(i, j):
+                    reasons[i] = "cap"
+                    work_total[i, j] = -9.0
+                    continue
+                extra["over_cap"] = True
+            if not bg_ok(i, j):
+                reasons[i] = "bg"
+                work_total[i, j] = -9.0
+                continue
+            sec = second_for(i, a, t, exclude=(kept if stage > 0 and margin_exclusive else None))
+            # d. 差の確かめ（そのチームに照合できるエージェントが 1 人だけなら飛ばす）
+            if strict and len(team_agents(cands[i])) > 1 and float(S[i, j]) - sec < margin_limit(i, a):
+                reasons[i] = "margin"
+                if margin_exclusive:
+                    margin_hold.append((i, j))
+                else:
+                    work_total[i, j] = -9.0
                 continue
             used[t] += 1
-            out.append(det(i, j, t, a, sec, tier="gray"))
+            out.append(det(i, j, t, a, sec, **extra))
             kept.add((t, a))
             decided.add(i)
 
-    # 段階 5：輪の候補が出ない枠を、顔のテンプレートでフレーム全体から探して足す
+        # 2 周目（margin_exclusive）：1 周目で残した（チーム, エージェント）を 2 番目の相手から外してやり直す
+        for i, j in margin_hold:
+            if i in decided or slots[j] in kept:
+                continue
+            t, a = slots[j]
+            extra = {"margin_pass": 2}
+            cx, cy = cands[i]["px"]
+            if any(math.hypot(e["x"] * W - cx, e["y"] * H - cy) < 0.45 * D for e in out):
+                reasons[i] = "nms"
+                work_total[i, :] = -9.0
+                continue
+            if used[t] >= caps[t]:
+                if not over_cap(i, j):
+                    reasons[i] = "cap"
+                    work_total[i, j] = -9.0
+                    continue
+                extra["over_cap"] = True
+            if not bg_ok(i, j):
+                reasons[i] = "bg"
+                work_total[i, j] = -9.0
+                continue
+            sec = second_for(i, a, t, exclude=kept)
+            if strict and len(team_agents(cands[i])) > 1 and float(S[i, j]) - sec < margin_limit(i, a):
+                reasons[i] = "margin"
+                work_total[i, j] = -9.0
+                continue
+            used[t] += 1
+            out.append(det(i, j, t, a, sec, **extra))
+            kept.add((t, a))
+            decided.add(i)
+
+    # 段階 5：輪の候補が出ない枠を、顔のテンプレートでフレーム全体から探して足す（マージン連動しきい値）
+    # 灰色帯（低スコア救済）に枠を奪われないよう、face_search を先に走らせる
     if face_search:
         d = max(6, int(round(D)))
         fmask = _circle_mask(d, 0.42)
@@ -672,7 +673,7 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
             cx, cy = bx + d // 2, by + d // 2
             px = (cx, cy)
             point = _face_score(img, px, icons[a], D, inner=face_inner)
-            if point < thr + 0.06 or _face_std(img, cx, cy, D) < gray_face_std:
+            if _face_std(img, cx, cy, D) < gray_face_std:
                 continue
             if _ring_frac(img, cx, cy, D, FACE_RING[color]) < 0.15:
                 continue
@@ -680,13 +681,50 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
                 continue
             others = [a2 for a2 in dict.fromkeys(teams.get(t) or []) if a2 in icons and a2 != a]
             sec = max((_face_score(img, px, icons[a2], D, inner=face_inner) for a2 in others), default=-1.0)
-            if others and point - sec < margin:
+            mg = point - sec if others else 1.0
+            min_mg = margin + 0.02
+            req_pt = max(thr, (thr + 0.06) - 0.35 * (mg - min_mg))
+            if (others and mg < min_mg) or point < req_pt:
                 continue
             used[t] += 1
             out.append({"agent": a, "team": t, "x": px[0] / W, "y": px[1] / H, "score": round(point, 2),
                         "ring": 0.0, "guess": a, "color": color, "overlap": False,
                         "margin": round(point - sec, 2), "source": "face"})
             kept.add((t, a))
+
+    # 段階 4：灰色帯（thr 未満でも、crowded でなく縁がチーム色で、差・中身・輪の反応が十分なら残す）
+    if gray_floor is not None:
+        band = []
+        for i in ok_rows:
+            if i in decided:
+                continue
+            f = cands[i]
+            if f["color"] == "yellow" or f.get("bg", 0.0) >= 0.15:
+                continue
+            for j, (t, a) in enumerate(slots):
+                if f["color"] != team_color.get(t) or (t, a) in kept:
+                    continue
+                if gray_floor <= float(S[i, j]) < thr:
+                    band.append((float(S[i, j]), i, j))
+        band.sort(key=lambda x: -x[0])
+        for _sc, i, j in band:
+            if i in decided:
+                continue
+            t, a = slots[j]
+            if (t, a) in kept or used[t] >= caps[t] or (crowded[i] and not gray_crowded):
+                continue
+            f = cands[i]
+            x, y = f["px"]
+            if any(math.hypot(e["x"] * W - x, e["y"] * H - y) < 0.6 * D for e in out):
+                continue
+            sec = second_for(i, a, t)
+            if (float(S[i, j]) - sec < gray_margin or _face_std(img, x, y, D) < gray_face_std
+                    or f["ring"] < gray_ring):
+                continue
+            used[t] += 1
+            out.append(det(i, j, t, a, sec, tier="gray"))
+            kept.add((t, a))
+            decided.add(i)
 
     if debug is not None:
         for i, f in enumerate(cands):
