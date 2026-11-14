@@ -172,6 +172,25 @@ def test_icon_size_is_estimated_and_alive_caps_the_count():
     assert sum(e["team"] == 1 for e in capped) == 1
 
 
+def test_cap_over_keeps_strong_faces_when_alive_reads_zero():
+    """HUD の生存人数の読み違い（0 人）でも、cap_over 以上によく似た顔は残す。既定（cap_over なし）は今までどおり落とす。"""
+    names = ["Sova", "Jett", "Omen", "Killjoy", "Viper"]
+    icons = {n: _icon(i) for i, n in enumerate(names)}
+    places = [("Sova", "warm", 0.2, 0.2), ("Jett", "warm", 0.5, 0.3), ("Omen", "cool", 0.7, 0.7)]
+    img = _minimap(icons, places)
+    teams = {1: ["Sova", "Jett", "Viper"], 2: ["Omen", "Killjoy"]}
+    ct = {"warm": 1, "cool": 2}
+    hard = AG.match(img, icons, teams, ct, alive={1: 0, 2: 0})
+    assert hard == []
+    soft = AG.match(img, icons, teams, ct, alive={1: 0, 2: 0}, cap_over=0.62)
+    assert {e["agent"] for e in soft} == {"Sova", "Jett", "Omen"}
+    assert all(e.get("over_cap") for e in soft)
+    e = lambda a, s, t=1: {"agent": a, "team": t, "x": 0.5, "y": 0.5, "score": s}
+    frames = [(0.0, [e("Sova", 0.8), e("Jett", 0.5)]), (1.0, [e("Sova", 0.8), e("Jett", 0.5)])]
+    assert len(AG.consensus(frames, alive={1: 0})) == 0
+    assert [x["agent"] for x in AG.consensus(frames, alive={1: 0}, cap_over=0.62)] == ["Sova"]
+
+
 def test_static_background_marks_are_not_icons():
     names = ["Sova", "Jett"]
     icons = {n: _icon(i) for i, n in enumerate(names)}

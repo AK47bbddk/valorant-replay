@@ -243,6 +243,18 @@ vreplay playbook --sync --team G2 --map Split
   重なり（crowded）で条件から外れ、効果が無かった（ghost +3 のみ）。margin_pair は sim の実測が最大でも
   0.53 で補正がほぼ効かず、数字は変わらなかった。bg_mode flag は単独・組のどちらでも悪化した。
   残った見落とし（最良の組でも 88 件）は thr 25・weak 23・color 9・bg 8・nms 8 が中心。
+  3 本目（agents-recall3、2026-11-14）：青木のブラインド配置（同じ Sunset の 40 フレーム・294 件）を正解にして
+  `python tools/agents_blind_eval.py <dump_dir> <blind.json> [--config config/default.yaml] [--set key=value ...] [--json out.json]`
+  で数える（agents_eval の replay でやり直し、同じチーム・同じエージェントで正規化座標の距離 0.03 以内を近い順に貪欲に組んだものが一致。
+  採用点の残りが FP、配置の残りが FN。FN は swap / rejected:<理由>（近くの棄却候補が同じエージェント）/ near:<理由>（別エージェント）/
+  no-candidate に分ける）。分かったこと：HUD の生存人数の読みが 0/0・2/0 などに外れるフレームがあり（40 枚中 7 枚）、
+  上限 0 のチームは照合先から外れて「候補が出ない」見落としになっていた。そこで `cap_over`（生存人数を超えても顔の点が
+  これ以上なら残す。`"over_cap": True`。読みが 0 のチームも照合先に入れる。consensus も同じ値で上限を超えて残す）と
+  `gray_crowded`（灰色帯を crowded の候補にも使う。cand_per_color 16 ではほとんどの候補が crowded になり、灰色帯が効かなかった）
+  を足し、既定を filled_rescue 0.62・tpl_fill_min 0.30・margin_exclusive・cand_per_color 16・gray_floor 0.45・gray_margin 0.15・
+  gray_ring 0.50・gray_crowded・cap_over 0.62 にした。P 97.1→98.0%（133/137→197/201）・R 45.2→67.0%（→197/294）・
+  照合時間 約 +46%。face_search を足すと P 98.2%・R 74.1% まで上がるが時間が約 1.9 倍（エージェントごとに顔の応答を
+  使い回すようにしたうえで）なので既定は切。gray_margin を 0.12 に下げると FP が 4→8 に増えるので 0.15。
 - **公式のマップ画像で合わせる**（`minimap.register_art`）：valorant-api の displayIcon（透過つき、コールアウトと同じ 0..1 の座標）の
   床の縁の点を、放送のミニマップの白い縁の線の距離画像に重ね（chamfer）、回転・倍率・位置を粗→細で詰める（初期値はコールアウトと
   床で合わせた結果か、90 度ごとの向き＋縁の線の外接矩形）。縁の点の 50% 以上が 2px 以内に乗れば成功で、床の 2 値画像は公式の画像を

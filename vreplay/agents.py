@@ -338,7 +338,8 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
           tpl_fill_min: float = 0.35, margin_exclusive: bool = False, margin_pair: bool = False,
           gray_floor: float | None = None, gray_margin: float = 0.12, gray_face_std: float = 18.0,
           gray_ring: float = 0.30, face_inner: float = 0.42, bg_mode: str = "subtract",
-          cand_nms: float = 0.8, cand_per_color: int = 12, face_search: bool = False) -> list[dict]:
+          cand_nms: float = 0.8, cand_per_color: int = 12, face_search: bool = False,
+          cap_over: float | None = None, gray_crowded: bool = False) -> list[dict]:
     """ミニマップ 1 枚で、誰がどこにいるか。
     ① 縁の輪（暖色・寒色・観戦中の黄色）から、アイコンらしい場所の候補を多めに拾う（重なったアイコンも
        拾えるよう、近い候補も残す）
@@ -365,14 +366,19 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
       face_inner: _face_score の円形マスクの半径（0.42 で今までと同じ）
       bg_mode: "subtract"（背景を差し引く。今までと同じ）か "flag"（差し引かず、候補に背景の反応 "bg" を付ける）
       cand_nms / cand_per_color: 候補を拾うときの NMS の距離（D の比）と、色ごとの上限（既定は今までと同じ）
-      face_search: 輪の候補が出ない枠を、顔のテンプレートでフレーム全体から探して足す（"source": "face"）"""
+      face_search: 輪の候補が出ない枠を、顔のテンプレートでフレーム全体から探して足す（"source": "face"）
+    3 本目（agents-recall3）のスイッチ（既定は切）：
+      cap_over: 生存人数（HUD の読み）を超えても、顔の点がこれ以上で差の確かめも通る候補は残す（"over_cap": True）。
+        HUD の読みが 0 のチームも照合先に入れる（読み違いで 0/0・2/0 になる場面で、本物を全部落とさないため）
+      gray_crowded: 灰色帯（gray_floor）を crowded の候補にも使う（候補を多めに拾うとほとんどが crowded になるため）"""
     if img is None or img.size == 0:
         return []
     H, W = img.shape[:2]
     D = icon_frac * H
     team_color = {t: c for c, t in color_team.items()}
     caps = {t: min(5, int((alive or {}).get(t, 5))) for t in (1, 2)}
-    slots = [(t, a) for t in (1, 2) if caps[t] > 0 for a in dict.fromkeys(teams.get(t) or []) if a in icons]
+    slots = [(t, a) for t in (1, 2) if caps[t] > 0 or cap_over is not None
+             for a in dict.fromkeys(teams.get(t) or []) if a in icons]
     if not slots:          # 顔が無いときは輪の強い順に（エージェントは不明）
         out = []
         for color in ("warm", "cool"):
@@ -548,12 +554,19 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
         x, y = cands[i]["px"]
         return float(S[i, j]) >= thr + 0.04 and _face_std(img, x, y, D) >= gray_face_std
 
+    def over_cap(i, j) -> bool:
+        """生存人数の上限を超えたが、cap_over 以上の点なら残してよい（HUD の読み違い対策）。"""
+        return cap_over is not None and float(S[i, j]) >= cap_over and used[slots[j][0]] < 5
+
     # 1 周目：点の高い順に確かめる
     for i, j in pairs:
         t, a = slots[j]
+        extra = {}
         if used[t] >= caps[t]:              # 生存人数の上限で落ちる
-            reasons[i] = "cap"
-            continue
+            if not over_cap(i, j):
+                reasons[i] = "cap"
+                continue
+            extra["over_cap"] = True
         if not bg_ok(i, j):
             reasons[i] = "bg"
             continue
@@ -565,7 +578,7 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
                 margin_hold.append((i, j))
             continue
         used[t] += 1
-        out.append(det(i, j, t, a, sec))
+        out.append(det(i, j, t, a, sec, **extra))
         kept.add((t, a))
         decided.add(i)
 
@@ -574,9 +587,12 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
         if i in decided:
             continue
         t, a = slots[j]
+        extra = {"margin_pass": 2}
         if used[t] >= caps[t]:
-            reasons[i] = "cap"
-            continue
+            if not over_cap(i, j):
+                reasons[i] = "cap"
+                continue
+            extra["over_cap"] = True
         if not bg_ok(i, j):
             reasons[i] = "bg"
             continue
@@ -585,7 +601,7 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
             reasons[i] = "margin"
             continue
         used[t] += 1
-        out.append(det(i, j, t, a, sec, margin_pass=2))
+        out.append(det(i, j, t, a, sec, **extra))
         kept.add((t, a))
         decided.add(i)
 
@@ -608,7 +624,7 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
             if i in decided:
                 continue
             t, a = slots[j]
-            if (t, a) in kept or used[t] >= caps[t] or crowded[i]:
+            if (t, a) in kept or used[t] >= caps[t] or (crowded[i] and not gray_crowded):
                 continue
             f = cands[i]
             x, y = f["px"]
@@ -623,23 +639,33 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
 
     # 段階 5：輪の候補が出ない枠を、顔のテンプレートでフレーム全体から探して足す
     if face_search:
+        d = max(6, int(round(D)))
+        fmask = _circle_mask(d, 0.42)
+        mr = (cv2.resize(mask.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST)
+              if mask is not None and mask.shape[:2] == img.shape[:2] else None)
+        resp_of: dict = {}            # エージェントごとに 1 回だけ（両チームに同じエージェントがいるとき使い回す）
+
+        def face_resp(a):
+            if a not in resp_of:
+                tpl = cv2.resize(icons[a], (d, d), interpolation=cv2.INTER_AREA)
+                r = cv2.matchTemplate(img, tpl, cv2.TM_CCOEFF_NORMED, mask=fmask)
+                r = np.nan_to_num(r, nan=-1.0, posinf=-1.0, neginf=-1.0)
+                if mr is not None:
+                    half = d // 2
+                    sub = mr[half:half + r.shape[0], half:half + r.shape[1]]
+                    r = np.where(sub > 0, r, -1.0) if sub.shape == r.shape else None
+                resp_of[a] = r
+            return resp_of[a]
+
         for t, a in slots:
             if (t, a) in kept or used[t] >= caps[t]:
                 continue
             color = team_color.get(t)
             if color not in FACE_RING:
                 continue
-            d = max(6, int(round(D)))
-            tpl = cv2.resize(icons[a], (d, d), interpolation=cv2.INTER_AREA)
-            resp = cv2.matchTemplate(img, tpl, cv2.TM_CCOEFF_NORMED, mask=_circle_mask(d, 0.42))
-            resp = np.nan_to_num(resp, nan=-1.0, posinf=-1.0, neginf=-1.0)
-            if mask is not None and mask.shape[:2] == img.shape[:2]:
-                half = d // 2
-                mr = cv2.resize(mask.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST)
-                sub = mr[half:half + resp.shape[0], half:half + resp.shape[1]]
-                if sub.shape != resp.shape:
-                    continue
-                resp = np.where(sub > 0, resp, -1.0)
+            resp = face_resp(a)
+            if resp is None:
+                continue
             _, mv, _, (bx, by) = cv2.minMaxLoc(resp)
             if mv <= -1.0:
                 continue
@@ -675,13 +701,14 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
 
 
 def consensus(frames: list[tuple[float, list[dict]]], max_move: float = 0.08, strong: float = 0.6,
-              alive: dict[int, int] | None = None) -> list[dict]:
+              alive: dict[int, int] | None = None, cap_over: float | None = None) -> list[dict]:
     """節目の前後の何枚か（[(節目からの秒数の差, match の結果)]）から、エージェントごとの位置を 1 つに決める。
     1 枚だけだと、アイコンの重なり・スモーク・観戦画面の切り替えで見落としたり、スキルの印を誤って拾ったりする。
     ほかのフレームでも近く（max_move 以内）に見つかった検出か、顔がよく似た（strong 以上の）検出だけを残し、
     その中で節目にいちばん近い時刻のものを使う。重なり（overlap）の検出は顔がよく似ていても、ほかのフレームの
     近くの検出があるときだけ残す（1 枚だけの高得点は重なりの誤りであることが多い）。灰色帯（tier == "gray"）も
-    同じ扱いにする（1 枚だけでは残さない）。"""
+    同じ扱いにする（1 枚だけでは残さない）。
+    cap_over を渡すと、生存人数を超えた分でも点が cap_over 以上なら残す（match の cap_over と同じ。HUD の読み違い対策）。"""
     by: dict = {}
     for k, (dt, found) in enumerate(sorted(frames, key=lambda x: abs(x[0]))):
         for e in found:
@@ -704,7 +731,10 @@ def consensus(frames: list[tuple[float, list[dict]]], max_move: float = 0.08, st
     for t in (1, 2):
         mine = sorted((e for e in out if e["team"] == t), key=lambda e: -e["score"])
         cap = (alive or {}).get(t)
-        res += mine[:cap] if cap is not None else mine
+        if cap is None:
+            res += mine
+        else:
+            res += mine[:cap] + [e for e in mine[cap:] if cap_over is not None and e["score"] >= cap_over][:5 - cap]
     return res
 
 

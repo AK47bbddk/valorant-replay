@@ -1157,7 +1157,7 @@ def _agent_match_params(cfg: dict) -> dict:
     keys = ("thr", "margin", "crowded_margin", "min_face_std",
             "filled_rescue", "tpl_fill_min", "margin_exclusive", "margin_pair",
             "gray_floor", "gray_margin", "gray_face_std", "gray_ring", "face_inner",
-            "bg_mode", "cand_nms", "cand_per_color", "face_search")
+            "bg_mode", "cand_nms", "cand_per_color", "face_search", "cap_over", "gray_crowded")
     return {k: am[k] for k in keys if k in am}
 
 
@@ -1201,7 +1201,7 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
                 cache[id(mm)] = f_
             if f_ and (first is None or len(f_) > len(first[1])):
                 first = (mm, f_)
-        found = AG.consensus(per, alive=alive) if len(per) > 1 else per[0][1]
+        found = AG.consensus(per, alive=alive, cap_over=am.get("cap_over")) if len(per) > 1 else per[0][1]
         n_try += 1
         n_frames += len(frames)
         n_found += len(found)

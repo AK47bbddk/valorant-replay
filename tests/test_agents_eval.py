@@ -170,3 +170,26 @@ def test_sweep_writes_a_row_per_group(tmp_path):
     lines = (d / "eval" / "sweep.csv").read_text("utf-8").strip().splitlines()
     assert len(lines) == 3 and lines[0].startswith("name,")
 
+
+
+def test_blind_eval_greedy_match_and_reasons(tmp_path):
+    """ブラインド配置の突き合わせ：同チーム・同エージェントで tol 以内を近い順に一致、位置だけ合うものは取り違え、
+    近くに棄却候補があればその理由、無ければ no-candidate。"""
+    from tools import agents_blind_eval as BE
+    placed = [{"team": 1, "agent": "Sova", "x": 0.5, "y": 0.5},
+              {"team": 1, "agent": "Jett", "x": 0.2, "y": 0.2},
+              {"team": 2, "agent": "Omen", "x": 0.8, "y": 0.8},
+              {"team": 2, "agent": "Killjoy", "x": 0.1, "y": 0.9}]
+    found = [{"team": 1, "agent": "Sova", "x": 0.51, "y": 0.5},
+             {"team": 1, "agent": "Sova", "x": 0.52, "y": 0.52},       # 2 つ目は一致しない → FP
+             {"team": 1, "agent": "Viper", "x": 0.2, "y": 0.21}]       # 位置は合うが別人 → 取り違え
+    rejected = [{"agent": "Omen", "x": 0.8, "y": 0.81, "reason": "filled"}]
+    m = BE.match_frame(placed, found, rejected, tol=0.03)
+    assert [p["agent"] for p in m["tp"]] == ["Sova"]
+    assert len(m["fp"]) == 2 and m["swap"] == 1
+    why = {x["agent"]: x["reason"] for x in m["misses"]}
+    assert why == {"Jett": "swap", "Omen": "rejected:filled", "Killjoy": "no-candidate"}
+    blind = tmp_path / "b.json"
+    blind.write_text(json.dumps({"frames": [{"file": "a.png", "placed": [[1, "Sova", 0.5, 0.5]]}]}), "utf-8")
+    ev = BE.evaluate([{"file": "a.png", "found": found[:1], "rejected": []}], BE.load_blind(str(blind)))
+    assert (ev["tp"], ev["kept"], ev["placed"], ev["precision"], ev["recall"]) == (1, 1, 1, 1.0, 1.0)
