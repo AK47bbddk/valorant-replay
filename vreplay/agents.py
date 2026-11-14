@@ -254,20 +254,55 @@ def find_icons(img: np.ndarray, icon_frac: float, mask=None, per_color: int = 5,
     return out
 
 
-def _face_score(img: np.ndarray, px: tuple[int, int], tpl: np.ndarray, D: float, inner: float = 0.42) -> float:
+def _prep_tpl(tpl: np.ndarray, color: str | None = None, blur: float = 0.0, bg_tint: bool = False) -> np.ndarray:
+    """テンプレートの前処理：透明代替のグレー(90)を暗い床色・チーム色に合成し、軽くぼかす。"""
+    out = tpl
+    if bg_tint:
+        bg_map = {"warm": (45, 45, 68), "cool": (68, 60, 42)}
+        bg = np.array(bg_map.get(color, (48, 46, 44)), dtype=np.uint8)
+        m = np.max(np.abs(tpl.astype(np.int16) - 90), axis=2) <= 3
+        if m.any():
+            out = tpl.copy()
+            out[m] = bg
+    if blur > 0:
+        out = cv2.GaussianBlur(out, (3, 3), blur)
+    return out
+
+
+def _face_score(img: np.ndarray, px: tuple[int, int], tpl: np.ndarray, D: float, inner: float = 0.42,
+                gray_weight: float = 0.0, img_gray: np.ndarray | None = None,
+                tpl_gray: np.ndarray | None = None) -> float:
     """(px) の近く（±0.25D）で、顔のテンプレートとの似ている度合い（CCOEFF、円の内側だけ）。
-    inner は照合に使う円形マスクの半径（D に対する比）。0.42 で今までと同じ。"""
+    inner は照合に使う円形マスクの半径（D に対する比）。gray_weight > 0 ならグレースケールと BGR の加重和。"""
     x, y = px
     best = -1.0
+    use_gray = gray_weight > 0.0
+    if use_gray and img_gray is None:
+        img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    if use_gray and tpl_gray is None:
+        tpl_gray = cv2.cvtColor(tpl, cv2.COLOR_BGR2GRAY)
     for s in (0.9, 1.0, 1.1):
         d = max(6, int(round(D * s)))
         rad = max(2, int(round(0.25 * D))) + d // 2
-        win = img[max(0, y - rad):y + rad + 1, max(0, x - rad):x + rad + 1]
+        y0, y1 = max(0, y - rad), y + rad + 1
+        x0, x1 = max(0, x - rad), x + rad + 1
+        win = img[y0:y1, x0:x1]
         if win.shape[0] <= d or win.shape[1] <= d:
             continue
-        T = cv2.resize(tpl, (d, d), interpolation=cv2.INTER_AREA)
-        r = cv2.matchTemplate(win, T, cv2.TM_CCOEFF_NORMED, mask=_circle_mask(d, inner))
-        r = np.nan_to_num(r, nan=-1.0, posinf=-1.0, neginf=-1.0)
+        mk = _circle_mask(d, inner)
+        if gray_weight < 1.0:
+            T = cv2.resize(tpl, (d, d), interpolation=cv2.INTER_AREA)
+            r_bgr = cv2.matchTemplate(win, T, cv2.TM_CCOEFF_NORMED, mask=mk)
+            r_bgr = np.nan_to_num(r_bgr, nan=-1.0, posinf=-1.0, neginf=-1.0)
+        else:
+            r_bgr = None
+        if use_gray:
+            Tg = cv2.resize(tpl_gray, (d, d), interpolation=cv2.INTER_AREA)
+            rg = cv2.matchTemplate(img_gray[y0:y1, x0:x1], Tg, cv2.TM_CCOEFF_NORMED, mask=mk)
+            rg = np.nan_to_num(rg, nan=-1.0, posinf=-1.0, neginf=-1.0)
+            r = rg if r_bgr is None else (1.0 - gray_weight) * r_bgr + gray_weight * rg
+        else:
+            r = r_bgr
         best = max(best, float(r.max()))
     return best
 
@@ -339,7 +374,9 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
           gray_floor: float | None = None, gray_margin: float = 0.12, gray_face_std: float = 18.0,
           gray_ring: float = 0.28, face_inner: float = 0.42, bg_mode: str = "subtract",
           cand_nms: float = 0.8, cand_per_color: int = 12, face_search: bool = False,
-          cap_over: float | None = None, gray_crowded: bool = False) -> list[dict]:
+          cap_over: float | None = None, gray_crowded: bool = False,
+          face_gray_weight: float = 0.0, tpl_bg_color: bool = False, tpl_blur: float = 0.0,
+          filled_max_std: float | None = None, agent_norm: bool = False) -> list[dict]:
     """ミニマップ 1 枚で、誰がどこにいるか。
     ① 縁の輪（暖色・寒色・観戦中の黄色）から、アイコンらしい場所の候補を多めに拾う（重なったアイコンも
        拾えるよう、近い候補も残す）
@@ -397,9 +434,29 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
     if not cands and not face_search:
         return []
     ags = list(dict.fromkeys(a for _, a in slots))
+    img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if face_gray_weight > 0.0 else None
+    prep_cache: dict[tuple[str, str], tuple[np.ndarray, np.ndarray | None]] = {}
+
+    def get_tpl(a: str, color: str | None) -> tuple[np.ndarray, np.ndarray | None]:
+        key = (a, color if tpl_bg_color and color in ("warm", "cool") else "neutral")
+        if key not in prep_cache:
+            t_bgr = _prep_tpl(icons[a], color=key[1], blur=tpl_blur, bg_tint=tpl_bg_color)
+            t_g = cv2.cvtColor(t_bgr, cv2.COLOR_BGR2GRAY) if face_gray_weight > 0.0 else None
+            prep_cache[key] = (t_bgr, t_g)
+        return prep_cache[key]
+
     if cands:
-        face = np.array([[_face_score(img, f["px"], icons[a], D, inner=face_inner) for a in ags]
-                         for f in cands])
+        face = np.zeros((len(cands), len(ags)), dtype=np.float64)
+        for i, f in enumerate(cands):
+            for k, a in enumerate(ags):
+                tb, tg = get_tpl(a, f["color"])
+                face[i, k] = _face_score(img, f["px"], tb, D, inner=face_inner,
+                                         gray_weight=face_gray_weight, img_gray=img_gray, tpl_gray=tg)
+        if agent_norm and len(cands) >= 4 and len(ags) >= 2:
+            col_bg = np.array([float(np.median(np.sort(face[:, k])[:-1])) for k in range(len(ags))])
+            ref_bg = float(np.median(col_bg))
+            shift = np.clip((ref_bg - col_bg) * 0.5, -0.05, 0.08)
+            face = face + shift[None, :]
         S = np.array([[face[i, ags.index(a)] for t, a in slots] for i in range(len(cands))])
     else:
         face = np.zeros((0, len(ags)))
@@ -478,7 +535,7 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
     sim: dict = {}
     if margin_pair:
         dd = max(6, int(round(D)))
-        mk = _circle_mask(dd, 0.42)
+        mk = _circle_mask(dd, face_inner)
         small = {a: cv2.resize(icons[a], (dd, dd), interpolation=cv2.INTER_AREA) for a in ags}
         for ii in range(len(ags)):
             for jj in range(ii + 1, len(ags)):
@@ -507,13 +564,16 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
         ok_rows = []
         for i, f in enumerate(cands):
             x, y = f["px"]
-            if f["color"] != "yellow" and _filled_ratio(img, x, y, f["color"], D) >= 0.5:
+            fstd = _face_std(img, x, y, D)
+            fr = _filled_ratio(img, x, y, f["color"], D) if f["color"] != "yellow" else 0.0
+            is_filled = fr >= 0.5 and (filled_max_std is None or fr >= 0.80 or fstd < filled_max_std)
+            if is_filled:
                 if filled_rescue_ok(i, f):
                     ok_rows.append(i)
                     rescued[i] = "filled"
                 else:
                     reasons[i] = "filled"
-            elif _face_std(img, x, y, D) < min_face_std:
+            elif fstd < min_face_std:
                 reasons[i] = "flat"
             else:
                 ok_rows.append(i)
@@ -641,22 +701,34 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
     # 灰色帯（低スコア救済）に枠を奪われないよう、face_search を先に走らせる
     if face_search:
         d = max(6, int(round(D)))
-        fmask = _circle_mask(d, 0.42)
+        fmask = _circle_mask(d, face_inner)
         mr = (cv2.resize(mask.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST)
               if mask is not None and mask.shape[:2] == img.shape[:2] else None)
-        resp_of: dict = {}            # エージェントごとに 1 回だけ（両チームに同じエージェントがいるとき使い回す）
+        resp_of: dict = {}
 
-        def face_resp(a):
-            if a not in resp_of:
-                tpl = cv2.resize(icons[a], (d, d), interpolation=cv2.INTER_AREA)
-                r = cv2.matchTemplate(img, tpl, cv2.TM_CCOEFF_NORMED, mask=fmask)
-                r = np.nan_to_num(r, nan=-1.0, posinf=-1.0, neginf=-1.0)
+        def face_resp(a, color):
+            key = (a, color if tpl_bg_color and color in ("warm", "cool") else "neutral")
+            if key not in resp_of:
+                tb, tg = get_tpl(a, color)
+                if face_gray_weight < 1.0:
+                    tpl_d = cv2.resize(tb, (d, d), interpolation=cv2.INTER_AREA)
+                    r_bgr = cv2.matchTemplate(img, tpl_d, cv2.TM_CCOEFF_NORMED, mask=fmask)
+                    r_bgr = np.nan_to_num(r_bgr, nan=-1.0, posinf=-1.0, neginf=-1.0)
+                else:
+                    r_bgr = None
+                if face_gray_weight > 0.0:
+                    tpl_g = cv2.resize(tg, (d, d), interpolation=cv2.INTER_AREA)
+                    rg = cv2.matchTemplate(img_gray, tpl_g, cv2.TM_CCOEFF_NORMED, mask=fmask)
+                    rg = np.nan_to_num(rg, nan=-1.0, posinf=-1.0, neginf=-1.0)
+                    r = rg if r_bgr is None else (1.0 - face_gray_weight) * r_bgr + face_gray_weight * rg
+                else:
+                    r = r_bgr
                 if mr is not None:
                     half = d // 2
                     sub = mr[half:half + r.shape[0], half:half + r.shape[1]]
                     r = np.where(sub > 0, r, -1.0) if sub.shape == r.shape else None
-                resp_of[a] = r
-            return resp_of[a]
+                resp_of[key] = r
+            return resp_of[key]
 
         for t, a in slots:
             if (t, a) in kept or used[t] >= caps[t]:
@@ -664,7 +736,7 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
             color = team_color.get(t)
             if color not in FACE_RING:
                 continue
-            resp = face_resp(a)
+            resp = face_resp(a, color)
             if resp is None:
                 continue
             _, mv, _, (bx, by) = cv2.minMaxLoc(resp)
@@ -672,7 +744,9 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
                 continue
             cx, cy = bx + d // 2, by + d // 2
             px = (cx, cy)
-            point = _face_score(img, px, icons[a], D, inner=face_inner)
+            tb, tg = get_tpl(a, color)
+            point = _face_score(img, px, tb, D, inner=face_inner, gray_weight=face_gray_weight,
+                                img_gray=img_gray, tpl_gray=tg)
             if _face_std(img, cx, cy, D) < gray_face_std:
                 continue
             if _ring_frac(img, cx, cy, D, FACE_RING[color]) < 0.15:
@@ -680,7 +754,9 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
             if any(math.hypot(e["x"] * W - cx, e["y"] * H - cy) < 0.6 * D for e in out):
                 continue
             others = [a2 for a2 in dict.fromkeys(teams.get(t) or []) if a2 in icons and a2 != a]
-            sec = max((_face_score(img, px, icons[a2], D, inner=face_inner) for a2 in others), default=-1.0)
+            sec = max((_face_score(img, px, *get_tpl(a2, color)[:1], D, inner=face_inner,
+                                   gray_weight=face_gray_weight, img_gray=img_gray,
+                                   tpl_gray=get_tpl(a2, color)[1]) for a2 in others), default=-1.0)
             mg = point - sec if others else 1.0
             min_mg = margin + 0.02
             req_pt = max(thr, (thr + 0.06) - 0.35 * (mg - min_mg))

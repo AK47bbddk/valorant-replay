@@ -1157,7 +1157,8 @@ def _agent_match_params(cfg: dict) -> dict:
     keys = ("thr", "margin", "crowded_margin", "min_face_std",
             "filled_rescue", "tpl_fill_min", "margin_exclusive", "margin_pair",
             "gray_floor", "gray_margin", "gray_face_std", "gray_ring", "face_inner",
-            "bg_mode", "cand_nms", "cand_per_color", "face_search", "cap_over", "gray_crowded")
+            "bg_mode", "cand_nms", "cand_per_color", "face_search", "cap_over", "gray_crowded",
+            "face_gray_weight", "tpl_bg_color", "tpl_blur", "filled_max_std", "agent_norm")
     return {k: am[k] for k in keys if k in am}
 
 

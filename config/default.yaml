@@ -120,6 +120,11 @@ tactics:
     gray_ring: 0.28
     gray_crowded: true       # 灰色帯を重なり（crowded）の候補にも使う
     face_inner: 0.42
+    face_gray_weight: 0.0
+    tpl_bg_color: false
+    tpl_blur: 0.0
+    filled_max_std: 22.0
+    agent_norm: true
     bg_mode: subtract        # subtract | flag
     cand_nms: 0.8
     cand_per_color: 16
