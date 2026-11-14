@@ -78,7 +78,8 @@ Notion に次の 2 つのデータソースがすでにある。新しい DB は
    - `rounds` にはプレイブック用に `t_drop`（開始）・`plant_t`（設置）・`plant_site`・`yt_url`・`eco1/eco2`・`reason_main/reason_json`（勝因）・`timeline_json`（節目ごとの配置）・`kill_sources_json` を持つ（既存 DB には列を後から足す）。
    - Drive（/content/drive）上では WAL を使わず通常のジャーナルにする。
    - `backfill` は VLR の結果一覧を日付でさかのぼり、試合ページからマップ・ラウンド・選手・VOD 秒を入れる。Tier1 以外は既定で除外。
-   - `batch` は DB の `meta`（必要なら `failed`）を拾って通常の動画解析を回し、DB に反映する。`--shard 1/4`・`--limit`・`--force`・`--no-retry`。
+   - `batch` は DB の `meta`（必要なら `failed`）を拾って通常の動画解析を回し、DB に反映する。`--shard 1/4`・`--limit`・`--force`・`--no-retry`・`--ids-file`（この試合 ID だけ。空のファイルなら何もしない）・`--dry-run`（対象を並べるだけ。試合ページ・動画・DB に触らない）。
+   - `tools/tier1.py`：2026 VCT Tier 1（`/vct-2026` の Champions・Masters・4 地域の Kickoff・Stage 1・Stage 2。Qualifier・Threshold・Ascension・Challengers・GC は除く）の全試合を大会ページから並べ（`list`）、解析済み（warehouse の done・report.json の video_ok・data/by_map）と照合して CSV/JSON に出す。`seed` で残りを DB に `meta` で登録し大会ごとの ID ファイルを作り、`run` で大会の順に `batch --ids-file` を回して進捗を JSONL に残す。一覧の時刻は閲覧者の地域の時間帯（日本からなら JST。`--display-tz`）。
 2. **ミニマップの位置合わせ（`vreplay/minimap.py`）**：放送のミニマップは切り抜き位置・倍率・向きが放送ごとに違う（Champions 2026 は 90 度回して表示）。
    - まず**地形**で合わせる：背景（中央値）の明るい床を 2 値化し、コールアウトが床の上に乗り、床全体に広がる相似変換を探す。
      サイトの黄みがかった四角が見つかればサイトのコールアウトをその近くへ。床から離れた点は捨てる。暖色＝チーム1 はスポーンの近さで多数決。

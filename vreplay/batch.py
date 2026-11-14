@@ -43,7 +43,7 @@ def _shard_ok(match_id: str, order: int, shard: str | None) -> bool:
 
 def _rows(conn, start: str | None, end: str | None, retry_failed: bool,
           shard: str | None, limit: int | None, force: bool = False, redo_before: str | None = None,
-          maps: list[str] | None = None):
+          maps: list[str] | None = None, match_ids: list[str] | None = None):
     statuses = _status_sql(retry_failed, force or bool(redo_before))
     sql = ("SELECT mp.match_id, mp.map_order, mp.map_name, mp.vod_id, mp.vod_t, "
            "       m.url, m.dt_jst, m.team1, m.team2, m.event, m.stage "
@@ -63,6 +63,9 @@ def _rows(conn, start: str | None, end: str | None, retry_failed: bool,
     if maps:
         sql += "AND lower(mp.map_name) IN (" + ",".join("?" * len(maps)) + ") "
         args += [x.lower() for x in maps]
+    if match_ids:
+        sql += "AND mp.match_id IN (" + ",".join("?" * len(match_ids)) + ") "
+        args += [str(x) for x in match_ids]
     sql += "ORDER BY m.dt_jst, mp.match_id, mp.map_order"
     out = []
     for r in conn.execute(sql, args):
@@ -76,19 +79,34 @@ def _rows(conn, start: str | None, end: str | None, retry_failed: bool,
 def run(cfg: dict, start: str | None = None, end: str | None = None, limit: int | None = None,
         retry_failed: bool = True, shard: str | None = None, force: bool = False,
         out_root: Path | None = None, log=print, redo_before: str | None = None,
-        maps: list[str] | None = None, notify_enabled: bool = True) -> dict:
+        maps: list[str] | None = None, notify_enabled: bool = True,
+        match_ids: list[str] | None = None, dry_run: bool = False) -> dict:
     perf.start()
     t0 = time.time()
     conn = db.open_warehouse(cfg)
-    rows = _rows(conn, start, end, retry_failed, shard, limit, force, redo_before, maps)
+    rows = _rows(conn, start, end, retry_failed, shard, limit, force, redo_before, maps, match_ids)
+    if match_ids is not None and not match_ids:
+        rows = []                   # --ids-file が空なら何もしない（全件を回さない）
     if not rows:
-        log("処理待ちのマップがありません。先に `vreplay backfill` を実行してください。")
+        log("処理待ちのマップがありません。先に `vreplay backfill`（--ids-file のときは `python tools/tier1.py seed`）"
+            "を実行してください。")
         perf.stop()
         st = db.stats(conn)
         st["batch"] = {"total": 0, "done": 0, "failed": 0, "skipped": 0,
                        "seconds": time.time() - t0}
         return st
     log(f"動画解析の対象: {len(rows)} マップ（DB {db.warehouse_path(cfg)}）")
+    if dry_run:
+        # --dry-run：対象を並べるだけ。試合ページも動画も読まず、DB も書かない
+        for r in rows:
+            log(f"  [dry-run] {(r['dt_jst'] or '')[:10]} {r['team1']} vs {r['team2']} "
+                f"[{r['event']}] {r['map_order']}. {r['map_name']} vod={r['vod_id']}@{r['vod_t']}")
+        perf.stop()
+        st = db.stats(conn)
+        st["batch"] = {"total": len(rows), "done": 0, "failed": 0, "skipped": 0,
+                       "seconds": time.time() - t0, "dry_run": True}
+        log(f"batch 完了（dry-run）: 対象 {len(rows)} マップ・{len({r['match_id'] for r in rows})} 試合")
+        return st
 
     by_match: dict[str, list] = {}
     for r in rows:

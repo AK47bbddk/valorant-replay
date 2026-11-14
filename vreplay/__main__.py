@@ -35,6 +35,17 @@ def parse_day(s: str) -> date:
     raise SystemExit(f"日付の形が読めません：{s}（例 2026-09-24）")
 
 
+def _read_ids(path: str | None) -> list[str] | None:
+    """--ids-file：1 行 1 試合 ID（# 以降は無視）。ファイルが無ければ止める。"""
+    if not path:
+        return None
+    p = Path(path)
+    if not p.exists():
+        raise SystemExit(f"--ids-file が見つかりません：{path}")
+    return [x.split("#")[0].strip() for x in p.read_text(encoding="utf-8").splitlines()
+            if x.split("#")[0].strip()]
+
+
 def _done_body(cmd: str, seconds: float, result) -> str:
     from .perf import fmt_seconds
     took = fmt_seconds(seconds)
@@ -113,6 +124,8 @@ def main():
     bt.add_argument("--redo-before", help="この時刻（例 2026-11-06T02:00）より前に解析したマップだけ作り直す。止まっても同じ値で再開できる")
     bt.add_argument("--out", help="出力ルート（既定 output.dir）")
     bt.add_argument("--map", nargs="*", dest="maps", help="このマップだけ（例 --map Sunset）")
+    bt.add_argument("--ids-file", help="この試合 ID だけ（1 行 1 ID のテキスト。tools/tier1.py seed が作る）")
+    bt.add_argument("--dry-run", action="store_true", help="対象のマップを並べるだけ（試合ページ・動画は読まない）")
     bt.add_argument("--no-notify", action="store_true", help="終わったとき・失敗したときに通知しない")
     bt.add_argument("--config")
 
@@ -238,7 +251,8 @@ def main():
                                     retry_failed=not a.no_retry, shard=a.shard, force=a.force,
                                     out_root=Path(a.out) if a.out else None,
                                     redo_before=a.redo_before, maps=a.maps,
-                                    notify_enabled=not a.no_notify))
+                                    notify_enabled=not a.no_notify,
+                                    match_ids=_read_ids(a.ids_file), dry_run=a.dry_run))
     elif a.cmd == "playbook":
         def _playbook():
             from . import db, deck
