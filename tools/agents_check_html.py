@@ -940,7 +940,7 @@ function exportData(){
 }
 // ダウンロードがアプリの表示枠で止められる場合に備え、コピーと表示も用意する（v3fix と同じ対策）
 function expMsg(s, err){ const e = document.getElementById("expMsg"); e.textContent = s; e.style.color = err ? "#f66" : "#6f6"; }
-function showExpText(){ try { const t = document.getElementById("expText"); t.value = JSON.stringify(exportData(), null, 1); t.style.display = "block"; t.select(); expMsg("JSON を表示しました。全選択済みなので、そのままコピーして送ってください"); } catch(e){ expMsg("表示に失敗: " + e.message, true); } }
+function showExpText(){ try { const t = document.getElementById("expText"); t.value = JSON.stringify(lightExport()); t.style.display = "block"; t.select(); expMsg("配置だけの軽い JSON を表示しました。全選択済みなので、そのままコピーして送ってください"); } catch(e){ expMsg("表示に失敗: " + e.message, true); } }
 async function saveText(name, text){
   const blob = new Blob([text], {type: "application/json"});
   if (window.showSaveFilePicker) {
@@ -971,8 +971,12 @@ function lightExport(){
       placed: places(fr).map(p => [p.team, p.agent, r4(p.x), r4(p.y)])}))};
 }
 opt("expLiteCopy").onclick = async () => {
-  try { await navigator.clipboard.writeText(JSON.stringify(lightExport())); expMsg("配置だけの軽い JSON をコピーしました。そのままチャットに貼れます"); }
-  catch(e){ expMsg("コピーに失敗: " + e.message, true); }
+  const text = JSON.stringify(lightExport());
+  try { await navigator.clipboard.writeText(text); expMsg("配置だけの軽い JSON をコピーしました。そのままチャットに貼れます"); return; }
+  catch(e){ /* Clipboard API がポリシーで止められている場合は、表示＋選択して手コピーに切り替える */ }
+  const t = document.getElementById("expText"); t.value = text; t.style.display = "block"; t.focus(); t.select();
+  let ok = false; try { ok = document.execCommand("copy"); } catch(e){}
+  expMsg(ok ? "コピーしました。そのままチャットに貼れます" : "表示しました。選択済みなので Ctrl+C でコピーして送ってください", !ok);
 };
 opt("expLiteDl").onclick = async () => {
   try { expMsg(await saveText("agents_blind_place.json", JSON.stringify(lightExport()))); }
