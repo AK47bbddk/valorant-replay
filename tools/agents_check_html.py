@@ -236,9 +236,13 @@ kbd{background:#444;border-radius:3px;padding:0 3px;font-size:11px}
  <label>棄却の確信度 ≥ <select id="rejMin"><option value="0" selected>0（全部）</option><option>0.3</option><option>0.4</option><option>0.5</option></select></label>
  <label>倍率 <select id="zoom"><option>1.5</option><option selected>2</option><option>2.5</option><option>3</option></select></label>
  <button id="exp">チェック結果を JSON で保存</button>
+ <button id="expCopy">JSON をコピー</button>
+ <button id="expShow">JSON を表示</button>
+ <span id="expMsg"></span>
  <button id="imp">JSON を読み込む</button><input type="file" id="impFile" accept=".json,application/json" style="display:none">
  <div class="legend" id="legend"></div>
 </div>
+<textarea id="expText" style="display:none;width:96%;height:180px"></textarea>
 <div id="frames"></div>
 <script>
 const D = __DATA__;
@@ -526,16 +530,29 @@ function render(){
   progress();
 }
 // 書き出し（v1/v2 と同じ形。points に v3 の点メモ memo を足しただけ）
-document.getElementById("exp").onclick = () => {
-  const out = D.frames.map(fr => ({file: fr.file, memo: marks[fr.file+"#memo"]||"",
+// ダウンロードがアプリの表示枠で止められる場合に備え、コピーと表示も用意する（v3fix）
+function buildExport(){
+  return D.frames.map(fr => ({file: fr.file, memo: marks[fr.file+"#memo"]||"",
     points: fr.pts.map(p => ({n: p.n, kept: p.kept, agent: p.agent, team: p.team, reason: p.reason||null,
       x: +p.x.toFixed(4), y: +p.y.toFixed(4), check: marks[fr.file+"#"+p.n]||"", memo: marks[pmk(fr, p)]||""})),
     missing: (missing[fr.file] || []).map(m => ({frame: fr.file, round: fr.round, t: fr.t, team: m.team,
       team_name: tn(m.team), agent: m.agent, x: m.x, y: m.y}))}));
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([JSON.stringify(out, null, 1)], {type: "application/json"}));
-  a.download = "agents_check_result.json"; a.click();
+}
+function expMsg(s, err){ const e = document.getElementById("expMsg"); e.textContent = s; e.style.color = err ? "#f66" : "#6f6"; }
+function showExpText(){ try { const t = document.getElementById("expText"); t.value = JSON.stringify(buildExport(), null, 1); t.style.display = "block"; t.select(); expMsg("JSON を表示しました。全選択済みなので、そのままコピーして送ってください"); } catch(e){ expMsg("表示に失敗: " + e.message, true); } }
+document.getElementById("exp").onclick = () => {
+  try {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(buildExport(), null, 1)], {type: "application/json"}));
+    a.download = "agents_check_result.json"; a.click();
+    expMsg("保存しました（ダウンロードが始まらない場合は「JSON をコピー」か「JSON を表示」を使ってください）");
+  } catch(e){ expMsg("保存に失敗: " + e.message + " 。「JSON を表示」からコピーしてください", true); showExpText(); }
 };
+document.getElementById("expCopy").onclick = async () => {
+  try { await navigator.clipboard.writeText(JSON.stringify(buildExport(), null, 1)); expMsg("JSON をクリップボードにコピーしました。そのままチャットに貼れます"); }
+  catch(e){ expMsg("コピーに失敗: " + e.message + " 。「JSON を表示」から手でコピーしてください", true); showExpText(); }
+};
+document.getElementById("expShow").onclick = showExpText;
 // 書き出した JSON（v1 / v2 / v3）を読み込んで判定を戻す。点は座標（4 桁）で突き合わせ、合わなければ番号で。
 function importResult(arr){
   if (!Array.isArray(arr)) throw new Error("フレームの配列ではありません");
@@ -636,8 +653,12 @@ kbd{background:#444;border-radius:3px;padding:0 3px;font-size:11px}
  <label><input type="checkbox" id="doneOnly"> 集計は「完了」にしたフレームだけ</label>
  <label>倍率 <select id="zoom"><option>1.5</option><option selected>2</option><option>2.5</option><option>3</option></select></label>
  <button id="exp">配置と照合結果を JSON で保存</button>
+ <button id="expCopy">JSON をコピー</button>
+ <button id="expShow">JSON を表示</button>
+ <span id="expMsg"></span>
  <button id="imp">JSON を読み込む</button><input type="file" id="impFile" accept=".json,application/json" style="display:none">
 </div>
+<textarea id="expText" style="display:none;width:96%;height:180px"></textarea>
 <div id="total"></div>
 <div id="frames"></div>
 <script>
@@ -898,11 +919,22 @@ function exportData(){
     summary: {all: agg(D.frames), by_group: D.groups.map((g, gi) => ({label: g.label, ...agg(D.frames.filter(f => f.g === gi))}))},
     frames};
 }
+// ダウンロードがアプリの表示枠で止められる場合に備え、コピーと表示も用意する（v3fix と同じ対策）
+function expMsg(s, err){ const e = document.getElementById("expMsg"); e.textContent = s; e.style.color = err ? "#f66" : "#6f6"; }
+function showExpText(){ try { const t = document.getElementById("expText"); t.value = JSON.stringify(exportData(), null, 1); t.style.display = "block"; t.select(); expMsg("JSON を表示しました。全選択済みなので、そのままコピーして送ってください"); } catch(e){ expMsg("表示に失敗: " + e.message, true); } }
 opt("exp").onclick = () => {
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([JSON.stringify(exportData(), null, 1)], {type: "application/json"}));
-  a.download = "agents_blind_result.json"; a.click();
+  try {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(exportData(), null, 1)], {type: "application/json"}));
+    a.download = "agents_blind_result.json"; a.click();
+    expMsg("保存しました（ダウンロードが始まらない場合は「JSON をコピー」か「JSON を表示」を使ってください）");
+  } catch(e){ expMsg("保存に失敗: " + e.message + " 。「JSON を表示」からコピーしてください", true); showExpText(); }
 };
+opt("expCopy").onclick = async () => {
+  try { await navigator.clipboard.writeText(JSON.stringify(exportData(), null, 1)); expMsg("JSON をクリップボードにコピーしました。そのままチャットに貼れます"); }
+  catch(e){ expMsg("コピーに失敗: " + e.message + " 。「JSON を表示」から手でコピーしてください", true); showExpText(); }
+};
+opt("expShow").onclick = showExpText;
 // 書き出した JSON を読み込んで配置・完了を戻す（JSON に入っているフレームは置き換え）
 function importResult(o){
   if (!o || !Array.isArray(o.frames)) throw new Error("agents_blind の書き出しではありません");
