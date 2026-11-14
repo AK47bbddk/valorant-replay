@@ -157,11 +157,15 @@ def _ro_copy(path: Path) -> Path:
 
 def analyzed_from_warehouse(path: Path) -> tuple[set, set]:
     """(解析済みの (試合ID, マップ順), 失敗の (試合ID, マップ順))。"""
-    c = sqlite3.connect(f"file:{_ro_copy(path).as_posix()}?mode=ro", uri=True)
-    done = {(str(a), int(b)) for a, b in c.execute(
-        "SELECT match_id, map_order FROM maps WHERE status='done' AND video_ok=1")}
-    failed = {(str(a), int(b)) for a, b in c.execute("SELECT match_id, map_order FROM maps WHERE status='failed'")}
-    c.close()
+    tmp = _ro_copy(path)
+    try:
+        c = sqlite3.connect(f"file:{tmp.as_posix()}?mode=ro", uri=True)
+        done = {(str(a), int(b)) for a, b in c.execute(
+            "SELECT match_id, map_order FROM maps WHERE status='done' AND video_ok=1")}
+        failed = {(str(a), int(b)) for a, b in c.execute("SELECT match_id, map_order FROM maps WHERE status='failed'")}
+        c.close()
+    finally:
+        shutil.rmtree(tmp.parent, ignore_errors=True)
     return done, failed
 
 
