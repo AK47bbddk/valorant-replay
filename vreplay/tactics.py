@@ -667,7 +667,8 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
             _agent_tracks(cfg, keep_trk, keep, agent_teams, ct, mask, reg, placed, aspect, background,
                           round_tac, log, icons=icons, icon_frac=icon_frac, alive_fn=alive_fn,
                           every=track_every or 5.0, cache=mcache, threads=int(tcfg.get("track_threads") or 4),
-                          out_dir=out_dir, deaths_by_n={int(r["n"]): _round_deaths(r) for r in rlist})
+                          out_dir=out_dir, deaths_by_n={int(r["n"]): _round_deaths(r) for r in rlist},
+                          ults_by_n={int(r["n"]): _round_ults(r) for r in rlist})
         except Exception as e:                       # 追跡に失敗しても、ほかの結果は出す
             if log:
                 log(f"    エージェントの追跡はスキップしました（{e}）")
@@ -1405,12 +1406,27 @@ def _round_deaths(r: dict) -> dict | None:
     return out or None
 
 
+def _round_ults(r: dict) -> dict | None:
+    """ラウンドの入力の "ults"（[{"team": 1|2, "agent", "t"（ラウンド内の秒）}]）を {(team, agent): [時刻]} に。"""
+    out: dict = {}
+    for e in r.get("ults") or []:
+        try:
+            key, t = (int(e["team"]), str(e["agent"])), float(e["t"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if key[0] in (1, 2) and key[1]:
+            out.setdefault(key, []).append(t)
+    return out or None
+
+
 def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, placed, aspect, background,
                   round_tac, log, icons=None, icon_frac=None, alive_fn=None, every: float = 5.0,
-                  cache: dict | None = None, threads: int = 4, out_dir=None, deaths_by_n: dict | None = None):
+                  cache: dict | None = None, threads: int = 4, out_dir=None, deaths_by_n: dict | None = None,
+                  ults_by_n: dict | None = None):
     """track_every 秒ごと（＋節目の前後）のミニマップでアイコンを照合し、走れる速さの制約で
     エージェントごとの軌跡にする（vreplay.track）。rt["tracks"] = {"1": {"Jett": [[e, x, y, conf, src, zone, callout]]}}
-    deaths_by_n: {ラウンド: {(team, agent): 死んだ時刻}}。あればその時刻で軌跡を切る（死んだ後の検出は使わない）。"""
+    deaths_by_n: {ラウンド: {(team, agent): 死んだ時刻}}。あればその時刻で軌跡を切る（死んだ後の検出は使わない）。
+    ults_by_n: {ラウンド: {(team, agent): [ウルトの使用時刻（ラウンド内の秒）]}}。Omen のウルトの窓に使う。"""
     from . import agents as AG
     from . import minimap as MM
     from . import track as TR
@@ -1479,9 +1495,14 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
         if rt is None:
             continue
         n_det += sum(len(f_) for _, f_ in found)
+        start = float(rt["start"])
+        ults_r = {k: [start + x for x in xs] for k, xs in ((ults_by_n or {}).get(n) or {}).items()} or None
+        rules = TR.jump_rules((cfg.get("tactics") or {}).get("jump"))
         fixed: dict = {}
-        trk = TR.build(found, float(rt["start"]), float(rt["end"]), scale, every=every, aspect=aspect,
-                       deaths=(deaths_by_n or {}).get(n), fixed=fixed)
+        jumps: dict = {}
+        trk = TR.build(found, start, float(rt["end"]), scale, every=every, aspect=aspect,
+                       deaths=(deaths_by_n or {}).get(n), fixed=fixed, ults=ults_r, jumps=jumps,
+                       icon_frac=icon_frac, rules=rules)
         out: dict = {}
         for (team, agent), pts in trk.items():
             lst = []
@@ -1499,6 +1520,8 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
         rt["tracks"] = out
         if fixed:                                   # 孤立した外れ値として前後の中点に置き換えた点（開始からの秒）
             rt["tracks_fixed"] = {f"{tm}:{ag}": es for (tm, ag), es in sorted(fixed.items())}
+        if jumps:                                   # 採用した跳躍（開始からの秒）
+            rt["tracks_jumps"] = {f"{tm}:{ag}": js for (tm, ag), js in sorted(jumps.items())}
     if out_dir and int((cfg.get("tactics") or {}).get("match_dump") or 0) >= 1:
         _match_dump(out_dir, res, {n: float(rt["start"]) for n, rt in round_tac.items()}, log)
     if log:

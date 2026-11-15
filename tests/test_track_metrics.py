@@ -51,9 +51,18 @@ def test_start_side_cross_and_coverage_with_tactics_form():
     # team 2 が攻撃。team 1（守備）の点が開始 5 秒以内に攻撃側の陣地にいる
     tracks = {"1": {"Sova": [[0.0, 0.55, 0.85, 0.8, "det", "z", "c"], [3.0, 0.50, 0.15, 0.8, "det", "z", "c"]]},
               "2": {"Jett": [[0.0, 0.55, 0.87, 0.8, "det", "z", "c"], [10.0, 0.49, 0.14, 0.8, "det", "z", "c"]]}}
-    assert TM.start_violations(TM.normalize(tracks), 2, SPAWNS) == 1
+    # 陣地はエリア名と area_ranks（attacker_half の基準）で決める。y で 3 つのエリアに分ける合成の地図
+    ranks = {"Atk Lobby": (0.2, 0.8), "Site": (0.5, 0.5), "Def Link": (0.8, 0.2)}
+
+    def area_of(x, y):
+        return "攻撃側 Spawn" if y > 0.86 else "Atk Lobby" if y > 0.6 else "Site" if y > 0.3 else "Def Link"
+    assert TM.start_violations(TM.normalize(tracks), 2, area_of, ranks) == 1
+    # 中間のエリア（サイト）にいる守備は違反にしない（スポーンの近い方で分けていた頃の誤検知）
+    site = {"1": {"Sage": [[0.0, 0.2, 0.55, 0.8, "det", "B", "B Site"]]}}
+    assert TM.start_violations(TM.normalize(site), 2, area_of, ranks) == 0
+    assert TM.start_violations(TM.normalize(tracks), 2, None, ranks) is None
     assert TM.cross_before_contact(TM.normalize(tracks), 2, SPAWNS, first_kill=20.0, scale=SCALE) == 2
-    m = TM.round_metrics(tracks, SCALE, attack_team=2, spawns=SPAWNS, first_kill=20.0)
+    m = TM.round_metrics(tracks, SCALE, attack_team=2, spawns=SPAWNS, first_kill=20.0, area_of=area_of, ranks=ranks)
     assert m["start_violations"] == 1 and m["cross_before_contact"] == 2
     cov = TM.coverage({(1, "Jett"): _walk(0, 9, 0.2, 0.5)}, {(1, "Jett"): (0.0, 19.0)})
     assert cov == 0.5

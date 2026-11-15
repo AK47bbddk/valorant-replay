@@ -3,7 +3,7 @@
 入力の軌跡は track.build の返り値 {(team, agent): [(e, x, y, conf, src)]}（e は開始からの秒）か、
 tactics の rt["tracks"]＝{"1": {"Jett": [[e, x, y, conf, src, zone, callout]]}} のどちらでもよい。
 距離はミニマップの正規化座標（横は aspect 倍）、速さは track.run_reach（テレポートの倍率なしの走る速さ）。
-文脈（死亡時刻・最初のキル・攻撃側・スポーン・アイコンの大きさ）が無い項目は None を返す（推測で埋めない）。
+文脈（死亡時刻・最初のキル・攻撃側・スポーン・エリア名と陣地・アイコンの大きさ）が無い項目は None を返す（推測で埋めない）。
 """
 from __future__ import annotations
 
@@ -121,22 +121,37 @@ def mirror_jumps(trs: dict, scale: float, aspect: float = 1.0, lookback: float =
     return n
 
 
-def _half(x: float, y: float, spawns: dict, aspect: float) -> str:
-    """攻撃側（"attack"）と守備側（"defense"）のスポーンの近い方。"""
-    da = TR._dist((x, y), spawns["attack"], aspect)
-    dd = TR._dist((x, y), spawns["defense"], aspect)
-    return "attack" if da <= dd else "defense"
+def _side_of(area: str | None, ranks: dict) -> str | None:
+    """エリアがどちらの陣地か（tactics.attacker_half の基準）："attack"・"defense"・どちらでもない中間なら None。
+    スポーンは area_ranks に入らないので、「攻撃側 Spawn」「防衛側 Spawn」（ゾーン＋名前）の形で受ける。"""
+    from .tactics import SPAWN_ZONES, attacker_half
+    low = str(area or "")
+    if "spawn" in low.lower():
+        return "attack" if low.startswith(SPAWN_ZONES[0]) else "defense" if low.startswith(SPAWN_ZONES[1]) else None
+    if attacker_half(area, ranks):
+        return "attack"
+    da, dd = (ranks or {}).get(area or "", (None, None))
+    if da is not None and dd is not None and attacker_half(area, {area: (dd, da)}):
+        return "defense"
+    return None
 
 
-def start_violations(trs: dict, attack_team: int | None, spawns: dict | None, aspect: float = 1.0,
+def start_violations(trs: dict, attack_team: int | None, area_of, ranks: dict | None, aspect: float = 1.0,
                      window: float = START_WINDOW) -> int | None:
-    """7. 開始 window 秒以内に、自分の陣地でない側（スポーンの近い方で判定）にいる点の数。"""
-    if attack_team not in (1, 2) or not spawns:
+    """7. 開始 window 秒以内に、相手の陣地にいる点の数。陣地はエリア名（area_of(x, y) → 名前）と
+    tactics.area_ranks の両スポーンからの距離で決める（tactics.attacker_half の基準。中間のエリアは数えない）。
+    守備は開始時点でサイト付近にいるので、「近い方のスポーン」で分けると誤検知になるため。"""
+    if attack_team not in (1, 2) or area_of is None or not ranks:
         return None
     n = 0
     for (team, _a), pts in trs.items():
         mine = "attack" if team == attack_team else "defense"
-        n += sum(1 for p in pts if p[0] <= window and _half(p[1], p[2], spawns, aspect) != mine)
+        for p in pts:
+            if p[0] > window:
+                continue
+            side = _side_of(area_of(p[1], p[2]), ranks)
+            if side is not None and side != mine:
+                n += 1
     return n
 
 
@@ -188,8 +203,9 @@ def coverage(tracks: dict, alive: dict, step: float = 1.0) -> float | None:
 
 def round_metrics(tracks: dict, scale: float, aspect: float = 1.0, *, deaths: dict | None = None,
                   first_kill: float | None = None, attack_team: int | None = None, spawns: dict | None = None,
-                  icon_frac: float | None = None) -> dict:
-    """1 ラウンドぶんの層 A の指標 1〜10。deaths・first_kill は開始からの秒、spawns: {"attack": (x, y), "defense": (x, y)}。"""
+                  icon_frac: float | None = None, area_of=None, ranks: dict | None = None) -> dict:
+    """1 ラウンドぶんの層 A の指標 1〜10。deaths・first_kill は開始からの秒、spawns: {"attack": (x, y), "defense": (x, y)}
+    （接敵前の越境に使う）。area_of(x, y) → エリア名・ranks（tactics.area_ranks）は開始時の陣地違反に使う。"""
     trs = normalize(tracks)
     secs = sum(p[-1][0] - p[0][0] for p in trs.values() if len(p) > 1)
     imp = sum(impossible_moves(p, scale, k[1], aspect) for k, p in trs.items())
@@ -204,7 +220,7 @@ def round_metrics(tracks: dict, scale: float, aspect: float = 1.0, *, deaths: di
         "path_ratio_max": max(ratios, default=None),
         "overlap": overlaps(trs, icon_frac, aspect),
         "mirror_jumps": mirror_jumps(trs, scale, aspect),
-        "start_violations": start_violations(trs, attack_team, spawns, aspect),
+        "start_violations": start_violations(trs, attack_team, area_of, ranks, aspect),
         "cross_before_contact": cross_before_contact(trs, attack_team, spawns, first_kill, scale, aspect),
         "after_death": after_death(trs, deaths),
         "mass_jump_frames": mass_jump_frames(trs, scale, aspect),

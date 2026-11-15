@@ -41,16 +41,22 @@ def _omen_frames(start=100.0):
 
 
 def test_isolated_far_point_is_replaced_by_midpoint():
+    # track-jump-split から：t=21 の遠い点は「走る」で届かず、跳躍の規則（射程外・ウルトの窓なし・1 フレーム）も
+    # 満たさないので、鎖にそもそも入らない。格子の t=21 は隣の検出（t=20 か 22）の位置になり、外れ値の置き換えは起きない
     fixed = {}
     out = TR.build(_omen_frames(), 100.0, 140.0, SCALE, every=1.0, aspect=ASPECT, fixed=fixed)
     trk = out[(2, "Omen")]
     p = TR.at(trk, 21.0)
-    assert p[4] == "interp"
-    assert abs(p[1] - 0.62) < 1e-3 and abs(p[2] - 0.48) < 2e-3          # 前後（t=20・22）の中点
-    assert fixed == {(2, "Omen"): [21.0]}
+    assert abs(p[1] - 0.62) < 1e-3 and abs(p[2] - 0.48) < 2e-3
+    assert fixed == {}
     assert all(q[1] < 0.7 for q in trk)
-    # 前後の点はそのまま
     assert TR.at(trk, 20.0)[4] == "det" and TR.at(trk, 22.0)[4] == "det"
+    # 鎖に入ってしまった孤立点（格子に並べた後）は、これまでどおり前後の中点に置き換える
+    reach = lambda dt: TR.run_reach(dt, SCALE, "Omen")                    # noqa: E731
+    pts = [(20.0, 0.62, 0.48, 0.8, "det"), (21.0, 0.925, 0.543, 0.63, "det"), (22.0, 0.62, 0.478, 0.8, "det")]
+    new, fx = TR.drop_outliers(pts, reach, aspect=ASPECT)
+    assert fx == [21.0] and new[1][4] == "interp"
+    assert abs(new[1][1] - 0.62) < 1e-3 and abs(new[1][2] - 0.479) < 1e-3
 
 
 def test_drop_outliers_skip_and_needs_close_neighbors():
