@@ -22,6 +22,15 @@ SLACK = 0.06
 # テレポート・高速移動のあるエージェント（届く距離の倍率）。テレポート先は遠いので、上限なしに近い扱い
 FAST = {"Neon": 1.5, "Jett": 1.4, "Raze": 1.3, "Waylay": 1.4, "Wayley": 1.4, "Yoru": 4.0, "Omen": 4.0,
         "Chamber": 3.0, "Fade": 1.0, "Iso": 1.0, "Clove": 1.0}
+# 走る速さだけの倍率（テレポートを除く）。跳躍区間の判定・孤立した外れ値の除去・あり得なさの指標に使う。
+# best_chain の届く距離（FAST）はまだこちらに変えていない
+RUN = {**FAST, "Yoru": 1.0, "Omen": 1.0, "Chamber": 1.0}
+
+
+def run_reach(dt: float, scale: float, agent: str | None = None, speed: float = SPEED,
+              slack: float = SLACK) -> float:
+    """dt 秒で走って届く距離（テレポートなし）。"""
+    return speed * scale * RUN.get(agent or "", 1.0) * max(0.0, dt) + slack * scale
 
 
 def _dist(a, b, aspect: float = 1.0) -> float:
@@ -71,10 +80,12 @@ def best_chain(dets: list[tuple[float, float, float, float]], scale: float, agen
 
 
 def resample(chain: list[tuple[float, float, float, float]], times: list[float], max_gap: float = 12.0,
-             hold: float = 3.0) -> list[tuple[float, float, float, float, str]]:
+             hold: float = 3.0, reach=None, aspect: float = 1.0) -> list[tuple[float, float, float, float, str]]:
     """鎖を times の時刻に並べ直す。[(t, x, y, conf, "det"|"interp")]。
     鎖の点から 1 秒以内の時刻はその点（det）、点と点のあいだ（max_gap 秒以内）は直線で補間（interp）、
-    最初の点の前・最後の点の後は hold 秒までそのまま。"""
+    最初の点の前・最後の点の後は hold 秒までそのまま。
+    reach（dt → 走って届く距離）を渡すと、隣の 2 点がその dt で走って届かない区間（跳躍）は直線で滑らせず、
+    前の点の位置のまま（interp）にして、次の点の時刻で切り替える。"""
     if not chain:
         return []
     out = []
@@ -88,6 +99,9 @@ def resample(chain: list[tuple[float, float, float, float]], times: list[float],
         if before and after:
             a, b = before[-1], after[0]
             if b[0] - a[0] <= max_gap:
+                if reach is not None and _dist(a[1:3], b[1:3], aspect) > reach(b[0] - a[0]):
+                    out.append((t, a[1], a[2], round(min(a[3], b[3]) * 0.8, 2), "interp"))
+                    continue
                 w = (t - a[0]) / max(1e-6, b[0] - a[0])
                 out.append((t, a[1] + (b[1] - a[1]) * w, a[2] + (b[2] - a[2]) * w,
                             round(min(a[3], b[3]) * 0.8, 2), "interp"))
@@ -101,10 +115,34 @@ def resample(chain: list[tuple[float, float, float, float]], times: list[float],
     return out
 
 
+def drop_outliers(pts: list, reach, aspect: float = 1.0, skip=None) -> tuple[list, list[float]]:
+    """格子に並べた軌跡 [(t, x, y, conf, src)] の、孤立した 1 点の外れ値を前後の中点に置き換える（src は interp）。
+    条件：前後の点（並びの隣）が、走って届く距離（reach(後 − 前)）以内なのに、
+    その点だけが前・後の両方から、走って届く距離の 2 倍以上離れている。
+    skip(t) が真の時刻は対象外（ウルトの時間窓などのため）。返り値 (新しい軌跡, 置き換えた時刻)。"""
+    out = list(pts)
+    fixed: list[float] = []
+    for k in range(1, len(pts) - 1):
+        p0, p, p1 = out[k - 1], pts[k], pts[k + 1]
+        if skip is not None and skip(p[0]):
+            continue
+        if _dist(p0[1:3], p1[1:3], aspect) > reach(p1[0] - p0[0]):
+            continue
+        if (_dist(p[1:3], p0[1:3], aspect) >= 2 * reach(p[0] - p0[0])
+                and _dist(p[1:3], p1[1:3], aspect) >= 2 * reach(p1[0] - p[0])):
+            out[k] = (p[0], (p0[1] + p1[1]) / 2, (p0[2] + p1[2]) / 2, round(min(p0[3], p1[3]) * 0.8, 2), "interp")
+            fixed.append(p[0])
+    return out, fixed
+
+
 def build(frames: list[tuple[float, list[dict]]], start: float, end: float, scale: float, every: float = 5.0,
-          aspect: float = 1.0, deaths: dict | None = None) -> dict:
+          aspect: float = 1.0, deaths: dict | None = None, fixed: dict | None = None, skip=None) -> dict:
     """1 ラウンドぶんの照合結果 [(時刻, agents.match の結果)] から、エージェントごとの軌跡。
-    返り値 {(team, agent): [(開始からの秒, x, y, conf, src)]}。deaths: {(team, agent): 死んだ時刻} があればそこで切る。"""
+    返り値 {(team, agent): [(開始からの秒, x, y, conf, src)]}。
+    deaths: {(team, agent): 死んだ時刻} があれば、その時刻以降の検出は鎖に入れず、格子もそこで切る。
+    鎖を格子に並べるとき、走って届かない区間（跳躍）は直線で補間せず、孤立した外れ値は前後の中点に置き換える
+    （drop_outliers）。fixed に dict を渡すと、置き換えた点を {(team, agent): [開始からの秒]} で足す。
+    skip(team, agent, 時刻) が真の点は外れ値の置き換えの対象外。"""
     by: dict = {}
     for t, found in frames:
         for e in found or []:
@@ -118,12 +156,21 @@ def build(frames: list[tuple[float, list[dict]]], start: float, end: float, scal
         e += every
     out = {}
     for key, dets in by.items():
+        cut = (deaths or {}).get(key)
+        if cut is not None:
+            dets = [d for d in dets if d[0] < cut]
         ch = best_chain(dets, scale, agent=key[1], aspect=aspect)
         if not ch:
             continue
-        cut = (deaths or {}).get(key)
         ts = [t for t in times if cut is None or t <= cut]
-        pts = resample(ch, ts)
+
+        def reach(dt, _a=key[1]):
+            return run_reach(dt, scale, _a)
+        pts = resample(ch, ts, reach=reach, aspect=aspect)
+        sk = (lambda t, _k=key: skip(_k[0], _k[1], t)) if skip is not None else None
+        pts, fx = drop_outliers(pts, reach, aspect=aspect, skip=sk)
+        if fx and fixed is not None:
+            fixed[key] = [round(t - start, 1) for t in fx]
         if pts:
             out[key] = [(round(t - start, 1), round(x, 4), round(y, 4), c, s) for t, x, y, c, s in pts]
     return out

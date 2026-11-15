@@ -382,7 +382,9 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
           crowded_margin）以上強くなければ捨てる（理由 margin。そのチームの照合先が 1 人だけなら飛ばす）
     strict=False なら a〜d を行わない（今までと同じ動き。アイコンの大きさの見積もりで使う）。
     teams: {1: [5 人のエージェント], 2: [...]}、color_team: {"warm": 1 or 2, "cool": ...}、alive: {1: 生存人数, 2: ...}
-    返り値 [{"agent", "team", "x", "y"（正規化）, "score", "ring", "guess", "color", "overlap", "margin"}]。
+    返り値 [{"agent", "team", "x", "y"（正規化）, "score", "ring", "guess", "color", "rim", "overlap", "margin"}]。
+    color はチームの色、rim は候補の元の縁の色（warm / cool / yellow。黄色＝観戦中の選手。face・prior 由来は
+    探したチームの色）。
     debug にリストを渡すと、捨てた候補を {"x", "y", "color", "agent", "score", "second", "second_agent",
     "faces", "ring", "reason"} で足す（faces はその候補を照合してよいエージェント全員の点の dict）。
     2 本目（agents-recall）のスイッチ（既定はすべて切。全部切なら 1 本目と 1 つも変わらない）：
@@ -424,7 +426,7 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
             for f in find_icons(img, icon_frac, mask, per_color=caps[team], thr=0.3, background=background,
                                 colors=(color,)):
                 out.append({"agent": None, "team": team, "x": f["x"], "y": f["y"], "score": 0.0,
-                            "ring": f["ring"], "guess": None, "color": color,
+                            "ring": f["ring"], "guess": None, "color": color, "rim": f["color"],
                             "overlap": False, "margin": 0.0})
         return out
     cands = find_icons(img, icon_frac, mask, per_color=(max(cand_per_color, 16) if bg_mode == "flag"
@@ -594,6 +596,7 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
         f = cands[i]
         e = {"agent": a, "team": t, "x": f["x"], "y": f["y"], "score": round(float(S_raw[i, j]), 2),
              "ring": f["ring"], "guess": a, "color": team_color.get(t, f["color"]),
+             "rim": f["color"],              # 元の縁の色（warm / cool / yellow）。color はチーム色で上書きされる
              "overlap": bool(crowded[i]), "margin": round(float(S[i, j]) - sec, 2)}
         if i in rescued:
             e["rescued"] = rescued[i]
@@ -743,7 +746,7 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
                 continue
             used[t] += 1
             out.append({"agent": a, "team": t, "x": px[0] / W, "y": px[1] / H, "score": round(point, 2),
-                        "ring": 0.0, "guess": a, "color": color, "overlap": False,
+                        "ring": 0.0, "guess": a, "color": color, "rim": color, "overlap": False,
                         "margin": round(point - sec, 2), "source": "face"})
             kept.add((t, a))
 
@@ -792,7 +795,7 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
                 continue
             used[t] += 1
             out.append({"agent": a, "team": t, "x": cx / W, "y": cy / H, "score": round(point, 2),
-                        "ring": 0.0, "guess": a, "color": color, "overlap": False,
+                        "ring": 0.0, "guess": a, "color": color, "rim": color, "overlap": False,
                         "margin": round(point - sec, 2), "source": "prior"})
             kept.add((t, a))
 

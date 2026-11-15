@@ -493,7 +493,8 @@ def test_consensus_drops_lone_overlap_detection():
 # ---------------------------------------------------------------- 2 本目（agents-recall）
 ALL_OFF = dict(filled_rescue=None, tpl_fill_min=0.35, margin_exclusive=False, margin_pair=False,
                gray_floor=None, gray_margin=0.12, gray_face_std=18.0, gray_ring=0.30, face_inner=0.42)
-DET_KEYS = {"agent", "team", "x", "y", "score", "ring", "guess", "color", "overlap", "margin"}
+# track-measure-fix1 で元の縁の色 "rim" が増えた（11 キー）
+DET_KEYS = {"agent", "team", "x", "y", "score", "ring", "guess", "color", "rim", "overlap", "margin"}
 
 
 def _warm_center_icon(seed):
@@ -520,7 +521,7 @@ def _gray(icon):
 
 
 def test_match_all_off_is_identical_to_default_and_keeps_ten_keys():
-    """全部切の明示指定と無指定で、返り値も debug も 1 つも変わらない。残した検出は従来の 10 キー。"""
+    """全部切の明示指定と無指定で、返り値も debug も 1 つも変わらない。残した検出は従来の 10 キー＋rim。"""
     names = ["Sova", "Jett", "Omen", "Killjoy", "Viper"]
     icons = {n: _icon(i) for i, n in enumerate(names)}
     places = [("Sova", "warm", 0.2, 0.2), ("Jett", "warm", 0.5, 0.3), ("Omen", "cool", 0.7, 0.7),

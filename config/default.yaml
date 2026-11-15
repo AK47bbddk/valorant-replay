@@ -142,6 +142,8 @@ tactics:
     search: true
   # 確かめ用：1 マップにつき何枚のミニマップを _tactics/agents_dump/ に書き出すか（0 で書き出さない）
   agents_dump: 0
+  # 確かめ用：追跡に使ったフレームごとの照合結果（ring・margin・overlap・rim）を _tactics/agents_dump/match_dump.json に（1 で有効）
+  match_dump: 0
 
 output:
   dir: /content/drive/MyDrive/valorant-replay
