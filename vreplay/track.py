@@ -11,6 +11,10 @@
 
 距離はミニマップの正規化座標（横は aspect 倍）。速さは「両スポーン間の距離」に対する割合で決めるので、
 放送ごとの倍率・切り抜きの違いに左右されない（valorant の走る速さ 6.75 m/s・スポーン間はおおむね 90〜110 m）。
+
+壁の形（vreplay.walls.Walls）を渡すと、「走る」遷移の距離は直線ではなく床の上を回り込む道のり（直線が壁に
+塞がれているときだけ）で測り、補間も床の上の道に沿わせる（道が無い・走って届かないときは前の点のまま）。
+「跳ぶ」遷移（テレポート・ウルト）は壁を越えてよいので、従来どおり直線の距離で判定する。
 """
 from __future__ import annotations
 
@@ -103,20 +107,30 @@ def _unique(dets, min_score: float) -> list:
 class _Ctx:
     """best_chain の跳躍の判定に使う材料（検出・走る上限・規則・ウルトの時刻・相手の同名エージェント）。"""
 
-    def __init__(self, ds, scale, aspect, v, sl, rules, ults, rivals):
+    def __init__(self, ds, scale, aspect, v, sl, rules, ults, rivals, walls=None):
         self.ds, self.scale, self.aspect, self.v, self.sl = ds, scale, aspect, v, sl
         self.rules = rules or {}
         self.ults = sorted(float(u) for u in ults or [])
         self.rivals = [(float(r[0]), float(r[1]), float(r[2])) for r in rivals or []]
+        self.walls = walls
         n = len(ds)
         self.persist = [1] * n               # その点から、走って届く次の点が何個続くか（その点を含む）
         for i in range(n - 2, -1, -1):
             dt = ds[i + 1][0] - ds[i][0]
-            if dt > 1e-6 and _dist(ds[i][1:3], ds[i + 1][1:3], aspect) <= self.reach(dt):
+            if dt > 1e-6 and self.can_run(i, i + 1, _dist(ds[i][1:3], ds[i + 1][1:3], aspect), dt):
                 self.persist[i] = self.persist[i + 1] + 1
 
     def reach(self, dt: float) -> float:
         return self.v * max(0.0, dt) + self.sl
+
+    def can_run(self, j: int, i: int, d: float, dt: float) -> bool:
+        """j → i を dt 秒で走って届くか。壁の形があれば、直線が塞がれているときは回り込む道のりで測る。"""
+        lim = self.reach(dt)
+        if d > lim:
+            return False
+        if self.walls is None:
+            return True
+        return self.walls.geo(self.ds[j][1:3], self.ds[i][1:3], d) <= lim
 
     def limit(self, rule: dict) -> float:
         if "max_m" in rule:
@@ -239,7 +253,7 @@ def _dp(ctx: _Ctx) -> dict:
                 continue
             d = _dist(ds[i][1:3], ds[j][1:3], ctx.aspect)
             gap = 0.01 * max(0.0, dt - 5.0)      # 間が空くほど少しだけ割り引く（遠い点どうしを無理につながない）
-            run_ok = d <= ctx.reach(dt)
+            run_ok = ctx.can_run(j, i, d, dt)
             for k in range(K):
                 for u in range(U):
                     st = best.get((j, k, u))
@@ -258,10 +272,12 @@ def _dp(ctx: _Ctx) -> dict:
 
 def chain_and_jumps(dets: list, scale: float, agent: str | None = None, aspect: float = 1.0,
                     speed: float = SPEED, slack: float = SLACK, min_score: float = 0.58, rules: dict | None = None,
-                    ults: list[float] | None = None, rivals: list | None = None) -> tuple[list, list[dict]]:
+                    ults: list[float] | None = None, rivals: list | None = None,
+                    walls=None) -> tuple[list, list[dict]]:
     """dets: [(t, x, y, score[, 割り引き])]（時刻順でなくてもよい）。返り値 (鎖 [(t, x, y, score)], 跳躍の一覧)。
 
-    遷移は 2 種類：走る（距離 ≤ RUN×SPEED×scale×dt + SLACK×scale。コストは空きの割引だけ）と、
+    遷移は 2 種類：走る（距離 ≤ RUN×SPEED×scale×dt + SLACK×scale。コストは空きの割引だけ。walls があれば
+    直線が壁に塞がれているときは床の上を回り込む道のりで測る）と、
     跳ぶ（エージェント別の規則 rules（既定 JUMP[agent]）を満たすときだけ、コスト C を引く）。
     DP の状態は（点, 使った跳躍の回数 0〜MAX_JUMPS, ウルトの窓の中の跳躍の回数）。同じ時刻どうし（dt=0）はつながない。
     ults: ウルトの使用時刻（dets と同じ時刻の軸）。rivals: 相手チームの同名エージェントの検出 [(t, x, y)]。
@@ -271,7 +287,8 @@ def chain_and_jumps(dets: list, scale: float, agent: str | None = None, aspect: 
         return [], []
     if rules is None:
         rules = JUMP.get(agent or "", {})
-    ctx = _Ctx(ds, scale, aspect, speed * scale * RUN.get(agent or "", 1.0), slack * scale, rules, ults, rivals)
+    ctx = _Ctx(ds, scale, aspect, speed * scale * RUN.get(agent or "", 1.0), slack * scale, rules, ults, rivals,
+               walls)
     best = _dp(ctx)
     s = max(best, key=lambda q: best[q][0])
     out, jumps = [], []
@@ -298,7 +315,7 @@ def best_chain(dets: list, scale: float, agent: str | None = None, aspect: float
 
 
 def resample(chain: list[tuple[float, float, float, float]], times: list[float], max_gap: float = 12.0,
-             hold: float = 3.0, reach=None, aspect: float = 1.0, tp_times=None
+             hold: float = 3.0, reach=None, aspect: float = 1.0, tp_times=None, walls=None
              ) -> list[tuple[float, float, float, float, str]]:
     """鎖を times の時刻に並べ直す。[(t, x, y, conf, "det"|"interp"|"tp")]。
     鎖の点から 1 秒以内の時刻はその点（det）、点と点のあいだ（max_gap 秒以内）は直線で補間（interp）、
@@ -306,14 +323,19 @@ def resample(chain: list[tuple[float, float, float, float]], times: list[float],
     reach（dt → 走って届く距離）を渡すと、隣の 2 点がその dt で走って届かない区間（跳躍）は直線で滑らせず、
     前の点の位置のまま（interp）にして、次の点の時刻で切り替える。
     tp_times（採用した跳躍の着地の時刻）の点は src を "tp" にする。着地より 0.5 秒以上前の時刻は、着地の点ではなく
-    跳ぶ前の位置のまま。"""
+    跳ぶ前の位置のまま。
+    walls（壁の形）を渡すと、直線が壁に塞がれる区間は床の上の道（walls.path）に沿って補間し、道が無いか
+    道のりが走って届かない（reach）ときは前の点の位置のまま（壁を滑って越える見た目にしない）。
+    また鎖の点に寄せるのは 0.5 秒以内だけにする（1 秒寄せると、回り込みに数秒かかる区間が 1 歩で壁を越える）。"""
     if not chain:
         return []
     tps = {round(float(x), 3) for x in tp_times or ()}
+    snap = 1.0 if walls is None else 0.5
+    paths: dict = {}
     out = []
     for t in times:
         near = min(chain, key=lambda d: abs(d[0] - t))
-        if abs(near[0] - t) <= 1.0:
+        if abs(near[0] - t) <= snap:
             if round(near[0], 3) not in tps:
                 out.append((t, near[1], near[2], near[3], "det"))
                 continue
@@ -329,12 +351,19 @@ def resample(chain: list[tuple[float, float, float, float]], times: list[float],
         if before and after:
             a, b = before[-1], after[0]
             if b[0] - a[0] <= max_gap:
+                conf = round(min(a[3], b[3]) * 0.8, 2)
                 if reach is not None and _dist(a[1:3], b[1:3], aspect) > reach(b[0] - a[0]):
-                    out.append((t, a[1], a[2], round(min(a[3], b[3]) * 0.8, 2), "interp"))
+                    out.append((t, a[1], a[2], conf, "interp"))
                     continue
                 w = (t - a[0]) / max(1e-6, b[0] - a[0])
-                out.append((t, a[1] + (b[1] - a[1]) * w, a[2] + (b[2] - a[2]) * w,
-                            round(min(a[3], b[3]) * 0.8, 2), "interp"))
+                if walls is None:
+                    out.append((t, a[1] + (b[1] - a[1]) * w, a[2] + (b[2] - a[2]) * w, conf, "interp"))
+                    continue
+                if (a[0], b[0]) not in paths:
+                    paths[(a[0], b[0])] = _floor_path(walls, a, b, reach, aspect)
+                pl = paths[(a[0], b[0])]
+                x, y = (a[1], a[2]) if pl is None else _point_on(pl, w, aspect)
+                out.append((t, x, y, conf, "interp"))
             continue
         if before and t - before[-1][0] <= hold:
             d = before[-1]
@@ -345,11 +374,31 @@ def resample(chain: list[tuple[float, float, float, float]], times: list[float],
     return out
 
 
-def drop_outliers(pts: list, reach, aspect: float = 1.0, skip=None) -> tuple[list, list[float]]:
+def _floor_path(walls, a, b, reach, aspect: float):
+    """鎖の点 a → b の床の上の道 [(x, y), …]。道が無い・道のりが reach(dt) を超えるなら None。"""
+    pl = walls.path(a[1:3], b[1:3])
+    if pl is None:
+        return None
+    if reach is not None and len(pl) > 2 and _polylen(pl, aspect) > reach(b[0] - a[0]):
+        return None
+    return pl
+
+
+def _polylen(pl: list, aspect: float) -> float:
+    return sum(_dist(p, q, aspect) for p, q in zip(pl, pl[1:]))
+
+
+def _point_on(pl: list, w: float, aspect: float) -> tuple[float, float]:
+    from .walls import point_on
+    return point_on(pl, w, aspect)
+
+
+def drop_outliers(pts: list, reach, aspect: float = 1.0, skip=None, walls=None) -> tuple[list, list[float]]:
     """格子に並べた軌跡 [(t, x, y, conf, src)] の、孤立した 1 点の外れ値を前後の中点に置き換える（src は interp）。
     条件：前後の点（並びの隣）が、走って届く距離（reach(後 − 前)）以内なのに、
     その点だけが前・後の両方から、走って届く距離の 2 倍以上離れている。
     skip(t) が真の時刻は対象外（ウルトの時間窓などのため）。採用した跳躍の着地（src "tp"）と、その直前の点も対象外。
+    walls（壁の形）があれば、置き換える点は床の上の道の中ほど（道が無ければ前の点）。
     返り値 (新しい軌跡, 置き換えた時刻)。"""
     out = list(pts)
     fixed: list[float] = []
@@ -361,7 +410,11 @@ def drop_outliers(pts: list, reach, aspect: float = 1.0, skip=None) -> tuple[lis
             continue
         if (_dist(p[1:3], p0[1:3], aspect) >= 2 * reach(p[0] - p0[0])
                 and _dist(p[1:3], p1[1:3], aspect) >= 2 * reach(p1[0] - p[0])):
-            out[k] = (p[0], (p0[1] + p1[1]) / 2, (p0[2] + p1[2]) / 2, round(min(p0[3], p1[3]) * 0.8, 2), "interp")
+            mx, my = (p0[1] + p1[1]) / 2, (p0[2] + p1[2]) / 2
+            if walls is not None:
+                pl = walls.path(p0[1:3], p1[1:3])
+                mx, my = (p0[1], p0[2]) if pl is None else _point_on(pl, 0.5, aspect)
+            out[k] = (p[0], mx, my, round(min(p0[3], p1[3]) * 0.8, 2), "interp")
             fixed.append(p[0])
     return out, fixed
 
@@ -400,7 +453,7 @@ def _dets_by_key(frames: list, icon_frac: float | None, aspect: float) -> dict:
 def build(frames: list[tuple[float, list[dict]]], start: float, end: float, scale: float, every: float = 5.0,
           aspect: float = 1.0, deaths: dict | None = None, fixed: dict | None = None, skip=None,
           ults: dict | None = None, jumps: dict | None = None, icon_frac: float | None = None,
-          rules: dict | None = None) -> dict:
+          rules: dict | None = None, walls=None) -> dict:
     """1 ラウンドぶんの照合結果 [(時刻, agents.match の結果)] から、エージェントごとの軌跡。
     返り値 {(team, agent): [(開始からの秒, x, y, conf, src)]}。src は det / interp / tp（採用した跳躍の着地）。
     deaths: {(team, agent): 死んだ時刻} があれば、その時刻以降の検出は鎖に入れず、格子もそこで切る。
@@ -410,7 +463,8 @@ def build(frames: list[tuple[float, list[dict]]], start: float, end: float, scal
     鎖を格子に並べるとき、走って届かない区間は直線で補間せず、孤立した外れ値は前後の中点に置き換える（drop_outliers）。
     fixed に dict を渡すと、置き換えた点を {(team, agent): [開始からの秒]} で足す。
     jumps に dict を渡すと、採用した跳躍を {(team, agent): [{"t": 開始からの秒, "from", "to", "kind"}]} で足す。
-    skip(team, agent, 時刻) が真の点は外れ値の置き換えの対象外。"""
+    skip(team, agent, 時刻) が真の点は外れ値の置き換えの対象外。
+    walls: 壁の形（vreplay.walls.Walls）。走る遷移・補間・外れ値の置き換えが壁を越えないようにする（無ければ従来どおり）。"""
     table = JUMP if rules is None else rules
     by = _dets_by_key(frames, icon_frac, aspect)
     times = []
@@ -425,16 +479,16 @@ def build(frames: list[tuple[float, list[dict]]], start: float, end: float, scal
             dets = [d for d in dets if d[0] < cut]
         rivals = [d[:3] for d in by.get((3 - key[0], key[1]), [])]
         ch, jp = chain_and_jumps(dets, scale, agent=key[1], aspect=aspect, rules=table.get(key[1], {}),
-                                 ults=(ults or {}).get(key), rivals=rivals)
+                                 ults=(ults or {}).get(key), rivals=rivals, walls=walls)
         if not ch:
             continue
         ts = [t for t in times if cut is None or t <= cut]
 
         def reach(dt, _a=key[1]):
             return run_reach(dt, scale, _a)
-        pts = resample(ch, ts, reach=reach, aspect=aspect, tp_times=[j["t"] for j in jp])
+        pts = resample(ch, ts, reach=reach, aspect=aspect, tp_times=[j["t"] for j in jp], walls=walls)
         sk = (lambda t, _k=key: skip(_k[0], _k[1], t)) if skip is not None else None
-        pts, fx = drop_outliers(pts, reach, aspect=aspect, skip=sk)
+        pts, fx = drop_outliers(pts, reach, aspect=aspect, skip=sk, walls=walls)
         if fx and fixed is not None:
             fixed[key] = [round(t - start, 1) for t in fx]
         if jp and jumps is not None:

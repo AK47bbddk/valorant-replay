@@ -1,10 +1,13 @@
 """照合の生の検出（ラウンド・時刻ごとの match の結果）から 1 秒格子の軌跡を組み、軌跡の「あり得なさ」の指標
 （vreplay/track_metrics.py の層 A）と生存時間の被覆率を、ベースの track.py と今の track.py で比べる。
 
-使い方: python tools/track_measure.py <detections.json> <report.json> [--base 0d58aae] [--rounds 2,5,6] [--json 出力]
+使い方: python tools/track_measure.py <detections.json> <report.json> [--base 4afebc8] [--rounds 2,5,6] [--json 出力]
+        [--map-icon <公式のマップ画像 png>] [--background <放送のミニマップの背景 jpg>]
   detections.json: {"icon_frac", "frames": [{"round", "t"（開始からの秒）, "found": [{team, agent, x, y, score}]}]}
   report.json: 解析レポート（players・rounds[].kills・tactics.rounds[].start/end/side1・tactics.callouts_placed）
-ベースは git show <rev>:vreplay/track.py を読み込んで使う（deaths は渡さない＝ベースの tactics と同じ）。
+ベースは git show <rev>:vreplay/track.py を読み込んで使う（deaths・ults・icon_frac は今と同じものを渡す）。
+--map-icon と --background があれば、report.json の tactics.transform で公式のマップ画像の床を放送のミニマップに写して
+壁の形（vreplay.walls）を作り、今の track.py に渡す（壁越え区間の数も数える）。無ければ壁は使わず wall_crossings は None。
 """
 from __future__ import annotations
 
@@ -21,6 +24,7 @@ from vreplay import minimap as MM          # noqa: E402
 from vreplay import tactics as TT          # noqa: E402
 from vreplay import track as TR            # noqa: E402
 from vreplay import track_metrics as TM    # noqa: E402
+from vreplay import walls as WL            # noqa: E402
 
 ASPECT = 320 / 304          # この放送のミニマップ（320×304）。spawn_scale がこの比で相談票の 0.748 になる
 
@@ -85,8 +89,22 @@ def context(rep: dict, n: int) -> dict:
             "first_kill": min(kts) if kts else None, "alive": alive, "ults": ults}
 
 
+def load_walls(map_icon: str | None, background: str | None, transform: dict | None):
+    """公式のマップ画像（RGBA）と放送のミニマップの背景（大きさだけ使う）から壁の形。どちらか無ければ None。"""
+    if not map_icon or not background or not transform:
+        return None
+    import cv2
+    import numpy as np
+    art = cv2.imdecode(np.fromfile(map_icon, np.uint8), cv2.IMREAD_UNCHANGED)
+    bg = cv2.imdecode(np.fromfile(background, np.uint8), cv2.IMREAD_COLOR)
+    if art is None or bg is None or art.ndim != 3 or art.shape[2] != 4:
+        raise SystemExit("マップ画像（RGBA）か背景が読めません")
+    return WL.from_art(art[:, :, 3], transform, bg.shape)
+
+
 def build_round(mod, frames: list, ctx: dict, scale: float, deaths: bool, fixed: dict | None = None,
-                ults: bool = False, icon_frac: float | None = None, jumps: dict | None = None) -> dict:
+                ults: bool = False, icon_frac: float | None = None, jumps: dict | None = None,
+                walls=None) -> dict:
     fr = [(ctx["start"] + float(f["t"]), f["found"]) for f in frames]
     kw = {}
     if deaths:
@@ -103,13 +121,15 @@ def build_round(mod, frames: list, ctx: dict, scale: float, deaths: bool, fixed:
         kw["icon_frac"] = icon_frac
     if jumps is not None:
         kw["jumps"] = jumps
+    if walls is not None:
+        kw["walls"] = walls
     return mod.build(fr, ctx["start"], ctx["end"], scale, every=1.0, aspect=ASPECT, **kw)
 
 
-def metrics(trk: dict, ctx: dict, scale: float, spawns, icon_frac, area_of, ranks) -> dict:
+def metrics(trk: dict, ctx: dict, scale: float, spawns, icon_frac, area_of, ranks, walls=None) -> dict:
     m = TM.round_metrics(trk, scale, ASPECT, deaths=ctx["deaths"], first_kill=ctx["first_kill"],
                          attack_team=ctx["attack_team"], spawns=spawns, icon_frac=icon_frac,
-                         area_of=area_of, ranks=ranks)
+                         area_of=area_of, ranks=ranks, walls=walls)
     m["coverage"] = TM.coverage(trk, ctx["alive"])
     return m
 
@@ -122,7 +142,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("detections")
     ap.add_argument("report")
-    ap.add_argument("--base", default="97995f9")
+    ap.add_argument("--base", default="4afebc8")
+    ap.add_argument("--map-icon")
+    ap.add_argument("--background")
     ap.add_argument("--rounds", default="2,5,6")
     ap.add_argument("--json")
     a = ap.parse_args()
@@ -135,19 +157,20 @@ def main():
     area_of = area_of_placed(placed)
     ranks = TT.area_ranks(placed)
     icon_frac = det.get("icon_frac")
-    variants = {"fix1": (base, True, False), "jump_split": (TR, True, True)}
+    walls = load_walls(a.map_icon, a.background, rep["tactics"].get("transform"))
+    variants = {"fix2": (base, False), "fix3": (TR, True)}
     result: dict = {"scale": round(scale, 4), "aspect": round(ASPECT, 4), "rounds": {}}
     for n in [int(x) for x in a.rounds.split(",")]:
         frames = [f for f in det["frames"] if int(f["round"]) == n]
         ctx = context(rep, n)
         rr: dict = {"context": {**ctx, "deaths": _keyed(ctx["deaths"]), "alive": _keyed(ctx["alive"])},
                     "metrics": {}, "tracks": {}, "fixed": {}, "jumps": {}}
-        for name, (mod, use_deaths, is_new) in variants.items():
-            fixed: dict | None = {}
-            jumps: dict | None = {} if is_new else None
-            trk = build_round(mod, frames, ctx, scale, use_deaths, fixed,
-                              ults=is_new, icon_frac=icon_frac if is_new else None, jumps=jumps)
-            rr["metrics"][name] = metrics(trk, ctx, scale, spawns, icon_frac, area_of, ranks)
+        for name, (mod, use_walls) in variants.items():
+            fixed: dict = {}
+            jumps: dict = {}
+            trk = build_round(mod, frames, ctx, scale, True, fixed, ults=True, icon_frac=icon_frac, jumps=jumps,
+                              walls=walls if use_walls else None)
+            rr["metrics"][name] = metrics(trk, ctx, scale, spawns, icon_frac, area_of, ranks, walls)
             rr["tracks"][name] = _keyed(trk)
             if fixed:
                 rr["fixed"][name] = _keyed(fixed)
@@ -162,7 +185,7 @@ def main():
 def print_table(result: dict) -> None:
     keys = ["coverage", "impossible", "impossible_per100s", "roundtrips", "zigzag_windows", "path_over",
             "path_ratio_max", "overlap", "mirror_jumps", "start_violations", "cross_before_contact",
-            "after_death", "mass_jump_frames", "track_seconds"]
+            "after_death", "mass_jump_frames", "wall_crossings", "track_seconds"]
     print(f"scale={result['scale']} aspect={result['aspect']}")
     for n, rr in result["rounds"].items():
         names = list(rr["metrics"])

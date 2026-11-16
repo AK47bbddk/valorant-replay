@@ -668,7 +668,8 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
                           round_tac, log, icons=icons, icon_frac=icon_frac, alive_fn=alive_fn,
                           every=track_every or 5.0, cache=mcache, threads=int(tcfg.get("track_threads") or 4),
                           out_dir=out_dir, deaths_by_n={int(r["n"]): _round_deaths(r) for r in rlist},
-                          ults_by_n={int(r["n"]): _round_ults(r) for r in rlist})
+                          ults_by_n={int(r["n"]): _round_ults(r) for r in rlist},
+                          walls=_track_walls(tcfg, mask, art_crop is not None, log))
         except Exception as e:                       # 追跡に失敗しても、ほかの結果は出す
             if log:
                 log(f"    エージェントの追跡はスキップしました（{e}）")
@@ -1419,14 +1420,29 @@ def _round_ults(r: dict) -> dict | None:
     return out or None
 
 
+def _track_walls(tcfg: dict, mask, art_ok: bool, log=None):
+    """追跡に使う壁の形（vreplay.walls.Walls）。公式のマップ画像で位置合わせできた床のマスクがあり、
+    tactics.track_walls が偽でないときだけ（放送の色から作った床は穴・島があり、偽の壁になるので使わない）。"""
+    if not art_ok or mask is None or not tcfg.get("track_walls", True):
+        return None
+    from . import walls as WL
+    try:
+        return WL.Walls(mask)
+    except ValueError as e:
+        if log:
+            log(f"    壁の形を作れませんでした（{e}）。追跡は壁なしで続けます")
+        return None
+
+
 def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, placed, aspect, background,
                   round_tac, log, icons=None, icon_frac=None, alive_fn=None, every: float = 5.0,
                   cache: dict | None = None, threads: int = 4, out_dir=None, deaths_by_n: dict | None = None,
-                  ults_by_n: dict | None = None):
+                  ults_by_n: dict | None = None, walls=None):
     """track_every 秒ごと（＋節目の前後）のミニマップでアイコンを照合し、走れる速さの制約で
     エージェントごとの軌跡にする（vreplay.track）。rt["tracks"] = {"1": {"Jett": [[e, x, y, conf, src, zone, callout]]}}
     deaths_by_n: {ラウンド: {(team, agent): 死んだ時刻}}。あればその時刻で軌跡を切る（死んだ後の検出は使わない）。
-    ults_by_n: {ラウンド: {(team, agent): [ウルトの使用時刻（ラウンド内の秒）]}}。Omen のウルトの窓に使う。"""
+    ults_by_n: {ラウンド: {(team, agent): [ウルトの使用時刻（ラウンド内の秒）]}}。Omen のウルトの窓に使う。
+    walls: 壁の形（_track_walls）。あれば走る遷移・補間が壁を通り抜けない。"""
     from . import agents as AG
     from . import minimap as MM
     from . import track as TR
@@ -1502,7 +1518,7 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
         jumps: dict = {}
         trk = TR.build(found, start, float(rt["end"]), scale, every=every, aspect=aspect,
                        deaths=(deaths_by_n or {}).get(n), fixed=fixed, ults=ults_r, jumps=jumps,
-                       icon_frac=icon_frac, rules=rules)
+                       icon_frac=icon_frac, rules=rules, walls=walls)
         out: dict = {}
         for (team, agent), pts in trk.items():
             lst = []

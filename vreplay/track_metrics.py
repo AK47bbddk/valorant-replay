@@ -185,6 +185,15 @@ def mass_jump_frames(trs: dict, scale: float, aspect: float = 1.0, min_agents: i
     return sum(1 for c in cnt.values() if c >= min_agents)
 
 
+def wall_crossings(trs: dict, walls) -> int | None:
+    """11. 壁越え区間の数：隣の 2 点を結ぶ直線が壁を越える（walls.crossing：直線が塞がれ、回り込むと明らかに遠い）回数。
+    採用した跳躍の着地（src "tp"）への区間は正規の壁越えとして除く。壁の形が無いマップでは None。"""
+    if walls is None:
+        return None
+    return sum(1 for pts in trs.values() for a, b in zip(pts, pts[1:])
+               if b[4] != "tp" and walls.crossing(a[1:3], b[1:3]))
+
+
 def coverage(tracks: dict, alive: dict, step: float = 1.0) -> float | None:
     """生存時間の被覆率：alive {(team, agent): (開始の秒, 終わりの秒)} の step 秒格子のうち、
     その軌跡に step/2 以内の点がある割合（src は問わない）。alive が空なら None。"""
@@ -203,9 +212,10 @@ def coverage(tracks: dict, alive: dict, step: float = 1.0) -> float | None:
 
 def round_metrics(tracks: dict, scale: float, aspect: float = 1.0, *, deaths: dict | None = None,
                   first_kill: float | None = None, attack_team: int | None = None, spawns: dict | None = None,
-                  icon_frac: float | None = None, area_of=None, ranks: dict | None = None) -> dict:
-    """1 ラウンドぶんの層 A の指標 1〜10。deaths・first_kill は開始からの秒、spawns: {"attack": (x, y), "defense": (x, y)}
-    （接敵前の越境に使う）。area_of(x, y) → エリア名・ranks（tactics.area_ranks）は開始時の陣地違反に使う。"""
+                  icon_frac: float | None = None, area_of=None, ranks: dict | None = None, walls=None) -> dict:
+    """1 ラウンドぶんの層 A の指標 1〜11。deaths・first_kill は開始からの秒、spawns: {"attack": (x, y), "defense": (x, y)}
+    （接敵前の越境に使う）。area_of(x, y) → エリア名・ranks（tactics.area_ranks）は開始時の陣地違反に使う。
+    walls（vreplay.walls.Walls）は壁越え区間の数に使う（無ければ None）。"""
     trs = normalize(tracks)
     secs = sum(p[-1][0] - p[0][0] for p in trs.values() if len(p) > 1)
     imp = sum(impossible_moves(p, scale, k[1], aspect) for k, p in trs.items())
@@ -224,4 +234,5 @@ def round_metrics(tracks: dict, scale: float, aspect: float = 1.0, *, deaths: di
         "cross_before_contact": cross_before_contact(trs, attack_team, spawns, first_kill, scale, aspect),
         "after_death": after_death(trs, deaths),
         "mass_jump_frames": mass_jump_frames(trs, scale, aspect),
+        "wall_crossings": wall_crossings(trs, walls),
     }
