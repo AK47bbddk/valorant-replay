@@ -85,6 +85,8 @@ def evaluate(results: list[dict], blind: dict, tol: float = 0.03) -> dict:
     tot = Counter()
     by_agent = defaultdict(lambda: [0, 0])
     reasons: Counter = Counter()
+    agent_reasons: dict = defaultdict(Counter)
+    fp_by_agent: Counter = Counter()
     swaps: Counter = Counter()
     frames = []
     for r in results:
@@ -101,15 +103,21 @@ def evaluate(results: list[dict], blind: dict, tol: float = 0.03) -> dict:
             by_agent[p["agent"]][1] += 1
         for x in m["misses"]:
             reasons[x["reason"]] += 1
+            agent_reasons[x["agent"]][x["reason"]] += 1
             if x["reason"] == "swap":
                 swaps[f"{x['agent']}->{x['as']}"] += 1
+        for f in m["fp"]:
+            fp_by_agent[f.get("agent")] += 1
         frames.append({"file": r["file"], "misses": m["misses"],
                        "fp": [{k: f.get(k) for k in ("team", "agent", "x", "y", "score")} for f in m["fp"]]})
     P = tot["tp"] / tot["kept"] if tot["kept"] else None
     R = tot["tp"] / tot["placed"] if tot["placed"] else None
     return {"tp": tot["tp"], "kept": tot["kept"], "placed": tot["placed"], "fp": tot["kept"] - tot["tp"],
             "swap": tot["swap"], "precision": P, "recall": R,
-            "by_agent": {a: {"n": n, "tp": c, "recall": c / n} for a, (n, c) in sorted(by_agent.items())},
+            "by_agent": {a: {"n": n, "tp": c, "recall": c / n, "fp": fp_by_agent.get(a, 0),
+                             "miss_reasons": dict(agent_reasons[a].most_common())}
+                         for a, (n, c) in sorted(by_agent.items())},
+            "fp_by_agent": dict(fp_by_agent.most_common()),
             "miss_reasons": dict(reasons.most_common()), "swaps": dict(swaps.most_common()),
             "frames": frames}
 
@@ -126,9 +134,16 @@ def _parse_set(items) -> dict:
     return out
 
 
+def _pct(v: float | None) -> str:
+    return "—" if v is None else f"{v * 100:.1f}%"
+
+
 def summary_text(ev: dict) -> str:
-    lines = [f"precision {ev['precision'] * 100:.1f}% ({ev['tp']}/{ev['kept']}) / "
-             f"recall {ev['recall'] * 100:.1f}% ({ev['tp']}/{ev['placed']}) / FP {ev['fp']}（うち取り違え {ev['swap']}）"]
+    """評価の要約。画像が 1 枚も読めず kept・placed が 0 のときも落ちない（P・R は「—」）。"""
+    lines = [f"precision {_pct(ev['precision'])} ({ev['tp']}/{ev['kept']}) / "
+             f"recall {_pct(ev['recall'])} ({ev['tp']}/{ev['placed']}) / FP {ev['fp']}（うち取り違え {ev['swap']}）"]
+    if ev.get("fp_by_agent"):
+        lines.append("FP のエージェント別: " + " / ".join(f"{a} {n}" for a, n in ev["fp_by_agent"].items()))
     lines.append("エージェント別 recall: " + "・".join(
         f"{a} {v['recall'] * 100:.0f}% ({v['tp']}/{v['n']})"
         for a, v in sorted(ev["by_agent"].items(), key=lambda kv: kv[1]["recall"])))

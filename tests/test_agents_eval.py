@@ -193,3 +193,18 @@ def test_blind_eval_greedy_match_and_reasons(tmp_path):
     blind.write_text(json.dumps({"frames": [{"file": "a.png", "placed": [[1, "Sova", 0.5, 0.5]]}]}), "utf-8")
     ev = BE.evaluate([{"file": "a.png", "found": found[:1], "rejected": []}], BE.load_blind(str(blind)))
     assert (ev["tp"], ev["kept"], ev["placed"], ev["precision"], ev["recall"]) == (1, 1, 1, 1.0, 1.0)
+
+
+def test_blind_eval_breakdown_by_agent_and_empty_summary(tmp_path):
+    """エージェント別の FP と取りこぼしの理由の内訳。画像が読めず 0 件でも要約は落ちない。"""
+    from tools import agents_blind_eval as BE
+    blind = {"a.png": [{"team": 2, "agent": "Chamber", "x": 0.5, "y": 0.5},
+                       {"team": 2, "agent": "Omen", "x": 0.2, "y": 0.2}]}
+    found = [{"team": 2, "agent": "Chamber", "x": 0.8, "y": 0.8, "score": 0.81}]   # 誰もいない場所の Chamber → FP
+    ev = BE.evaluate([{"file": "a.png", "found": found, "rejected": []}], blind)
+    assert ev["fp_by_agent"] == {"Chamber": 1}
+    assert ev["by_agent"]["Chamber"]["fp"] == 1 and ev["by_agent"]["Omen"]["fp"] == 0
+    assert ev["by_agent"]["Chamber"]["miss_reasons"] == {"no-candidate": 1}
+    assert "FP のエージェント別: Chamber 1" in BE.summary_text(ev)
+    empty = BE.evaluate([], blind)
+    assert empty["precision"] is None and "precision —" in BE.summary_text(empty)
