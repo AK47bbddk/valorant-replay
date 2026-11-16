@@ -254,9 +254,11 @@ def find_icons(img: np.ndarray, icon_frac: float, mask=None, per_color: int = 5,
     return out
 
 
-def _face_score(img: np.ndarray, px: tuple[int, int], tpl: np.ndarray, D: float, inner: float = 0.42) -> float:
+def _face_score(img: np.ndarray, px: tuple[int, int], tpl: np.ndarray, D: float, inner: float = 0.42,
+                gray_w: float = 0.0) -> float:
     """(px) の近く（±0.25D）で、顔のテンプレートとの似ている度合い（CCOEFF、円の内側だけ）。
-    inner は照合に使う円形マスクの半径（D に対する比）。0.42 で今までと同じ。"""
+    inner は照合に使う円形マスクの半径（D に対する比）。0.42 で今までと同じ。
+    gray_w > 0 なら、グレースケール同士の CCOEFF をその重みで混ぜる（gray_w·灰 + (1−gray_w)·BGR。0 で今までと同じ）。"""
     x, y = px
     best = -1.0
     for s in (0.9, 1.0, 1.1):
@@ -266,10 +268,32 @@ def _face_score(img: np.ndarray, px: tuple[int, int], tpl: np.ndarray, D: float,
         if win.shape[0] <= d or win.shape[1] <= d:
             continue
         T = cv2.resize(tpl, (d, d), interpolation=cv2.INTER_AREA)
-        r = cv2.matchTemplate(win, T, cv2.TM_CCOEFF_NORMED, mask=_circle_mask(d, inner))
+        mk = _circle_mask(d, inner)
+        r = cv2.matchTemplate(win, T, cv2.TM_CCOEFF_NORMED, mask=mk)
         r = np.nan_to_num(r, nan=-1.0, posinf=-1.0, neginf=-1.0)
+        if gray_w:
+            rg = cv2.matchTemplate(cv2.cvtColor(win, cv2.COLOR_BGR2GRAY), cv2.cvtColor(T, cv2.COLOR_BGR2GRAY),
+                                   cv2.TM_CCOEFF_NORMED, mask=mk)
+            rg = np.nan_to_num(rg, nan=-1.0, posinf=-1.0, neginf=-1.0)
+            r = gray_w * rg + (1.0 - gray_w) * r
         best = max(best, float(r.max()))
     return best
+
+
+def _self_score(tpl: np.ndarray, D: float, inner: float = 0.42, gray_w: float = 0.0) -> float:
+    """テンプレートの縮小への強さ c_a：大きさ D に縮めたものと、それを少しぼかした劣化版との似ている度合い。
+    縮小で細部が多く消えるエージェント（Astra・Sova など）ほど小さく、本物に当たっても照合の点が出にくい。"""
+    d = max(6, int(round(D)))
+    T = cv2.resize(tpl, (d, d), interpolation=cv2.INTER_AREA)
+    pad = cv2.copyMakeBorder(cv2.GaussianBlur(T, (0, 0), 0.8), 2, 2, 2, 2, cv2.BORDER_REPLICATE)
+    mk = _circle_mask(d, inner)
+    r = float(np.nan_to_num(cv2.matchTemplate(pad, T, cv2.TM_CCOEFF_NORMED, mask=mk), nan=-1.0).max())
+    if gray_w:
+        rg = float(np.nan_to_num(cv2.matchTemplate(cv2.cvtColor(pad, cv2.COLOR_BGR2GRAY),
+                                                   cv2.cvtColor(T, cv2.COLOR_BGR2GRAY),
+                                                   cv2.TM_CCOEFF_NORMED, mask=mk), nan=-1.0).max())
+        r = gray_w * rg + (1.0 - gray_w) * r
+    return r
 
 
 def _disc(shape, x: float, y: float, r: float):
@@ -338,7 +362,13 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
           tpl_fill_min: float = 0.35, margin_exclusive: bool = False, margin_pair: bool = False,
           gray_floor: float | None = None, gray_margin: float = 0.12, gray_face_std: float = 18.0,
           gray_ring: float = 0.30, face_inner: float = 0.42, bg_mode: str = "subtract",
-          cand_nms: float = 0.8, cand_per_color: int = 12, face_search: bool = False) -> list[dict]:
+          cand_nms: float = 0.8, cand_per_color: int = 12, face_search: bool = False,
+          cap_over: float | None = None, gray_crowded: bool = False,
+          fs_point: float = 0.06, fs_margin: float = 0.0, gray_w: float = 0.0,
+          self_norm: float | None = None, prior: list[dict] | None = None, prior_bonus: float = 0.08,
+          prior_move: float = 0.08, prior_relax: float = 0.06, prior_search: bool = True,
+          exclusive_dist: float | None = None,
+          neg_icons: dict[str, np.ndarray] | None = None, neg_diff: float | None = None) -> list[dict]:
     """ミニマップ 1 枚で、誰がどこにいるか。
     ① 縁の輪（暖色・寒色・観戦中の黄色）から、アイコンらしい場所の候補を多めに拾う（重なったアイコンも
        拾えるよう、近い候補も残す）
@@ -354,7 +384,9 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
           crowded_margin）以上強くなければ捨てる（理由 margin。そのチームの照合先が 1 人だけなら飛ばす）
     strict=False なら a〜d を行わない（今までと同じ動き。アイコンの大きさの見積もりで使う）。
     teams: {1: [5 人のエージェント], 2: [...]}、color_team: {"warm": 1 or 2, "cool": ...}、alive: {1: 生存人数, 2: ...}
-    返り値 [{"agent", "team", "x", "y"（正規化）, "score", "ring", "guess", "color", "overlap", "margin"}]。
+    返り値 [{"agent", "team", "x", "y"（正規化）, "score", "ring", "guess", "color", "rim", "overlap", "margin"}]。
+    color はチームの色、rim は候補の元の縁の色（warm / cool / yellow。黄色＝観戦中の選手。face・prior 由来は
+    探したチームの色）。
     debug にリストを渡すと、捨てた候補を {"x", "y", "color", "agent", "score", "second", "second_agent",
     "faces", "ring", "reason"} で足す（faces はその候補を照合してよいエージェント全員の点の dict）。
     2 本目（agents-recall）のスイッチ（既定はすべて切。全部切なら 1 本目と 1 つも変わらない）：
@@ -365,14 +397,35 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
       face_inner: _face_score の円形マスクの半径（0.42 で今までと同じ）
       bg_mode: "subtract"（背景を差し引く。今までと同じ）か "flag"（差し引かず、候補に背景の反応 "bg" を付ける）
       cand_nms / cand_per_color: 候補を拾うときの NMS の距離（D の比）と、色ごとの上限（既定は今までと同じ）
-      face_search: 輪の候補が出ない枠を、顔のテンプレートでフレーム全体から探して足す（"source": "face"）"""
+      face_search: 輪の候補が出ない枠を、顔のテンプレートでフレーム全体から探して足す（"source": "face"）
+    3 本目（agents-recall3）のスイッチ（既定は切）：
+      cap_over: 生存人数（HUD の読み）を超えても、顔の点がこれ以上で差の確かめも通る候補は残す（"over_cap": True）。
+        HUD の読みが 0 のチームも照合先に入れる（読み違いで 0/0・2/0 になる場面で、本物を全部落とさないため）
+      gray_crowded: 灰色帯（gray_floor）を crowded の候補にも使う（候補を多めに拾うとほとんどが crowded になるため）
+    4 本目（agents-recall4）のスイッチ（既定は 3 本目と同じ動き）：
+      fs_point / fs_margin: face_search で要る点と差（点 >= thr + fs_point、差 >= margin + fs_margin。既定 0.06 / 0）
+      gray_w: 顔の点にグレースケールの CCOEFF をこの重みで混ぜる（0 で切）
+      self_norm: エージェントごとの縮小への強さ c_a（_self_score）の差を点に足す係数
+        （点 + self_norm·(照合先の c の平均 − c_a)。縮小に弱いテンプレートほど底上げ。None で切）
+      prior: 前後のフレーム（同じラウンド）で確かに見つかった検出 [{"team", "agent", "x", "y"}]。
+        その (チーム, エージェント) の prior_move 以内の候補の点に prior_bonus を足してから割り当て・しきい値を見る
+        （"prior": True。出す "score" は足す前の点）。prior_search なら、それでも見つからない prior の
+        エージェントを、前の位置の周り（prior_move）だけ thr − prior_relax で顔から探す（"source": "prior"）
+    track_fix4 のスイッチ（既定は切）：
+      exclusive_dist: 両チームに同じエージェントがいるとき、同じエージェント・別チームの 2 件が中心の距離
+        exclusive_dist 以内なら、1 つのアイコンを両チームに割り当てたとみて点の高い方だけ残す（exclusive）。
+        捨てた方は debug に理由 "exclusive" で足す
+    track_fix5 のスイッチ（既定は切）：
+      neg_icons / neg_diff: Yoru のテザーや Chamber のアンカー等の設置物負テンプレートとの照合スコアが
+        エージェントの顔の score + neg_diff 以上なら設置物とみなして捨てる（理由 "neg"）"""
     if img is None or img.size == 0:
         return []
     H, W = img.shape[:2]
     D = icon_frac * H
     team_color = {t: c for c, t in color_team.items()}
     caps = {t: min(5, int((alive or {}).get(t, 5))) for t in (1, 2)}
-    slots = [(t, a) for t in (1, 2) if caps[t] > 0 for a in dict.fromkeys(teams.get(t) or []) if a in icons]
+    slots = [(t, a) for t in (1, 2) if caps[t] > 0 or cap_over is not None
+             for a in dict.fromkeys(teams.get(t) or []) if a in icons]
     if not slots:          # 顔が無いときは輪の強い順に（エージェントは不明）
         out = []
         for color in ("warm", "cool"):
@@ -382,7 +435,7 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
             for f in find_icons(img, icon_frac, mask, per_color=caps[team], thr=0.3, background=background,
                                 colors=(color,)):
                 out.append({"agent": None, "team": team, "x": f["x"], "y": f["y"], "score": 0.0,
-                            "ring": f["ring"], "guess": None, "color": color,
+                            "ring": f["ring"], "guess": None, "color": color, "rim": f["color"],
                             "overlap": False, "margin": 0.0})
         return out
     cands = find_icons(img, icon_frac, mask, per_color=(max(cand_per_color, 16) if bg_mode == "flag"
@@ -391,13 +444,34 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
     if not cands and not face_search:
         return []
     ags = list(dict.fromkeys(a for _, a in slots))
+    off = {a: 0.0 for a in ags}
+    if self_norm:
+        cs = {a: _self_score(icons[a], D, inner=face_inner, gray_w=gray_w) for a in ags}
+        mc = float(np.mean(list(cs.values())))
+        off = {a: float(self_norm) * (mc - cs[a]) for a in ags}
+
+    def fscore(px, a) -> float:
+        return _face_score(img, px, icons[a], D, inner=face_inner, gray_w=gray_w) + off[a]
+
     if cands:
-        face = np.array([[_face_score(img, f["px"], icons[a], D, inner=face_inner) for a in ags]
-                         for f in cands])
+        face = np.array([[fscore(f["px"], a) for a in ags] for f in cands])
         S = np.array([[face[i, ags.index(a)] for t, a in slots] for i in range(len(cands))])
     else:
         face = np.zeros((0, len(ags)))
         S = np.zeros((0, len(slots)))
+    S_raw = S.copy()
+    boosted = np.zeros(S.shape, bool)
+    prior = [e for e in (prior or []) if e.get("agent") and e.get("team") in (1, 2)]
+    if prior and len(cands):
+        # 前後のフレームで近くに確かに見つかった (チーム, エージェント) の点を底上げする
+        for j, (t, a) in enumerate(slots):
+            ps = [e for e in prior if e["team"] == t and e["agent"] == a]
+            if not ps:
+                continue
+            for i, f in enumerate(cands):
+                if any(math.hypot(f["x"] - e["x"], f["y"] - e["y"]) <= prior_move for e in ps):
+                    S[i, j] += prior_bonus
+                    boosted[i, j] = True
 
     def team_agents(f) -> list[str]:
         """その候補を照合してよいエージェント（縁がチーム色なら同じチーム、黄色なら 10 人全員）。"""
@@ -529,11 +603,14 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
 
     def det(i, j, t, a, sec, **extra) -> dict:
         f = cands[i]
-        e = {"agent": a, "team": t, "x": f["x"], "y": f["y"], "score": round(float(S[i, j]), 2),
+        e = {"agent": a, "team": t, "x": f["x"], "y": f["y"], "score": round(float(S_raw[i, j]), 2),
              "ring": f["ring"], "guess": a, "color": team_color.get(t, f["color"]),
+             "rim": f["color"],              # 元の縁の色（warm / cool / yellow）。color はチーム色で上書きされる
              "overlap": bool(crowded[i]), "margin": round(float(S[i, j]) - sec, 2)}
         if i in rescued:
             e["rescued"] = rescued[i]
+        if boosted[i, j]:
+            e["prior"] = True
         e.update(extra)
         return e
 
@@ -548,12 +625,19 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
         x, y = cands[i]["px"]
         return float(S[i, j]) >= thr + 0.04 and _face_std(img, x, y, D) >= gray_face_std
 
+    def over_cap(i, j) -> bool:
+        """生存人数の上限を超えたが、cap_over 以上の点なら残してよい（HUD の読み違い対策）。"""
+        return cap_over is not None and float(S[i, j]) >= cap_over and used[slots[j][0]] < 5
+
     # 1 周目：点の高い順に確かめる
     for i, j in pairs:
         t, a = slots[j]
+        extra = {}
         if used[t] >= caps[t]:              # 生存人数の上限で落ちる
-            reasons[i] = "cap"
-            continue
+            if not over_cap(i, j):
+                reasons[i] = "cap"
+                continue
+            extra["over_cap"] = True
         if not bg_ok(i, j):
             reasons[i] = "bg"
             continue
@@ -565,7 +649,7 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
                 margin_hold.append((i, j))
             continue
         used[t] += 1
-        out.append(det(i, j, t, a, sec))
+        out.append(det(i, j, t, a, sec, **extra))
         kept.add((t, a))
         decided.add(i)
 
@@ -574,9 +658,12 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
         if i in decided:
             continue
         t, a = slots[j]
+        extra = {"margin_pass": 2}
         if used[t] >= caps[t]:
-            reasons[i] = "cap"
-            continue
+            if not over_cap(i, j):
+                reasons[i] = "cap"
+                continue
+            extra["over_cap"] = True
         if not bg_ok(i, j):
             reasons[i] = "bg"
             continue
@@ -585,7 +672,7 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
             reasons[i] = "margin"
             continue
         used[t] += 1
-        out.append(det(i, j, t, a, sec, margin_pass=2))
+        out.append(det(i, j, t, a, sec, **extra))
         kept.add((t, a))
         decided.add(i)
 
@@ -608,7 +695,7 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
             if i in decided:
                 continue
             t, a = slots[j]
-            if (t, a) in kept or used[t] >= caps[t] or crowded[i]:
+            if (t, a) in kept or used[t] >= caps[t] or (crowded[i] and not gray_crowded):
                 continue
             f = cands[i]
             x, y = f["px"]
@@ -623,44 +710,119 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
 
     # 段階 5：輪の候補が出ない枠を、顔のテンプレートでフレーム全体から探して足す
     if face_search:
+        d = max(6, int(round(D)))
+        fmask = _circle_mask(d, 0.42)
+        mr = (cv2.resize(mask.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST)
+              if mask is not None and mask.shape[:2] == img.shape[:2] else None)
+        resp_of: dict = {}            # エージェントごとに 1 回だけ（両チームに同じエージェントがいるとき使い回す）
+
+        def face_resp(a):
+            if a not in resp_of:
+                tpl = cv2.resize(icons[a], (d, d), interpolation=cv2.INTER_AREA)
+                r = cv2.matchTemplate(img, tpl, cv2.TM_CCOEFF_NORMED, mask=fmask)
+                r = np.nan_to_num(r, nan=-1.0, posinf=-1.0, neginf=-1.0)
+                if mr is not None:
+                    half = d // 2
+                    sub = mr[half:half + r.shape[0], half:half + r.shape[1]]
+                    r = np.where(sub > 0, r, -1.0) if sub.shape == r.shape else None
+                resp_of[a] = r
+            return resp_of[a]
+
         for t, a in slots:
             if (t, a) in kept or used[t] >= caps[t]:
                 continue
             color = team_color.get(t)
             if color not in FACE_RING:
                 continue
-            d = max(6, int(round(D)))
-            tpl = cv2.resize(icons[a], (d, d), interpolation=cv2.INTER_AREA)
-            resp = cv2.matchTemplate(img, tpl, cv2.TM_CCOEFF_NORMED, mask=_circle_mask(d, 0.42))
-            resp = np.nan_to_num(resp, nan=-1.0, posinf=-1.0, neginf=-1.0)
-            if mask is not None and mask.shape[:2] == img.shape[:2]:
-                half = d // 2
-                mr = cv2.resize(mask.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST)
-                sub = mr[half:half + resp.shape[0], half:half + resp.shape[1]]
-                if sub.shape != resp.shape:
-                    continue
-                resp = np.where(sub > 0, resp, -1.0)
+            resp = face_resp(a)
+            if resp is None:
+                continue
             _, mv, _, (bx, by) = cv2.minMaxLoc(resp)
             if mv <= -1.0:
                 continue
             cx, cy = bx + d // 2, by + d // 2
             px = (cx, cy)
-            point = _face_score(img, px, icons[a], D, inner=face_inner)
-            if point < thr + 0.06 or _face_std(img, cx, cy, D) < gray_face_std:
+            point = fscore(px, a)
+            if point < thr + fs_point or _face_std(img, cx, cy, D) < gray_face_std:
                 continue
             if _ring_frac(img, cx, cy, D, FACE_RING[color]) < 0.15:
                 continue
             if any(math.hypot(e["x"] * W - cx, e["y"] * H - cy) < 0.6 * D for e in out):
                 continue
             others = [a2 for a2 in dict.fromkeys(teams.get(t) or []) if a2 in icons and a2 != a]
-            sec = max((_face_score(img, px, icons[a2], D, inner=face_inner) for a2 in others), default=-1.0)
-            if others and point - sec < margin:
+            sec = max((fscore(px, a2) for a2 in others), default=-1.0)
+            if others and point - sec < margin + fs_margin:
                 continue
             used[t] += 1
             out.append({"agent": a, "team": t, "x": px[0] / W, "y": px[1] / H, "score": round(point, 2),
-                        "ring": 0.0, "guess": a, "color": color, "overlap": False,
+                        "ring": 0.0, "guess": a, "color": color, "rim": color, "overlap": False,
                         "margin": round(point - sec, 2), "source": "face"})
             kept.add((t, a))
+
+    # 段階 6（prior_search）：前後のフレームにいたのに見つからないエージェントを、前の位置の周りだけ探す
+    if prior and prior_search:
+        d = max(6, int(round(D)))
+        fmask = _circle_mask(d, 0.42)
+        for t, a in slots:
+            if (t, a) in kept or used[t] >= caps[t]:
+                continue
+            color = team_color.get(t)
+            ps = [e for e in prior if e["team"] == t and e["agent"] == a]
+            if color not in FACE_RING or not ps:
+                continue
+            tpl = cv2.resize(icons[a], (d, d), interpolation=cv2.INTER_AREA)
+            others = [a2 for a2 in dict.fromkeys(teams.get(t) or []) if a2 in icons and a2 != a]
+            best_hit = None
+            for e in ps:
+                ex, ey = e["x"] * W, e["y"] * H
+                x0, x1 = max(0, int(ex - prior_move * W) - d // 2), min(W, int(ex + prior_move * W) + d // 2 + 1)
+                y0, y1 = max(0, int(ey - prior_move * H) - d // 2), min(H, int(ey + prior_move * H) + d // 2 + 1)
+                if x1 - x0 <= d or y1 - y0 <= d:
+                    continue
+                r = cv2.matchTemplate(img[y0:y1, x0:x1], tpl, cv2.TM_CCOEFF_NORMED, mask=fmask)
+                r = np.nan_to_num(r, nan=-1.0, posinf=-1.0, neginf=-1.0)
+                _, mv, _, (bx, by) = cv2.minMaxLoc(r)
+                cx, cy = x0 + bx + d // 2, y0 + by + d // 2
+                if math.hypot(cx / W - e["x"], cy / H - e["y"]) > prior_move:
+                    continue
+                if best_hit is None or mv > best_hit[0]:
+                    best_hit = (mv, cx, cy)
+            if best_hit is None:
+                continue
+            _, cx, cy = best_hit
+            if not _on_floor(mask, cx, cy, W, H):
+                continue
+            point = fscore((cx, cy), a)
+            if point < thr - prior_relax or _face_std(img, cx, cy, D) < gray_face_std:
+                continue
+            if _ring_frac(img, cx, cy, D, FACE_RING[color]) < 0.15:
+                continue
+            if any(math.hypot(o["x"] * W - cx, o["y"] * H - cy) < 0.6 * D for o in out):
+                continue
+            sec = max((fscore((cx, cy), a2) for a2 in others), default=-1.0)
+            if others and point - sec < margin + fs_margin:
+                continue
+            used[t] += 1
+            out.append({"agent": a, "team": t, "x": cx / W, "y": cy / H, "score": round(point, 2),
+                        "ring": 0.0, "guess": a, "color": color, "rim": color, "overlap": False,
+                        "margin": round(point - sec, 2), "source": "prior"})
+            kept.add((t, a))
+
+    if neg_icons and neg_diff is not None and out:
+        out, neg_lost = filter_neg(img, out, neg_icons, D, face_inner=face_inner, gray_w=gray_w, neg_diff=neg_diff)
+        if debug is not None:
+            for e in neg_lost:
+                debug.append({"x": round(e["x"], 4), "y": round(e["y"], 4), "color": e.get("rim"),
+                              "agent": e["agent"], "score": e["score"], "second": None, "second_agent": None,
+                              "faces": {}, "ring": e.get("ring", 0.0), "reason": "neg"})
+
+    if exclusive_dist is not None:
+        out, lost = exclusive(out, exclusive_dist)
+        if debug is not None:
+            for e in lost:
+                debug.append({"x": round(e["x"], 4), "y": round(e["y"], 4), "color": e.get("rim"),
+                              "agent": e["agent"], "score": e["score"], "second": None, "second_agent": None,
+                              "faces": {}, "ring": e.get("ring", 0.0), "reason": "exclusive"})
 
     if debug is not None:
         for i, f in enumerate(cands):
@@ -674,14 +836,107 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
     return out
 
 
+def load_neg_icons(dir_path: Path | str | None = None) -> dict[str, np.ndarray]:
+    """設置物・アビリティ等の負テンプレート（vreplay/neg_icons/*.png）を読み込む。"""
+    d = Path(dir_path) if dir_path is not None else Path(__file__).resolve().parent / "neg_icons"
+    if not d.is_dir():
+        return {}
+    out: dict[str, np.ndarray] = {}
+    for p in sorted(d.glob("*.png")):
+        im = cv2.imdecode(np.fromfile(str(p), np.uint8), cv2.IMREAD_COLOR)
+        if im is not None and im.size:
+            out[p.stem] = im
+    return out
+
+
+def filter_neg(img: np.ndarray, found: list[dict], neg_icons: dict[str, np.ndarray], D: float,
+               face_inner: float = 0.38, gray_w: float = 0.0, neg_diff: float = 0.15) -> tuple[list[dict], list[dict]]:
+    """負テンプレート（設置物アイコン等）に顔の score + neg_diff 以上似ている検出を設置物として落とす。"""
+    if not neg_icons or not found:
+        return found, []
+    H, W = img.shape[:2]
+    kept, lost = [], []
+    for e in found:
+        px = (int(round(float(e["x"]) * W)), int(round(float(e["y"]) * H)))
+        best_neg = max(_face_score(img, px, tpl, D, inner=face_inner, gray_w=gray_w) for tpl in neg_icons.values())
+        if best_neg >= float(e.get("score") or 0.0) + neg_diff:
+            lost.append(e)
+        else:
+            kept.append(e)
+    return kept, lost
+
+
+def exclusive(found: list[dict], dist: float = 0.06) -> tuple[list[dict], list[dict]]:
+    """1 つのアイコンを両チームに割り当てた検出（同じエージェント・別チーム・中心の距離 ≤ dist）を 1 つにする。
+    点の高い方を残し、同点なら先に確定した方（found の前の方）を残す。別エージェント同士の近接は対象にしない
+    （アイコンの重なりは実在するため）。距離は正規化座標の差のユークリッド距離。
+    返り値 (残した検出（元の並び）, 捨てた検出)。found は変えない。"""
+    order = sorted(range(len(found)), key=lambda k: (-float(found[k].get("score") or 0.0), k))
+    keep: list[int] = []
+    lost: list[int] = []
+    for k in order:
+        e = found[k]
+        clash = e.get("agent") and any(
+            found[m].get("agent") == e["agent"] and found[m].get("team") != e.get("team")
+            and math.hypot(float(found[m]["x"]) - float(e["x"]), float(found[m]["y"]) - float(e["y"])) <= dist
+            for m in keep)
+        (lost if clash else keep).append(k)
+    kept = set(keep)
+    return [e for k, e in enumerate(found) if k in kept], [found[k] for k in sorted(lost)]
+
+
+def drop_dead(found: list[dict], t: float, deaths: dict | None, grace: float | None = 1.0) -> list[dict]:
+    """死んだ選手の検出を落とす。deaths: {(team, agent): 死んだ時刻}（t と同じ時刻の軸）。
+    t ≥ 死んだ時刻 + grace の検出は、cap_over で残したものも含めて一切残さない。
+    deaths が無いか grace が None（切）ならそのまま（死亡の情報が無い経路は今までどおり）。"""
+    if not deaths or grace is None:
+        return found
+    out = []
+    for e in found or []:
+        dt = deaths.get((e.get("team"), e.get("agent")))
+        if dt is not None and float(t) >= float(dt) + grace:
+            continue
+        out.append(e)
+    return out
+
+
+def priors_for(times: list[float], results: list[list[dict]], k: int, window: float = 2.5,
+               strong: float = 0.66) -> list[dict]:
+    """k 番目のフレームの prior：同じラウンドの前後 window 秒のほかのフレームで、点が strong 以上の検出
+    （重なり・灰色帯・prior で残したものは使わない。prior で残したものを使うと自分で自分を支えてしまう）。
+    times・results はラウンドを跨がないこと。"""
+    out = []
+    for k2, (t2, found) in enumerate(zip(times, results)):
+        if k2 == k or abs(t2 - times[k]) > window:
+            continue
+        for e in found or []:
+            if (e.get("agent") and e.get("score", 0.0) >= strong and not e.get("overlap")
+                    and e.get("tier") != "gray" and not e.get("prior") and e.get("source") != "prior"):
+                out.append({"team": e["team"], "agent": e["agent"], "x": e["x"], "y": e["y"],
+                            "score": e["score"]})
+    return out
+
+
+def rematch_with_priors(times: list[float], results: list[list[dict]], rematch, window: float = 2.5,
+                        strong: float = 0.66) -> list[list[dict]]:
+    """1 周目の結果（results、times と同じ並び・同じラウンド）から各フレームの prior を作り、prior があるフレームだけ
+    rematch(k, prior) で照合し直す（match に prior を渡す関数）。prior が無いフレームは 1 周目のまま。"""
+    out = []
+    for k in range(len(results)):
+        pr = priors_for(times, results, k, window=window, strong=strong)
+        out.append(rematch(k, pr) if pr else results[k])
+    return out
+
+
 def consensus(frames: list[tuple[float, list[dict]]], max_move: float = 0.08, strong: float = 0.6,
-              alive: dict[int, int] | None = None) -> list[dict]:
+              alive: dict[int, int] | None = None, cap_over: float | None = None) -> list[dict]:
     """節目の前後の何枚か（[(節目からの秒数の差, match の結果)]）から、エージェントごとの位置を 1 つに決める。
     1 枚だけだと、アイコンの重なり・スモーク・観戦画面の切り替えで見落としたり、スキルの印を誤って拾ったりする。
     ほかのフレームでも近く（max_move 以内）に見つかった検出か、顔がよく似た（strong 以上の）検出だけを残し、
     その中で節目にいちばん近い時刻のものを使う。重なり（overlap）の検出は顔がよく似ていても、ほかのフレームの
     近くの検出があるときだけ残す（1 枚だけの高得点は重なりの誤りであることが多い）。灰色帯（tier == "gray"）も
-    同じ扱いにする（1 枚だけでは残さない）。"""
+    同じ扱いにする（1 枚だけでは残さない）。
+    cap_over を渡すと、生存人数を超えた分でも点が cap_over 以上なら残す（match の cap_over と同じ。HUD の読み違い対策）。"""
     by: dict = {}
     for k, (dt, found) in enumerate(sorted(frames, key=lambda x: abs(x[0]))):
         for e in found:
@@ -704,7 +959,10 @@ def consensus(frames: list[tuple[float, list[dict]]], max_move: float = 0.08, st
     for t in (1, 2):
         mine = sorted((e for e in out if e["team"] == t), key=lambda e: -e["score"])
         cap = (alive or {}).get(t)
-        res += mine[:cap] if cap is not None else mine
+        if cap is None:
+            res += mine
+        else:
+            res += mine[:cap] + [e for e in mine[cap:] if cap_over is not None and e["score"] >= cap_over][:5 - cap]
     return res
 
 

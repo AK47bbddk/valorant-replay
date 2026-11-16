@@ -213,6 +213,16 @@ vreplay playbook --sync --team G2 --map Split
   ラベルの下書き、`--thr` などで数値を変えてやり直せる）。重なりの組分けは位置から決める `--group geom` が既定
   （`--group flag` で 1 本目と同じ組分け）。見落としの理由（`misses`）と設定の掃き出し（`--sweep`）・
   背景なしの切り分け（`--no-background`、`ghosts_sheet.jpg`）も出せる。
+  目視で確かめるには `python tools/agents_check_html.py <dump_dir> --out _review/agents_check_<map>.html --team1 <tag> --team2 <tag>`
+  HTML ではミニマップをクリックして検知漏れ（候補の点が無い所のエージェント）を黄色の星で足せる。判定はブラウザに自動保存（同じタイトルで作り直せば前の判定が残る）。書き出し JSON はフレームごとの配列で、各フレームに `missing: [{frame, round, t, team, team_name, agent, x, y}]`（0〜1 の正規化座標）が付く。書き出した JSON は読み込んで戻せる。v3 では点の正誤（○/×）もミニマップの点をクリックして出る判定パネルで付け（重なった点は Tab や再クリックで切り替え、点ごとのメモも可）、判定済みの点は ○ 青い輪・× 灰色で小さく描く。フレームごと・全体の「判定済み n / 全点 m」を出し、表は「表で見る」に折りたたむ。書き出しの points には点メモ `memo` が増えただけで、`check` などは v2 と同じ（v1/v2 の JSON も読み込める）。
+  で、今のコード（`config/default.yaml` の `tactics.agent_match`）で照合をやり直した結果を、番号つきの点・採用/棄却と理由・
+  両チームの構成とともに 1 枚の HTML（画像埋め込み）に書き出す（○/× の目視結果は JSON で保存できる）。
+  v4 のブラインド配置モード `python tools/agents_check_html.py --blind <dump_dir> [<dump_dir2> ...] --out _review/agents_check_blind.html --group "<試合・マップ>|<tag1>|<tag2>" ...`
+  は、システムの点を出さない素のミニマップに目視でエージェントを置き（クリック → チーム・エージェント。印のクリックで変更・削除、Ctrl+Z で戻す、フレームごとに「完了」）、
+  「結果を見る」を押したフレームだけ、配置と採用点をアイコン n 個（既定 1）以内で突き合わせた 一致（緑）・見落とし（黄。近くの棄却候補と理由を添える）・
+  誤検出候補＝システムだけ（赤の破線）・取り違え＝位置は合うがエージェント／チーム違い（紫）を重ねる。「全体の集計」で配置・採用・一致・見落とし・誤検出・取り違えと
+  precision（一致/採用）・recall（一致/配置）を出す。照合はページ内の JS（材料の採用点・棄却点は生成時に埋め込む）。ダンプは試合・マップごとに複数並べられる。
+  書き出し JSON は `format: "agents_blind_v1"` で、`frames[].placed`（team, team_name, agent, x, y）・`frames[].result`（match / miss / false_pos / swap）・`counts`・`summary`（all・by_group）。保存キーは `"agents_blind_" + タイトル`。
   2 本目（agents-recall）で、見落としを減らすスイッチを `tactics.agent_match` に足した（すべて既定は切で、
   全部切なら 1 本目と出力が 1 つも変わらない）：`filled_rescue`（顔そのものが縁の色を多く含むエージェントは
   filled で捨てない。救った検出に `"rescued": "filled"`）、`margin_exclusive`（同じフレームで残した
@@ -234,6 +244,37 @@ vreplay playbook --sync --team G2 --map Split
   重なり（crowded）で条件から外れ、効果が無かった（ghost +3 のみ）。margin_pair は sim の実測が最大でも
   0.53 で補正がほぼ効かず、数字は変わらなかった。bg_mode flag は単独・組のどちらでも悪化した。
   残った見落とし（最良の組でも 88 件）は thr 25・weak 23・color 9・bg 8・nms 8 が中心。
+  3 本目（agents-recall3、2026-11-14）：青木のブラインド配置（同じ Sunset の 40 フレーム・294 件）を正解にして
+  `python tools/agents_blind_eval.py <dump_dir> <blind.json> [--config config/default.yaml] [--set key=value ...] [--json out.json]`
+  で数える（agents_eval の replay でやり直し、同じチーム・同じエージェントで正規化座標の距離 0.03 以内を近い順に貪欲に組んだものが一致。
+  採用点の残りが FP、配置の残りが FN。FN は swap / rejected:<理由>（近くの棄却候補が同じエージェント）/ near:<理由>（別エージェント）/
+  no-candidate に分ける）。分かったこと：HUD の生存人数の読みが 0/0・2/0 などに外れるフレームがあり（40 枚中 7 枚）、
+  上限 0 のチームは照合先から外れて「候補が出ない」見落としになっていた。そこで `cap_over`（生存人数を超えても顔の点が
+  これ以上なら残す。`"over_cap": True`。読みが 0 のチームも照合先に入れる。consensus も同じ値で上限を超えて残す）と
+  `gray_crowded`（灰色帯を crowded の候補にも使う。cand_per_color 16 ではほとんどの候補が crowded になり、灰色帯が効かなかった）
+  を足し、既定を filled_rescue 0.62・tpl_fill_min 0.30・margin_exclusive・cand_per_color 16・gray_floor 0.45・gray_margin 0.15・
+  gray_ring 0.50・gray_crowded・cap_over 0.62 にした。P 97.1→98.0%（133/137→197/201）・R 45.2→67.0%（→197/294）・
+  照合時間 約 +46%。face_search を足すと P 98.2%・R 74.1% まで上がるが時間が約 1.9 倍（エージェントごとに顔の応答を
+  使い回すようにしたうえで）。当初は既定を切にしたが、同日に青木の決定で face_search も既定で入にした（P 98.2%・R 74.1%・FP 4、時間 約 1.9 倍は了承済み）。gray_margin を 0.12 に下げると FP が 4→8 に増えるので 0.15。
+  4 本目（agents-recall4、2026-11-14）：Argon の助言（4 手）を 3 セット（Sunset 40 枚・294 件／他 5 マップ 30 枚・243 件／
+  Skye・Brimstone 編 12 枚・87 件）で 1 手ずつ数え、効いたものだけ既定にした。足したスイッチ：`fs_point` / `fs_margin`
+  （face_search で要る点 thr+fs_point・差 margin+fs_margin。既定 0.06 / 0 で今までどおり）、`gray_w`（顔の点にグレースケールの
+  CCOEFF をこの重みで混ぜる）、`self_norm`（テンプレートを大きさ D に縮めたものとそれを少しぼかしたものの似ている度合い c_a を
+  `_self_score` で測り、点に `self_norm·(照合先の c の平均 − c_a)` を足す。縮小に弱い Astra・Sova などを底上げ）、
+  `prior` / `prior_bonus` / `prior_move` / `prior_relax` / `prior_search`（前後のフレームで確かに見つかった検出を prior にし、
+  その (チーム, エージェント) の prior_move 以内の候補の点に bonus を足してから割り当て・しきい値を見る。`"prior": True`、
+  出す点は足す前。prior_search なら、それでも見つからないエージェントを前の位置の周りだけ thr − relax で探す。`"source": "prior"`）。
+  時系列は `agents.priors_for` / `rematch_with_priors`（ラウンドを跨がない、前後 window 秒・点 strong 以上・重なり／灰色帯／prior 由来は
+  使わない）と config の `tactics.agent_temporal`（既定 enabled: false）で、節目の前後の数枚（_agent_positions）と追跡（_agent_tracks）の
+  両方に入る。既定は thr 0.62・face_inner 0.38・fs_point 0・fs_margin 0.06・gray_w 0.2・self_norm 2.0：
+  Sunset P 98.2→99.1%・R 74.1→78.9%（FP 4→2）、他 5 マップ P 91.8→97.0%・R 64.2→78.6%（FP 14→6）、Skye・Brimstone 編
+  P 82.8→92.5%・R 60.9→71.3%（FP 11→5）、照合時間 約 +10〜19%。効かなかった・悪化した手（コードは戻した）：割り当ての段差ペナルティ・
+  再割り当て（ほぼ動かず、FP が 1 増える）、gray_ring を 0.22〜0.28 に下げる（Sunset の FP 4→10〜18）、透過部を暗い灰色 45 で埋める
+  （R が 10〜15pt 落ちる）、縮小前のぼかし（Sunset の FP 4→9）、filled の半径 0.22D・std 併用・filled_rescue 0.58（新しい既定では
+  filled の見落としが 0 で変化なし）、マージン連動の連続しきい値・チーム内 Z-score の救済（FP は大きい差を持つものが多く、
+  Sunset の FP 2→9〜32）、候補全体の中央値での列の正規化（self_norm と組むと悪化）。時系列（第 4 手）は単発の評価では prior が
+  空で数字が変わらず、他 5 マップ＋Skye・Brimstone 編の GIF の前後 ±2 コマ（≒ ±2 秒）で数えると R +0.9〜1.5pt・FP +1〜2
+  （同じ場所に出続けるゴーストも自分を支えてしまう）で、照合が約 2 倍になるため既定は切。
 - **公式のマップ画像で合わせる**（`minimap.register_art`）：valorant-api の displayIcon（透過つき、コールアウトと同じ 0..1 の座標）の
   床の縁の点を、放送のミニマップの白い縁の線の距離画像に重ね（chamfer）、回転・倍率・位置を粗→細で詰める（初期値はコールアウトと
   床で合わせた結果か、90 度ごとの向き＋縁の線の外接矩形）。縁の点の 50% 以上が 2px 以内に乗れば成功で、床の 2 値画像は公式の画像を
@@ -307,9 +348,32 @@ vreplay playbook --sync --team G2 --map Split
 考え方の元はコーチの Obsidian（Valo-wiki：戦術のじゃんけん構造・ターン・チョークポイントの守り方・エリア評価・1-X の陣形）。
 
 - **追跡（`vreplay/track.py`）**：ミニマップのアイコン照合を 6 つの節目だけでなく開始から `tactics.track_every`（既定 5）秒ごとに行い、
-  エージェントごとに「前の点から走って届く距離（両スポーン間の距離 × 0.10/秒＋揺れ。テレポート・ダッシュのあるエージェントは広げる）」の点だけを
-  つないだ、似ている度合いの合計が最大の鎖（動的計画法）を選び、5 秒ごとに補間する（12 秒より空いた区間は補間しない）。
-  `rt["tracks"]`＝`{チーム: {エージェント: [[e, x, y, conf, det|interp, zone, callout]]}}`、
+  エージェントごとに「走る（`track.RUN`。Omen/Yoru/Chamber は 1.0、ダッシュ持ちは倍率あり）」と「跳ぶ（`track.JUMP` の規則・コスト C・1 ラウンド 2 回まで、`tactics.jump` で上書き可）」の 2 種の遷移で、似ている度合いの合計が最大の鎖（動的計画法）を選び、5 秒ごとに補間する（12 秒より空いた区間は補間しない）。
+  重なり（`overlap` / `tier=gray` / 味方近接）は −0.10 ずつ割り引き、同時刻の候補どうしはつながない。採用した跳躍の着地は src を `"tp"` とし `rt["tracks_jumps"]` に記録する。
+  格子に並べるときは、鎖の隣の 2 点がその間隔で「走って」届かない跳躍の区間は直線で滑らせず、
+  前の点の位置のまま次の点の時刻で切り替える。並べたあと、前後の点は走って届く距離なのにその点だけが前後の両方から走れる距離の 2 倍以上
+  離れている孤立した外れ値は、前後の中点に置き換える（src は interp、置き換えた点は `rt["tracks_fixed"]`＝`{"チーム:エージェント": [e]}`）。
+  **壁（`vreplay/walls.py`、`tactics.track_walls` 既定 true）**：公式のマップ画像で位置合わせできたときは、その床のマスク（放送のミニマップに写したもの）を
+  壁の形にする。「走る」遷移は直線が壁に塞がれる（床から出てまた床に戻る）ときだけ床の上を回り込む道のり（2 px の粗い格子の八角形の距離）で
+  届くかを判定し、「跳ぶ」遷移（テレポート・ウルト）は従来どおり直線（壁越えは正規の動き）。補間は床の上のぴんと張った道に沿わせ、
+  道が無い・道のりが走って届かないときは前の点のまま。鎖の点に寄せるのは 0.5 秒以内（壁なしは 1 秒）。外れ値の置き換えも道の中ほど。
+  放送の色から作った床（公式画像で合わなかったとき）は穴・島があるので使わない。
+  `pipeline.py` はキルとウルトの確定後に `tactics.analyze_video` を呼び、ラウンド入力に `deaths`（`[{"team", "agent", "t"}]`）と `ults`（`[{"team", "agent", "t"}]`、ラウンド内の秒）を渡す。死んだ時刻以降の検出は鎖に入れず軌跡もそこで切り、ウルトの使用時刻は Omen の全域跳躍の窓 `[T−1, T+10]` に使う。
+  **track_fix4**：死亡時刻はキルフィード（`rounds.kills`）由来の `deaths` だけを使う（HUD の生存人数は照合の上限の代わりとしてだけ）。
+  `_agent_tracks` は照合の結果から、死んだ時刻 + `tactics.track.death_grace`（既定 1.0 秒）以降のその選手の検出を cap_over のものも含めて落とす（`agents.drop_dead`。
+  `match_dump`・prior にも残らない。死亡の情報が無いラウンドは従来どおり）。照合の最後に `agent_match.exclusive_dist`（既定 0.06）で、同じエージェント・別チームの
+  2 件が近いときは 1 つのアイコンの二重割当てとみて点の高い方だけ残す（`agents.exclusive`、捨てた方は debug の理由 `exclusive`。別エージェント同士の近接は対象外）。
+  追跡では、同じエージェントの前後の検出から `tactics.track.lone_gap`（4 秒）以上離れた孤立した検出は、点が `lone_score`（0.70）未満なら鎖に入れず、
+  入れたときも保持を `lone_hold`（1.5 秒）までにして補間（滑り）の端にしない（`track.drop_lone_weak`・`lone_points`）。
+  孤立の判定（1 点・`lone_span` のクラスタの連結・`lone_points`）には、`track.build` の中で実効値 `track.effective_lone_gap`
+  ＝ max(`lone_gap`, 格子の間隔 `every`（本番は `tactics.track_every`、未指定なら 5 秒）+ 1 秒）を使う（4 秒は約 1 秒格子の前提なので、
+  5 秒格子では 6 秒に底上げして通常の格子の間隔を孤立とみない。config の値は変えない）。
+  `tactics.match_dump`（既定 0。1 で有効）なら、追跡に使ったフレームごとの照合結果（ring・margin・overlap・元の縁の色 `rim`＝warm/cool/yellow を含むそのまま）を
+  `_tactics/agents_dump/match_dump.json`（`{"frames": [{"round", "t", "found"}]}`）に書き出す。
+  軌跡の「あり得なさ」の指標（不可能な移動・往復・ジグザグ・道のりの上限・重複・ミラーの跳躍・開始時の陣地違反＝`area_ranks` 基準・接敵前の越境・死亡後の点・
+  3 人以上が同時に跳んだフレーム・壁越え区間＝直線が壁に塞がれ回り込むと 1.5 倍かつ 0.02 を超えて遠い隣の 2 点（跳躍の着地は除く、壁の形が無ければ None））と
+  生存時間の被覆率は `vreplay/track_metrics.py`（文脈が無い項目は None）。
+  `rt["tracks"]`＝`{チーム: {エージェント: [[e, x, y, conf, det|interp|tp, zone, callout]]}}`、
   `rt["snaps"]`＝開始（1:40）から `tactics.snap_every`（既定 10）秒ごとのチーム別ゾーン・エリアの人数（3 人以上追跡できたチームはアイコン、無ければ点）。
   ミニマップの JPEG 品質は `video.minimap_quality`（既定 95。以前 80 で 1080p の直径 24px ほどの顔がつぶれていた）。取得はもともと 1080p ちょうど。
 - **知識ベース（`vreplay/kb.py`・`config/kb/`）**：`concepts.yaml`（じゃんけんの 4 つの手・壊す/返す/殺す・エントリーの種類・ターン・1-X とトレード・バリューとブラフ）、

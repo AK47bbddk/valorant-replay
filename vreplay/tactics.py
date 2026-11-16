@@ -667,7 +667,9 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
             _agent_tracks(cfg, keep_trk, keep, agent_teams, ct, mask, reg, placed, aspect, background,
                           round_tac, log, icons=icons, icon_frac=icon_frac, alive_fn=alive_fn,
                           every=track_every or 5.0, cache=mcache, threads=int(tcfg.get("track_threads") or 4),
-                          out_dir=out_dir)
+                          out_dir=out_dir, deaths_by_n={int(r["n"]): _round_deaths(r) for r in rlist},
+                          ults_by_n={int(r["n"]): _round_ults(r) for r in rlist},
+                          walls=_track_walls(tcfg, mask, art_crop is not None, log))
         except Exception as e:                       # 追跡に失敗しても、ほかの結果は出す
             if log:
                 log(f"    エージェントの追跡はスキップしました（{e}）")
@@ -1157,8 +1159,48 @@ def _agent_match_params(cfg: dict) -> dict:
     keys = ("thr", "margin", "crowded_margin", "min_face_std",
             "filled_rescue", "tpl_fill_min", "margin_exclusive", "margin_pair",
             "gray_floor", "gray_margin", "gray_face_std", "gray_ring", "face_inner",
-            "bg_mode", "cand_nms", "cand_per_color", "face_search")
+            "bg_mode", "cand_nms", "cand_per_color", "face_search", "cap_over", "gray_crowded",
+            "fs_point", "fs_margin", "gray_w", "self_norm", "exclusive_dist", "neg_diff")
     return {k: am[k] for k in keys if k in am}
+
+
+def _agent_temporal(cfg: dict) -> dict | None:
+    """config の tactics.agent_temporal（照合の前に前後のフレームの検出を prior として使う）。切なら None。"""
+    tp = (cfg.get("tactics") or {}).get("agent_temporal") or {}
+    if not tp.get("enabled"):
+        return None
+    return {"window": float(tp.get("window", 2.5)), "strong": float(tp.get("strong", 0.66)),
+            "match": {"prior_bonus": float(tp.get("bonus", 0.08)), "prior_move": float(tp.get("max_move", 0.08)),
+                      "prior_relax": float(tp.get("relax", 0.06)), "prior_search": bool(tp.get("search", True))}}
+
+
+def _track_params(cfg: dict) -> dict:
+    """config の tactics.track（追跡の細かい値）。無い値は既定。
+    death_grace: 死んだ時刻からこの秒数以降の検出は使わない。
+    lone_gap / lone_score / lone_hold: 同じエージェントの前後の検出から lone_gap 秒以上離れた孤立した検出は、
+    点が lone_score 未満なら軌跡に使わず、使うときも lone_hold 秒までしか保持せず、滑り（補間）の端にしない。"""
+    tk = (cfg.get("tactics") or {}).get("track") or {}
+
+    def num(key, default):
+        v = tk.get(key, default)
+        return None if v is None else float(v)
+    return {"death_grace": num("death_grace", 1.0), "lone_gap": num("lone_gap", None),
+            "lone_score": num("lone_score", None), "lone_hold": num("lone_hold", None),
+            "lone_span": num("lone_span", None), "early_enemy_sec": num("early_enemy_sec", None)}
+
+
+def _spawns_of(placed: list[dict] | None) -> dict[str, tuple[float, float]]:
+    """placed から攻撃側・防衛側スポーンの座標 {"attack": (x, y), "defense": (x, y)} を取り出す。"""
+    sp: dict[str, tuple[float, float]] = {}
+    for c in placed or []:
+        if str(c.get("name") or "").lower() != "spawn":
+            continue
+        low = str(c.get("super") or "").lower()
+        if "attacker" in low:
+            sp["attack"] = (float(c["x"]), float(c["y"]))
+        elif "defender" in low:
+            sp["defense"] = (float(c["x"]), float(c["y"]))
+    return sp
 
 
 def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed, aspect, T, background,
@@ -1172,6 +1214,8 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
         return None
     icon_frac = icon_frac or ICON_FRAC
     am = _agent_match_params(cfg)
+    neg_icons = AG.load_neg_icons() if am.get("neg_diff") is not None else None
+    tp = _agent_temporal(cfg)
     ct_fn = color_team if callable(color_team) else (lambda n_, _c=color_team: _c)
     base = board_base(background, mask, art=art)
     out = {}
@@ -1191,17 +1235,26 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
             except Exception:
                 alive = None
         per = []
+
+        def mt(mm, **kw):
+            return AG.match(mm, icons, agent_teams, color_team_n, icon_frac=icon_frac,
+                            mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
+                            alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None,
+                            neg_icons=neg_icons, **am, **kw)
         for d_, t_, mm in frames:
-            f_ = AG.match(mm, icons, agent_teams, color_team_n, icon_frac=icon_frac,
-                          mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
-                          alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None,
-                          **am)
-            per.append((t_ - frames[0][1] + d_, f_))
+            per.append((t_ - frames[0][1] + d_, mt(mm)))
+        if tp is not None and len(per) > 1:
+            # 節目の前後の何枚かで、ほかのフレームで確かに見つかった検出を prior にして照合し直す
+            res2 = AG.rematch_with_priors([x[0] for x in per], [x[1] for x in per],
+                                          lambda k, pr: mt(frames[k][2], prior=pr, **tp["match"]),
+                                          window=tp["window"], strong=tp["strong"])
+            per = [(x[0], f2) for x, f2 in zip(per, res2)]
+        for (_d, _t, mm), (_dt, f_) in zip(frames, per):
             if cache is not None:
                 cache[id(mm)] = f_
             if f_ and (first is None or len(f_) > len(first[1])):
                 first = (mm, f_)
-        found = AG.consensus(per, alive=alive) if len(per) > 1 else per[0][1]
+        found = AG.consensus(per, alive=alive, cap_over=am.get("cap_over")) if len(per) > 1 else per[0][1]
         n_try += 1
         n_frames += len(frames)
         n_found += len(found)
@@ -1216,7 +1269,8 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
             ents.append({"agent": f["agent"], "team": f["team"], "x": round(f["x"], 4), "y": round(f["y"], 4),
                          "zone": zone, "callout": (f"{zone} {c['name']}" if c and zone in SITE_SUPERS else
                                                     (c["name"] if c else "?")),
-                         "score": round(f["score"], 2), "color": team_color.get(f["team"])})
+                         "score": round(f["score"], 2), "color": team_color.get(f["team"]),
+                         "rim": f.get("rim")})
         out.setdefault(str(n), {})[label] = ents
         rt = round_tac.get(n)
         if rt is not None and out_dir and label == "1:40":     # 配置図はラウンド開始時だけ
@@ -1328,11 +1382,12 @@ def _agents_dump(cfg, todo, out_dir, agent_teams, icons, icon_frac, params, ct_f
             except Exception:
                 alive = None
         dbg: list = []
+        neg_icons = AG.load_neg_icons() if params.get("neg_diff") is not None else None
         found = AG.match(mm, icons, agent_teams, color_team_n, icon_frac=icon_frac,
                          mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
                          alive=alive,
                          background=background if background is not None and background.shape[:2] == mm.shape[:2] else None,
-                         debug=dbg, **params)
+                         debug=dbg, neg_icons=neg_icons, **params)
         sec = t - starts.get(n, t)
         fname = f"r{n:02d}_t{max(0, int(round(sec))):03d}.png"
         cv2.imwrite(str(d / fname), mm)
@@ -1356,11 +1411,69 @@ def _agents_dump(cfg, todo, out_dir, agent_teams, icons, icon_frac, params, ct_f
             f"thr {stat['thr']} / cap {stat['cap']}）")
 
 
+def _match_dump(out_dir, res: list, starts: dict, log=None) -> Path:
+    """追跡に使ったフレームごとの agents.match の結果（ring・margin・overlap・rim を含むそのまま）を
+    <out_dir>/_tactics/agents_dump/match_dump.json に書く。形は {"frames": [{"round", "t"（開始からの秒）, "found"}]}。"""
+    d = Path(out_dir) / "_tactics" / "agents_dump"
+    d.mkdir(parents=True, exist_ok=True)
+    frames = [{"round": int(n), "t": round(float(t) - starts.get(n, float(t)), 2), "found": found or []}
+              for n, (t, found) in sorted(res, key=lambda x: (x[0], x[1][0]))]
+    p = d / "match_dump.json"
+    p.write_text(json.dumps({"frames": frames}, ensure_ascii=False, default=float), "utf-8")
+    if log:
+        log(f"    照合の生の結果：{len(frames)} フレームを {p.name} に書き出しました")
+    return p
+
+
+def _round_deaths(r: dict) -> dict | None:
+    """ラウンドの入力の "deaths"（[{"team": 1|2, "agent", "t"（動画の秒）}]）を {(team, agent): 時刻} に。"""
+    out = {}
+    for e in r.get("deaths") or []:
+        try:
+            key, t = (int(e["team"]), str(e["agent"])), float(e["t"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if key[0] in (1, 2) and key[1]:
+            out[key] = min(t, out.get(key, t))
+    return out or None
+
+
+def _round_ults(r: dict) -> dict | None:
+    """ラウンドの入力の "ults"（[{"team": 1|2, "agent", "t"（ラウンド内の秒）}]）を {(team, agent): [時刻]} に。"""
+    out: dict = {}
+    for e in r.get("ults") or []:
+        try:
+            key, t = (int(e["team"]), str(e["agent"])), float(e["t"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if key[0] in (1, 2) and key[1]:
+            out.setdefault(key, []).append(t)
+    return out or None
+
+
+def _track_walls(tcfg: dict, mask, art_ok: bool, log=None):
+    """追跡に使う壁の形（vreplay.walls.Walls）。公式のマップ画像で位置合わせできた床のマスクがあり、
+    tactics.track_walls が偽でないときだけ（放送の色から作った床は穴・島があり、偽の壁になるので使わない）。"""
+    if not art_ok or mask is None or not tcfg.get("track_walls", True):
+        return None
+    from . import walls as WL
+    try:
+        return WL.Walls(mask)
+    except ValueError as e:
+        if log:
+            log(f"    壁の形を作れませんでした（{e}）。追跡は壁なしで続けます")
+        return None
+
+
 def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, placed, aspect, background,
                   round_tac, log, icons=None, icon_frac=None, alive_fn=None, every: float = 5.0,
-                  cache: dict | None = None, threads: int = 4, out_dir=None):
+                  cache: dict | None = None, threads: int = 4, out_dir=None, deaths_by_n: dict | None = None,
+                  ults_by_n: dict | None = None, walls=None):
     """track_every 秒ごと（＋節目の前後）のミニマップでアイコンを照合し、走れる速さの制約で
-    エージェントごとの軌跡にする（vreplay.track）。rt["tracks"] = {"1": {"Jett": [[e, x, y, conf, src, zone, callout]]}}"""
+    エージェントごとの軌跡にする（vreplay.track）。rt["tracks"] = {"1": {"Jett": [[e, x, y, conf, src, zone, callout]]}}
+    deaths_by_n: {ラウンド: {(team, agent): 死んだ時刻}}。あればその時刻で軌跡を切る（死んだ後の検出は使わない）。
+    ults_by_n: {ラウンド: {(team, agent): [ウルトの使用時刻（ラウンド内の秒）]}}。Omen のウルトの窓に使う。
+    walls: 壁の形（_track_walls）。あれば走る遷移・補間が壁を通り抜けない。"""
     from . import agents as AG
     from . import minimap as MM
     from . import track as TR
@@ -1370,7 +1483,9 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
         return
     icon_frac = icon_frac or ICON_FRAC
     am = _agent_match_params(cfg)
+    neg_icons = AG.load_neg_icons() if am.get("neg_diff") is not None else None
     scale = spawn_scale(placed, aspect)
+    spawns = _spawns_of(placed)
     frames_by_n: dict[int, list] = {}
     for (n, _g), (_d, t, mm) in keep_trk.items():
         frames_by_n.setdefault(n, []).append((t, mm))
@@ -1382,10 +1497,14 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
 
     ct_fn = color_team if callable(color_team) else (lambda n_, _c=color_team: _c)
 
-    def one(item, n=0):
+    tp = _agent_temporal(cfg)
+    tk = _track_params(cfg)
+
+    def one(item, n=0, prior=None):
         t, mm = item
-        if id(mm) in cache:
-            return t, cache[id(mm)]
+        deaths_n = (deaths_by_n or {}).get(n)
+        if prior is None and id(mm) in cache:
+            return t, AG.drop_dead(cache[id(mm)], t, deaths_n, tk["death_grace"])
         alive = None
         if alive_fn is not None:
             try:
@@ -1393,10 +1512,12 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
                 alive = {1: a1, 2: a2} if a1 is not None and a2 is not None else None
             except Exception:
                 alive = None
-        return t, AG.match(mm, icons, agent_teams, ct_fn(n), icon_frac=icon_frac,
-                           mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
-                           alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None,
-                           **am)
+        found = AG.match(mm, icons, agent_teams, ct_fn(n), icon_frac=icon_frac,
+                         mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
+                         alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None,
+                         neg_icons=neg_icons, **am, **({"prior": prior, **tp["match"]} if prior else {}))
+        # 死んだ選手（キルの時刻 + death_grace 秒以降）の検出は、cap_over で残したものも含めて使わない
+        return t, AG.drop_dead(found, t, deaths_n, tk["death_grace"])
 
     # 照合（1 枚 0.1〜0.2 秒）は OpenCV が GIL を外すので、スレッドで並べる
     from concurrent.futures import ThreadPoolExecutor
@@ -1406,6 +1527,19 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
                      background, {n: float(rt["start"]) for n, rt in round_tac.items()}, log)
     with ThreadPoolExecutor(max_workers=max(1, threads), thread_name_prefix="素材-追跡") as ex:
         res = list(ex.map(lambda x: (x[0], one(x[1], x[0])), todo))
+        if tp is not None:
+            # 時系列の照合前の統合：同じラウンドの前後 window 秒で確かに見つかった検出を prior にして照合し直す
+            # （ラウンドは跨がない。prior が無いフレームは 1 周目のまま）
+            pri = [None] * len(todo)
+            for n in {n for n, _ in todo}:
+                ks = [k for k, (n2, _) in enumerate(todo) if n2 == n]
+                times = [res[k][1][0] for k in ks]
+                found = [res[k][1][1] for k in ks]
+                for li, k in enumerate(ks):
+                    pri[k] = AG.priors_for(times, found, li, window=tp["window"], strong=tp["strong"]) or None
+            redo = [k for k in range(len(todo)) if pri[k]]
+            for k, r2 in zip(redo, ex.map(lambda k: one(todo[k][1], todo[k][0], prior=pri[k]), redo)):
+                res[k] = (todo[k][0], r2)
     found_by_n: dict[int, list] = {}
     for n, tf in res:
         found_by_n.setdefault(n, []).append(tf)
@@ -1414,7 +1548,19 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
         if rt is None:
             continue
         n_det += sum(len(f_) for _, f_ in found)
-        trk = TR.build(found, float(rt["start"]), float(rt["end"]), scale, every=every, aspect=aspect)
+        start = float(rt["start"])
+        ults_r = {k: [start + x for x in xs] for k, xs in ((ults_by_n or {}).get(n) or {}).items()} or None
+        rules = TR.jump_rules((cfg.get("tactics") or {}).get("jump"))
+        fixed: dict = {}
+        jumps: dict = {}
+        side1 = _canon(rt.get("side1"))
+        atk_team = 1 if side1 == ATTACK else 2 if side1 == DEFENSE else None
+        trk = TR.build(found, start, float(rt["end"]), scale, every=every, aspect=aspect,
+                       deaths=(deaths_by_n or {}).get(n), fixed=fixed, ults=ults_r, jumps=jumps,
+                       icon_frac=icon_frac, rules=rules, walls=walls,
+                       lone_gap=tk["lone_gap"], lone_score=tk["lone_score"], lone_hold=tk["lone_hold"],
+                       lone_span=tk["lone_span"], early_enemy_sec=tk["early_enemy_sec"],
+                       spawns=spawns, attack_team=atk_team)
         out: dict = {}
         for (team, agent), pts in trk.items():
             lst = []
@@ -1430,6 +1576,12 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
             out.setdefault(str(team), {})[agent] = lst
             n_pts += len(lst)
         rt["tracks"] = out
+        if fixed:                                   # 孤立した外れ値として前後の中点に置き換えた点（開始からの秒）
+            rt["tracks_fixed"] = {f"{tm}:{ag}": es for (tm, ag), es in sorted(fixed.items())}
+        if jumps:                                   # 採用した跳躍（開始からの秒）
+            rt["tracks_jumps"] = {f"{tm}:{ag}": js for (tm, ag), js in sorted(jumps.items())}
+    if out_dir and int((cfg.get("tactics") or {}).get("match_dump") or 0) >= 1:
+        _match_dump(out_dir, res, {n: float(rt["start"]) for n, rt in round_tac.items()}, log)
     if log:
         n_r = sum(1 for rt in round_tac.values() if rt.get("tracks"))
         log(f"    エージェントの追跡：{n_r} ラウンド・軌跡の点 {n_pts}（照合で見つかった {n_det} 個から、"

@@ -100,33 +100,65 @@ tactics:
   # 1:40 から何秒ごとの配置（ゾーン・エリアの人数）を残すか。プレイブックの「手」の判定と時間の並びに使う
   snap_every: 10
   track_threads: 4     # 追跡の照合を何本のスレッドで並べるか
+  # 追跡で壁（公式のマップ画像の床の外）を通り抜けない：走る遷移は回り込む道のりで測り、補間は床の上の道に沿わせる。
+  # 公式のマップ画像で位置合わせできたときだけ効く（テレポート・ウルトの跳躍は壁を越えてよい）
+  track_walls: true
+  # 追跡の細かい値（track_fix4）。null でそれぞれ切（従来どおり）
+  track:
+    death_grace: 1.0         # キルの時刻 + この秒数以降の、その選手の検出は使わない（cap_over で残したものも。死亡の情報が無ければ効かない）
+    lone_gap: 4.0            # 同じエージェントの前後の検出からこの秒数以上離れた検出を「孤立」とみる（実行時は max(この値, track_every + 1.0)）
+    lone_score: 0.70         # 点がこれ未満の孤立した検出は軌跡に使わない
+    lone_hold: 1.5           # 孤立した点の保持はこの秒数まで。前後の点との補間（滑り）の端にしない
+    lone_span: 8.0           # 孤立した短いクラスタ（この秒数以下で lone_score 以上の点が 0 件）も軌跡に使わない
+    early_enemy_sec: 15.0    # 開幕この秒数以内にウルト記録無しで自陣より敵側スポーンに著しく近い弱い検出は落とす
   # エージェントの照合の厳しさ。数字は tools/agents_eval.py で実データを数えてから直す
   agent_match:
-    thr: 0.58
+    thr: 0.62                # 2026-11-14 recall4：face_inner 0.38・self_norm で点が全体に上がるぶん 0.58→0.62
     margin: 0.06
     crowded_margin: 0.10
     min_face_std: 12
-    # 2 本目（agents-recall）。null / false / 今までの値 なら 1 本目と同じ動き
-    # 2026-11-12 計測（1 本目と同じ dump・ラベル 276、geom）: 既定は全部切のままにする。条件（geom の precision が
-    # all/overlap/clear すべて 95% 以上・wrong_id+ghost 6 以下・時間増 30% 以内）を満たす組が無かったため。
-    # いちばん近い組は filled_rescue 0.62＋tpl_fill_min 0.30＋margin_exclusive＋cand_per_color 16 で
-    # P 98.8/92.0/100・R 60.5（overlap の precision が 3.0pt、recall が目安 70% に 9.5pt 不足）。
-    # face_search を足すと R 68.1 まで上がるが、時間が約 1.4〜1.8 倍になり条件を超える。詳細は PROMPT.md
-    filled_rescue: null      # 例 0.66。顔そのものが縁と同じ色を含むエージェント（Chamber など）を filled で捨てない
-    tpl_fill_min: 0.35
-    margin_exclusive: false  # 同じフレームで残したエージェントを 2 番目の相手から外す
+    # 2 本目（agents-recall）のスイッチ。null / false / 今までの値 なら 1 本目と同じ動き（2026-11-12 は全部切だった）
+    # 2026-11-14 3 本目（agents-recall3）：ブラインド配置の正解（Sunset 40 フレーム・294 件）で数え直し、下の組を既定にした
+    # （tools/agents_blind_eval.py。P 97.1→98.0%・R 45.2→67.0%・時間 約 +46%）。
+    # 2026-11-14 face_search も既定で入にした（青木の決定）：P 98.2%・R 74.1%・FP 4、照合時間は約 1.9 倍。詳細は PROMPT.md
+    filled_rescue: 0.62      # 顔そのものが縁と同じ色を含むエージェント（Chamber など）を filled で捨てない（null で切）
+    tpl_fill_min: 0.30
+    margin_exclusive: true   # 同じフレームで残したエージェントを 2 番目の相手から外す
     margin_pair: false       # 似た 2 人ほど必要な差を小さくする
-    gray_floor: null         # 例 0.52。thr 未満でも条件付きで残す下限
-    gray_margin: 0.12
+    gray_floor: 0.45         # thr 未満でも条件付きで残す下限（null で切）
+    gray_margin: 0.15
     gray_face_std: 18
-    gray_ring: 0.30
-    face_inner: 0.42
+    gray_ring: 0.50
+    gray_crowded: true       # 灰色帯を重なり（crowded）の候補にも使う
+    face_inner: 0.38         # recall4：0.42→0.38（外周のチーム色の輪のにじみを顔の照合に入れない）
     bg_mode: subtract        # subtract | flag
     cand_nms: 0.8
-    cand_per_color: 12
-    face_search: false
+    cand_per_color: 16
+    face_search: true
+    fs_point: 0.0            # recall4：face_search の要る点を thr+0.06 → thr に下げ、代わりに差を margin+0.06 に上げる
+    fs_margin: 0.06
+    gray_w: 0.2              # recall4：顔の点にグレースケールの CCOEFF を 2 割混ぜる（照合時間 約 +10〜19%）
+    self_norm: 2.0           # recall4：縮小に弱いテンプレート（Astra・Sova など）の点を c_a の差で底上げ（null で切）
+    cap_over: 0.62           # HUD の生存人数を超えても、顔の点がこれ以上なら残す（読み違いの 0/0・2/0 対策。null で切）
+    exclusive_dist: 0.06     # track_fix4：同じエージェント・別チームの 2 件がこの距離以内なら、1 つのアイコンの二重割当てとみて
+                             # 点の高い方だけ残す（別エージェント同士の近接は対象外。null で切）
+    neg_diff: 0.15           # track_fix5：設置物等の負テンプレート（vreplay/neg_icons/*.png）のスコアが
+                             # 顔の score + neg_diff 以上なら設置物として落とす（null で切）
+  # 時系列の照合前の統合（recall4 第4手）：同じラウンドの前後 window 秒で点が strong 以上の検出を prior にし、
+  # 近くの候補の点に bonus を足して照合し直す（search なら見失った位置の周りを thr−relax で探し直す）。
+  # 照合をもう 1 回やるので、prior のあるフレームの照合時間が約 2 倍。評価の結果は PROMPT.md
+  agent_temporal:
+    enabled: false
+    window: 2.5
+    strong: 0.66
+    bonus: 0.05
+    relax: 0.04
+    max_move: 0.08
+    search: true
   # 確かめ用：1 マップにつき何枚のミニマップを _tactics/agents_dump/ に書き出すか（0 で書き出さない）
   agents_dump: 0
+  # 確かめ用：追跡に使ったフレームごとの照合結果（ring・margin・overlap・rim）を _tactics/agents_dump/match_dump.json に（1 で有効）
+  match_dump: 0
 
 output:
   dir: /content/drive/MyDrive/valorant-replay
