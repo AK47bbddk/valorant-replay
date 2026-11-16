@@ -1160,7 +1160,7 @@ def _agent_match_params(cfg: dict) -> dict:
             "filled_rescue", "tpl_fill_min", "margin_exclusive", "margin_pair",
             "gray_floor", "gray_margin", "gray_face_std", "gray_ring", "face_inner",
             "bg_mode", "cand_nms", "cand_per_color", "face_search", "cap_over", "gray_crowded",
-            "fs_point", "fs_margin", "gray_w", "self_norm")
+            "fs_point", "fs_margin", "gray_w", "self_norm", "exclusive_dist")
     return {k: am[k] for k in keys if k in am}
 
 
@@ -1172,6 +1172,20 @@ def _agent_temporal(cfg: dict) -> dict | None:
     return {"window": float(tp.get("window", 2.5)), "strong": float(tp.get("strong", 0.66)),
             "match": {"prior_bonus": float(tp.get("bonus", 0.08)), "prior_move": float(tp.get("max_move", 0.08)),
                       "prior_relax": float(tp.get("relax", 0.06)), "prior_search": bool(tp.get("search", True))}}
+
+
+def _track_params(cfg: dict) -> dict:
+    """config の tactics.track（追跡の細かい値）。無い値は既定。
+    death_grace: 死んだ時刻からこの秒数以降の検出は使わない。
+    lone_gap / lone_score / lone_hold: 同じエージェントの前後の検出から lone_gap 秒以上離れた孤立した検出は、
+    点が lone_score 未満なら軌跡に使わず、使うときも lone_hold 秒までしか保持せず、滑り（補間）の端にしない。"""
+    tk = (cfg.get("tactics") or {}).get("track") or {}
+
+    def num(key, default):
+        v = tk.get(key, default)
+        return None if v is None else float(v)
+    return {"death_grace": num("death_grace", 1.0), "lone_gap": num("lone_gap", None),
+            "lone_score": num("lone_score", None), "lone_hold": num("lone_hold", None)}
 
 
 def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed, aspect, T, background,
@@ -1465,11 +1479,13 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
     ct_fn = color_team if callable(color_team) else (lambda n_, _c=color_team: _c)
 
     tp = _agent_temporal(cfg)
+    tk = _track_params(cfg)
 
     def one(item, n=0, prior=None):
         t, mm = item
+        deaths_n = (deaths_by_n or {}).get(n)
         if prior is None and id(mm) in cache:
-            return t, cache[id(mm)]
+            return t, AG.drop_dead(cache[id(mm)], t, deaths_n, tk["death_grace"])
         alive = None
         if alive_fn is not None:
             try:
@@ -1477,10 +1493,12 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
                 alive = {1: a1, 2: a2} if a1 is not None and a2 is not None else None
             except Exception:
                 alive = None
-        return t, AG.match(mm, icons, agent_teams, ct_fn(n), icon_frac=icon_frac,
-                           mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
-                           alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None,
-                           **am, **({"prior": prior, **tp["match"]} if prior else {}))
+        found = AG.match(mm, icons, agent_teams, ct_fn(n), icon_frac=icon_frac,
+                         mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
+                         alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None,
+                         **am, **({"prior": prior, **tp["match"]} if prior else {}))
+        # 死んだ選手（キルの時刻 + death_grace 秒以降）の検出は、cap_over で残したものも含めて使わない
+        return t, AG.drop_dead(found, t, deaths_n, tk["death_grace"])
 
     # 照合（1 枚 0.1〜0.2 秒）は OpenCV が GIL を外すので、スレッドで並べる
     from concurrent.futures import ThreadPoolExecutor
@@ -1518,7 +1536,8 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
         jumps: dict = {}
         trk = TR.build(found, start, float(rt["end"]), scale, every=every, aspect=aspect,
                        deaths=(deaths_by_n or {}).get(n), fixed=fixed, ults=ults_r, jumps=jumps,
-                       icon_frac=icon_frac, rules=rules, walls=walls)
+                       icon_frac=icon_frac, rules=rules, walls=walls,
+                       lone_gap=tk["lone_gap"], lone_score=tk["lone_score"], lone_hold=tk["lone_hold"])
         out: dict = {}
         for (team, agent), pts in trk.items():
             lst = []

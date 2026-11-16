@@ -43,7 +43,7 @@ PARAM_KEYS = ("thr", "margin", "crowded_margin", "min_face_std",
               "gray_floor", "gray_margin", "gray_face_std", "gray_ring", "face_inner",
               "bg_mode", "cand_nms", "cand_per_color", "face_search",
               "cap_over", "gray_crowded",
-            "fs_point", "fs_margin", "gray_w", "self_norm")
+            "fs_point", "fs_margin", "gray_w", "self_norm", "exclusive_dist")
 COLORS = ("warm", "cool", "yellow")
 # 見落としの理由。前の 5 つは捨てた候補の理由、後ろは候補が出なかった理由。
 MISS_REASONS = ("filled", "flat", "margin", "thr", "cap",

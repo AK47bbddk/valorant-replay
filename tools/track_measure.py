@@ -2,12 +2,14 @@
 （vreplay/track_metrics.py の層 A）と生存時間の被覆率を、ベースの track.py と今の track.py で比べる。
 
 使い方: python tools/track_measure.py <detections.json> <report.json> [--base 4afebc8] [--rounds 2,5,6] [--json 出力]
-        [--map-icon <公式のマップ画像 png>] [--background <放送のミニマップの背景 jpg>]
+        [--map-icon <公式のマップ画像 png>] [--background <放送のミニマップの背景 jpg>] [--config config/default.yaml]
   detections.json: {"icon_frac", "frames": [{"round", "t"（開始からの秒）, "found": [{team, agent, x, y, score}]}]}
   report.json: 解析レポート（players・rounds[].kills・tactics.rounds[].start/end/side1・tactics.callouts_placed）
 ベースは git show <rev>:vreplay/track.py を読み込んで使う（deaths・ults・icon_frac は今と同じものを渡す）。
 --map-icon と --background があれば、report.json の tactics.transform で公式のマップ画像の床を放送のミニマップに写して
 壁の形（vreplay.walls）を作り、今の track.py に渡す（壁越え区間の数も数える）。無ければ壁は使わず wall_crossings は None。
+--config を渡すと、列は base（--base の track.py・壁あり）と now（今の track.py・壁あり・config の tactics.track の
+孤立の値と agent_match.exclusive_dist の排他化を生の検出に通したもの）になる。
 """
 from __future__ import annotations
 
@@ -33,6 +35,7 @@ def load_base(rev: str):
     src = subprocess.run(["git", "show", f"{rev}:vreplay/track.py"], capture_output=True, text=True,
                          encoding="utf-8", check=True).stdout
     mod = types.ModuleType("track_base")
+    mod.__package__ = "vreplay"          # 壁ありの補間が使う `from .walls import ...` のため
     exec(compile(src, f"{rev}:vreplay/track.py", "exec"), mod.__dict__)
     return mod
 
@@ -104,9 +107,12 @@ def load_walls(map_icon: str | None, background: str | None, transform: dict | N
 
 def build_round(mod, frames: list, ctx: dict, scale: float, deaths: bool, fixed: dict | None = None,
                 ults: bool = False, icon_frac: float | None = None, jumps: dict | None = None,
-                walls=None) -> dict:
+                walls=None, extra: dict | None = None, exclusive_dist: float | None = None) -> dict:
     fr = [(ctx["start"] + float(f["t"]), f["found"]) for f in frames]
-    kw = {}
+    if exclusive_dist is not None:           # 照合の最後の排他化（agents.exclusive）を、生の検出に後から通す
+        from vreplay import agents as AG
+        fr = [(t, AG.exclusive(found or [], exclusive_dist)[0]) for t, found in fr]
+    kw = dict(extra or {})
     if deaths:
         kw["deaths"] = {k: ctx["start"] + e for k, e in ctx["deaths"].items()}
     if fixed is not None:
@@ -147,6 +153,8 @@ def main():
     ap.add_argument("--background")
     ap.add_argument("--rounds", default="2,5,6")
     ap.add_argument("--json")
+    ap.add_argument("--config", help="config の yaml。あればベース（--base の track.py、壁あり）と今の track.py（壁あり・"
+                                     "tactics.track の孤立の値・agent_match.exclusive_dist の排他化）を比べる")
     a = ap.parse_args()
     det = json.loads(Path(a.detections).read_text("utf-8"))
     rep = json.loads(Path(a.report).read_text("utf-8"))
@@ -158,18 +166,25 @@ def main():
     ranks = TT.area_ranks(placed)
     icon_frac = det.get("icon_frac")
     walls = load_walls(a.map_icon, a.background, rep["tactics"].get("transform"))
-    variants = {"fix2": (base, False), "fix3": (TR, True)}
+    variants = {"fix2": (base, False, {}, None), "fix3": (TR, True, {}, None)}
+    if a.config:
+        import yaml
+        tcfg = (yaml.safe_load(Path(a.config).read_text("utf-8")) or {}).get("tactics") or {}
+        tk = TT._track_params({"tactics": tcfg})
+        lone = {k: tk[k] for k in ("lone_gap", "lone_score", "lone_hold")}
+        excl = ((tcfg.get("agent_match") or {}).get("exclusive_dist"))
+        variants = {"base": (base, True, {}, None), "now": (TR, True, lone, excl)}
     result: dict = {"scale": round(scale, 4), "aspect": round(ASPECT, 4), "rounds": {}}
     for n in [int(x) for x in a.rounds.split(",")]:
         frames = [f for f in det["frames"] if int(f["round"]) == n]
         ctx = context(rep, n)
         rr: dict = {"context": {**ctx, "deaths": _keyed(ctx["deaths"]), "alive": _keyed(ctx["alive"])},
                     "metrics": {}, "tracks": {}, "fixed": {}, "jumps": {}}
-        for name, (mod, use_walls) in variants.items():
+        for name, (mod, use_walls, extra, excl) in variants.items():
             fixed: dict = {}
             jumps: dict = {}
             trk = build_round(mod, frames, ctx, scale, True, fixed, ults=True, icon_frac=icon_frac, jumps=jumps,
-                              walls=walls if use_walls else None)
+                              walls=walls if use_walls else None, extra=extra, exclusive_dist=excl)
             rr["metrics"][name] = metrics(trk, ctx, scale, spawns, icon_frac, area_of, ranks, walls)
             rr["tracks"][name] = _keyed(trk)
             if fixed:

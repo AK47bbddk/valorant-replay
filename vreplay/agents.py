@@ -366,7 +366,8 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
           cap_over: float | None = None, gray_crowded: bool = False,
           fs_point: float = 0.06, fs_margin: float = 0.0, gray_w: float = 0.0,
           self_norm: float | None = None, prior: list[dict] | None = None, prior_bonus: float = 0.08,
-          prior_move: float = 0.08, prior_relax: float = 0.06, prior_search: bool = True) -> list[dict]:
+          prior_move: float = 0.08, prior_relax: float = 0.06, prior_search: bool = True,
+          exclusive_dist: float | None = None) -> list[dict]:
     """ミニマップ 1 枚で、誰がどこにいるか。
     ① 縁の輪（暖色・寒色・観戦中の黄色）から、アイコンらしい場所の候補を多めに拾う（重なったアイコンも
        拾えるよう、近い候補も残す）
@@ -408,7 +409,11 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
       prior: 前後のフレーム（同じラウンド）で確かに見つかった検出 [{"team", "agent", "x", "y"}]。
         その (チーム, エージェント) の prior_move 以内の候補の点に prior_bonus を足してから割り当て・しきい値を見る
         （"prior": True。出す "score" は足す前の点）。prior_search なら、それでも見つからない prior の
-        エージェントを、前の位置の周り（prior_move）だけ thr − prior_relax で顔から探す（"source": "prior"）"""
+        エージェントを、前の位置の周り（prior_move）だけ thr − prior_relax で顔から探す（"source": "prior"）
+    track_fix4 のスイッチ（既定は切）：
+      exclusive_dist: 両チームに同じエージェントがいるとき、同じエージェント・別チームの 2 件が中心の距離
+        exclusive_dist 以内なら、1 つのアイコンを両チームに割り当てたとみて点の高い方だけ残す（exclusive）。
+        捨てた方は debug に理由 "exclusive" で足す"""
     if img is None or img.size == 0:
         return []
     H, W = img.shape[:2]
@@ -799,6 +804,14 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
                         "margin": round(point - sec, 2), "source": "prior"})
             kept.add((t, a))
 
+    if exclusive_dist is not None:
+        out, lost = exclusive(out, exclusive_dist)
+        if debug is not None:
+            for e in lost:
+                debug.append({"x": round(e["x"], 4), "y": round(e["y"], 4), "color": e.get("rim"),
+                              "agent": e["agent"], "score": e["score"], "second": None, "second_agent": None,
+                              "faces": {}, "ring": e.get("ring", 0.0), "reason": "exclusive"})
+
     if debug is not None:
         for i, f in enumerate(cands):
             if i in decided:
@@ -808,6 +821,40 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
                           "agent": ag, "score": round(sc, 2), "second": round(sec, 2),
                           "second_agent": second_agent_of(i), "faces": faces_of(i),
                           "ring": f["ring"], "reason": reasons.get(i, "thr")})
+    return out
+
+
+def exclusive(found: list[dict], dist: float = 0.06) -> tuple[list[dict], list[dict]]:
+    """1 つのアイコンを両チームに割り当てた検出（同じエージェント・別チーム・中心の距離 ≤ dist）を 1 つにする。
+    点の高い方を残し、同点なら先に確定した方（found の前の方）を残す。別エージェント同士の近接は対象にしない
+    （アイコンの重なりは実在するため）。距離は正規化座標の差のユークリッド距離。
+    返り値 (残した検出（元の並び）, 捨てた検出)。found は変えない。"""
+    order = sorted(range(len(found)), key=lambda k: (-float(found[k].get("score") or 0.0), k))
+    keep: list[int] = []
+    lost: list[int] = []
+    for k in order:
+        e = found[k]
+        clash = e.get("agent") and any(
+            found[m].get("agent") == e["agent"] and found[m].get("team") != e.get("team")
+            and math.hypot(float(found[m]["x"]) - float(e["x"]), float(found[m]["y"]) - float(e["y"])) <= dist
+            for m in keep)
+        (lost if clash else keep).append(k)
+    kept = set(keep)
+    return [e for k, e in enumerate(found) if k in kept], [found[k] for k in sorted(lost)]
+
+
+def drop_dead(found: list[dict], t: float, deaths: dict | None, grace: float | None = 1.0) -> list[dict]:
+    """死んだ選手の検出を落とす。deaths: {(team, agent): 死んだ時刻}（t と同じ時刻の軸）。
+    t ≥ 死んだ時刻 + grace の検出は、cap_over で残したものも含めて一切残さない。
+    deaths が無いか grace が None（切）ならそのまま（死亡の情報が無い経路は今までどおり）。"""
+    if not deaths or grace is None:
+        return found
+    out = []
+    for e in found or []:
+        dt = deaths.get((e.get("team"), e.get("agent")))
+        if dt is not None and float(t) >= float(dt) + grace:
+            continue
+        out.append(e)
     return out
 
 

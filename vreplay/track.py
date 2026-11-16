@@ -39,6 +39,7 @@ MAX_ULT_JUMPS = 2
 # 重なり（overlap）・灰色の tier の検出、同じ時刻に味方の検出と重なる検出の割り引き
 OVERLAP_PENALTY = 0.10
 ALLY_NEAR = 0.7             # 味方の検出がアイコン直径のこの倍以内なら「重なり」
+LONE_EPS = 1e-6             # 孤立の判定（lone_gap 秒以上）の時刻の差の丸め誤差のゆとり（104.3 − 100.3 = 3.9999… を 4 秒とみる）
 ORIGIN_NEAR = 2.0           # 未確認の跳躍：跳んだ後、元の場所（SLACK×scale のこの倍以内）に検出があれば不採用
 
 # エージェント別の跳躍の規則（初期値。Fable 回答 §3。パッチで変わる値は config の tactics.jump で上書き）。
@@ -315,7 +316,8 @@ def best_chain(dets: list, scale: float, agent: str | None = None, aspect: float
 
 
 def resample(chain: list[tuple[float, float, float, float]], times: list[float], max_gap: float = 12.0,
-             hold: float = 3.0, reach=None, aspect: float = 1.0, tp_times=None, walls=None
+             hold: float = 3.0, reach=None, aspect: float = 1.0, tp_times=None, walls=None,
+             lone_times=None, lone_hold: float | None = None
              ) -> list[tuple[float, float, float, float, str]]:
     """鎖を times の時刻に並べ直す。[(t, x, y, conf, "det"|"interp"|"tp")]。
     鎖の点から 1 秒以内の時刻はその点（det）、点と点のあいだ（max_gap 秒以内）は直線で補間（interp）、
@@ -326,10 +328,16 @@ def resample(chain: list[tuple[float, float, float, float]], times: list[float],
     跳ぶ前の位置のまま。
     walls（壁の形）を渡すと、直線が壁に塞がれる区間は床の上の道（walls.path）に沿って補間し、道が無いか
     道のりが走って届かない（reach）ときは前の点の位置のまま（壁を滑って越える見た目にしない）。
-    また鎖の点に寄せるのは 0.5 秒以内だけにする（1 秒寄せると、回り込みに数秒かかる区間が 1 歩で壁を越える）。"""
+    また鎖の点に寄せるのは 0.5 秒以内だけにする（1 秒寄せると、回り込みに数秒かかる区間が 1 歩で壁を越える）。
+    lone_times（孤立した点の時刻。lone_points）と lone_hold を渡すと、その点は前後の点との補間（滑り）の端にせず、
+    lone_hold 秒までだけその場に保持する（相手側の普通の点は、鎖の端と同じく hold 秒まで保持）。"""
     if not chain:
         return []
     tps = {round(float(x), 3) for x in tp_times or ()}
+    lones = {round(float(x), 3) for x in lone_times or ()} if lone_hold is not None else set()
+
+    def hold_of(d) -> float:
+        return float(lone_hold) if round(d[0], 3) in lones else hold
     snap = 1.0 if walls is None else 0.5
     paths: dict = {}
     out = []
@@ -348,6 +356,13 @@ def resample(chain: list[tuple[float, float, float, float]], times: list[float],
             continue
         before = [d for d in chain if d[0] <= t]
         after = [d for d in chain if d[0] >= t]
+        if before and after and lones and (round(before[-1][0], 3) in lones or round(after[0][0], 3) in lones):
+            a, b = before[-1], after[0]          # 孤立した点が端の区間は滑らせず、近い方の点を保持の秒数まで
+            ok = [d for d in (a, b) if abs(t - d[0]) <= hold_of(d)]
+            if ok:
+                d = min(ok, key=lambda q: abs(t - q[0]))
+                out.append((t, d[1], d[2], round(d[3] * 0.7, 2), "interp"))
+            continue
         if before and after:
             a, b = before[-1], after[0]
             if b[0] - a[0] <= max_gap:
@@ -365,12 +380,34 @@ def resample(chain: list[tuple[float, float, float, float]], times: list[float],
                 x, y = (a[1], a[2]) if pl is None else _point_on(pl, w, aspect)
                 out.append((t, x, y, conf, "interp"))
             continue
-        if before and t - before[-1][0] <= hold:
+        if before and t - before[-1][0] <= hold_of(before[-1]):
             d = before[-1]
             out.append((t, d[1], d[2], round(d[3] * 0.7, 2), "interp"))
-        elif after and after[0][0] - t <= hold:
+        elif after and after[0][0] - t <= hold_of(after[0]):
             d = after[0]
             out.append((t, d[1], d[2], round(d[3] * 0.7, 2), "interp"))
+    return out
+
+
+def drop_lone_weak(dets: list, gap: float, min_keep: float, min_score: float = 0.58) -> list:
+    """同じエージェントの前後の検出（点が min_score 以上・別の時刻）から gap 秒以上離れた孤立した検出のうち、
+    点が min_keep 未満のものを落とす。dets: [(t, x, y, score[, 割り引き])]。"""
+    ts = sorted({round(float(d[0]), 6) for d in dets if d[3] >= min_score})
+
+    def lone(t: float) -> bool:
+        return all(abs(u - t) >= gap - LONE_EPS for u in ts if abs(u - t) > 1e-6)
+    return [d for d in dets if not (d[3] < min_keep and lone(round(float(d[0]), 6)))]
+
+
+def lone_points(chain: list, gap: float) -> list[float]:
+    """鎖の点のうち、前の点・後の点（無ければ無限に遠い）の両方から gap 秒以上離れた点の時刻。
+    鎖の端は片側が無いので、もう片側だけで決まる（開始直後の 1 点のあと長く途切れる型＝Split R1 の Omen を拾うため）。"""
+    out = []
+    for k, d in enumerate(chain):
+        prev_gap = d[0] - chain[k - 1][0] if k > 0 else math.inf
+        next_gap = chain[k + 1][0] - d[0] if k + 1 < len(chain) else math.inf
+        if prev_gap >= gap - LONE_EPS and next_gap >= gap - LONE_EPS:
+            out.append(d[0])
     return out
 
 
@@ -453,7 +490,8 @@ def _dets_by_key(frames: list, icon_frac: float | None, aspect: float) -> dict:
 def build(frames: list[tuple[float, list[dict]]], start: float, end: float, scale: float, every: float = 5.0,
           aspect: float = 1.0, deaths: dict | None = None, fixed: dict | None = None, skip=None,
           ults: dict | None = None, jumps: dict | None = None, icon_frac: float | None = None,
-          rules: dict | None = None, walls=None) -> dict:
+          rules: dict | None = None, walls=None, lone_gap: float | None = None,
+          lone_score: float | None = None, lone_hold: float | None = None) -> dict:
     """1 ラウンドぶんの照合結果 [(時刻, agents.match の結果)] から、エージェントごとの軌跡。
     返り値 {(team, agent): [(開始からの秒, x, y, conf, src)]}。src は det / interp / tp（採用した跳躍の着地）。
     deaths: {(team, agent): 死んだ時刻} があれば、その時刻以降の検出は鎖に入れず、格子もそこで切る。
@@ -464,7 +502,10 @@ def build(frames: list[tuple[float, list[dict]]], start: float, end: float, scal
     fixed に dict を渡すと、置き換えた点を {(team, agent): [開始からの秒]} で足す。
     jumps に dict を渡すと、採用した跳躍を {(team, agent): [{"t": 開始からの秒, "from", "to", "kind"}]} で足す。
     skip(team, agent, 時刻) が真の点は外れ値の置き換えの対象外。
-    walls: 壁の形（vreplay.walls.Walls）。走る遷移・補間・外れ値の置き換えが壁を越えないようにする（無ければ従来どおり）。"""
+    walls: 壁の形（vreplay.walls.Walls）。走る遷移・補間・外れ値の置き換えが壁を越えないようにする（無ければ従来どおり）。
+    lone_gap（秒）: 同じエージェントの前後の検出から lone_gap 秒以上離れた孤立した検出の扱い（None で切＝従来どおり）。
+      lone_score: 点がこれ未満の孤立した検出は鎖に入れない（None なら落とさない）。
+      lone_hold: 鎖の中で孤立した点（lone_points）は、保持をこの秒数までにし、前後の点との補間の端にしない（None なら制限しない）。"""
     table = JUMP if rules is None else rules
     by = _dets_by_key(frames, icon_frac, aspect)
     times = []
@@ -477,6 +518,8 @@ def build(frames: list[tuple[float, list[dict]]], start: float, end: float, scal
         cut = (deaths or {}).get(key)
         if cut is not None:
             dets = [d for d in dets if d[0] < cut]
+        if lone_gap is not None and lone_score is not None:
+            dets = drop_lone_weak(dets, lone_gap, lone_score)
         rivals = [d[:3] for d in by.get((3 - key[0], key[1]), [])]
         ch, jp = chain_and_jumps(dets, scale, agent=key[1], aspect=aspect, rules=table.get(key[1], {}),
                                  ults=(ults or {}).get(key), rivals=rivals, walls=walls)
@@ -486,7 +529,9 @@ def build(frames: list[tuple[float, list[dict]]], start: float, end: float, scal
 
         def reach(dt, _a=key[1]):
             return run_reach(dt, scale, _a)
-        pts = resample(ch, ts, reach=reach, aspect=aspect, tp_times=[j["t"] for j in jp], walls=walls)
+        lt = lone_points(ch, lone_gap) if lone_gap is not None and lone_hold is not None else None
+        pts = resample(ch, ts, reach=reach, aspect=aspect, tp_times=[j["t"] for j in jp], walls=walls,
+                       lone_times=lt, lone_hold=lone_hold)
         sk = (lambda t, _k=key: skip(_k[0], _k[1], t)) if skip is not None else None
         pts, fx = drop_outliers(pts, reach, aspect=aspect, skip=sk, walls=walls)
         if fx and fixed is not None:

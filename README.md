@@ -491,6 +491,8 @@ cycles:
 走って届かない跳躍の区間は直線で滑らせず、1 点だけ遠くに飛んで戻る外れ値は前後の中点に置き換えます。
 公式のマップ画像で位置合わせできたときは壁も見ます（`tactics.track_walls`、既定 true）：壁を挟む 2 点は回り込む道のりで「走って届くか」を判定し、
 補間は床の上の道に沿わせます（テレポート・ウルトの跳躍は壁を越えてよい）。
+両チームに同じエージェントがいて 1 つのアイコンが両方に割り当てられたときは点の高い方だけを残し（`tactics.agent_match.exclusive_dist`）、
+キルフィードで死亡が分かった選手の死亡 1 秒後以降の検出は使わず、前後から 4 秒以上離れた孤立した弱い検出は軌跡にしません（`tactics.track`）。
 `tactics.match_dump: 1` で照合の生の結果を `_tactics/agents_dump/match_dump.json` に書き出せます（軌跡の指標は `vreplay/track_metrics.py`）。
 `tactics.track_every`（0 で止める）・`tactics.snap_every`・`video.minimap_quality` で変えられます。
 

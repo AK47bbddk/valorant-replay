@@ -358,6 +358,12 @@ vreplay playbook --sync --team G2 --map Split
   道が無い・道のりが走って届かないときは前の点のまま。鎖の点に寄せるのは 0.5 秒以内（壁なしは 1 秒）。外れ値の置き換えも道の中ほど。
   放送の色から作った床（公式画像で合わなかったとき）は穴・島があるので使わない。
   `pipeline.py` はキルとウルトの確定後に `tactics.analyze_video` を呼び、ラウンド入力に `deaths`（`[{"team", "agent", "t"}]`）と `ults`（`[{"team", "agent", "t"}]`、ラウンド内の秒）を渡す。死んだ時刻以降の検出は鎖に入れず軌跡もそこで切り、ウルトの使用時刻は Omen の全域跳躍の窓 `[T−1, T+10]` に使う。
+  **track_fix4**：死亡時刻はキルフィード（`rounds.kills`）由来の `deaths` だけを使う（HUD の生存人数は照合の上限の代わりとしてだけ）。
+  `_agent_tracks` は照合の結果から、死んだ時刻 + `tactics.track.death_grace`（既定 1.0 秒）以降のその選手の検出を cap_over のものも含めて落とす（`agents.drop_dead`。
+  `match_dump`・prior にも残らない。死亡の情報が無いラウンドは従来どおり）。照合の最後に `agent_match.exclusive_dist`（既定 0.06）で、同じエージェント・別チームの
+  2 件が近いときは 1 つのアイコンの二重割当てとみて点の高い方だけ残す（`agents.exclusive`、捨てた方は debug の理由 `exclusive`。別エージェント同士の近接は対象外）。
+  追跡では、同じエージェントの前後の検出から `tactics.track.lone_gap`（4 秒）以上離れた孤立した検出は、点が `lone_score`（0.70）未満なら鎖に入れず、
+  入れたときも保持を `lone_hold`（1.5 秒）までにして補間（滑り）の端にしない（`track.drop_lone_weak`・`lone_points`）。
   `tactics.match_dump`（既定 0。1 で有効）なら、追跡に使ったフレームごとの照合結果（ring・margin・overlap・元の縁の色 `rim`＝warm/cool/yellow を含むそのまま）を
   `_tactics/agents_dump/match_dump.json`（`{"frames": [{"round", "t", "found"}]}`）に書き出す。
   軌跡の「あり得なさ」の指標（不可能な移動・往復・ジグザグ・道のりの上限・重複・ミラーの跳躍・開始時の陣地違反＝`area_ranks` 基準・接敵前の越境・死亡後の点・
