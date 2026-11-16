@@ -364,6 +364,9 @@ vreplay playbook --sync --team G2 --map Split
   2 件が近いときは 1 つのアイコンの二重割当てとみて点の高い方だけ残す（`agents.exclusive`、捨てた方は debug の理由 `exclusive`。別エージェント同士の近接は対象外）。
   追跡では、同じエージェントの前後の検出から `tactics.track.lone_gap`（4 秒）以上離れた孤立した検出は、点が `lone_score`（0.70）未満なら鎖に入れず、
   入れたときも保持を `lone_hold`（1.5 秒）までにして補間（滑り）の端にしない（`track.drop_lone_weak`・`lone_points`）。
+  孤立の判定（1 点・`lone_span` のクラスタの連結・`lone_points`）には、`track.build` の中で実効値 `track.effective_lone_gap`
+  ＝ max(`lone_gap`, 格子の間隔 `every`（本番は `tactics.track_every`、未指定なら 5 秒）+ 1 秒）を使う（4 秒は約 1 秒格子の前提なので、
+  5 秒格子では 6 秒に底上げして通常の格子の間隔を孤立とみない。config の値は変えない）。
   `tactics.match_dump`（既定 0。1 で有効）なら、追跡に使ったフレームごとの照合結果（ring・margin・overlap・元の縁の色 `rim`＝warm/cool/yellow を含むそのまま）を
   `_tactics/agents_dump/match_dump.json`（`{"frames": [{"round", "t", "found"}]}`）に書き出す。
   軌跡の「あり得なさ」の指標（不可能な移動・往復・ジグザグ・道のりの上限・重複・ミラーの跳躍・開始時の陣地違反＝`area_ranks` 基準・接敵前の越境・死亡後の点・

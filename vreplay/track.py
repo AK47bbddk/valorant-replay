@@ -40,6 +40,8 @@ MAX_ULT_JUMPS = 2
 OVERLAP_PENALTY = 0.10
 ALLY_NEAR = 0.7             # 味方の検出がアイコン直径のこの倍以内なら「重なり」
 LONE_EPS = 1e-6             # 孤立の判定（lone_gap 秒以上）の時刻の差の丸め誤差のゆとり（104.3 − 100.3 = 3.9999… を 4 秒とみる）
+BUILD_EVERY = 5.0           # build() の格子の間隔（秒）の既定（本番の tactics.track_every と同じ）
+LONE_GRID_MARGIN = 1.0      # 実効 lone_gap の底上げ：格子の間隔 + この秒数（通常の格子の間隔を「孤立」とみない）
 ORIGIN_NEAR = 2.0           # 未確認の跳躍：跳んだ後、元の場所（SLACK×scale のこの倍以内）に検出があれば不採用
 
 # エージェント別の跳躍の規則（初期値。Fable 回答 §3。パッチで変わる値は config の tactics.jump で上書き）。
@@ -438,6 +440,17 @@ def drop_early_enemy(dets: list, start: float, early_sec: float, own_spawn: tupl
     return out
 
 
+def effective_lone_gap(lone_gap: float | None, every: float | None) -> float | None:
+    """孤立の判定に実際に使う lone_gap。max(lone_gap, every + LONE_GRID_MARGIN)。
+    config の lone_gap（4.0 秒）は約 1 秒格子の照合が前提。格子が粗い（本番 track_every=5.0）と、通常の格子の間隔だけで
+    全検出が「孤立」になって落ちるので、実行時に格子の間隔より長く底上げする。every が None なら build の既定 BUILD_EVERY。
+    lone_gap が None（孤立の扱いを切）ならそのまま None。"""
+    if lone_gap is None:
+        return None
+    ev = BUILD_EVERY if every is None else float(every)
+    return max(float(lone_gap), ev + LONE_GRID_MARGIN)
+
+
 def lone_points(chain: list, gap: float) -> list[float]:
     """鎖の点のうち、前の点・後の点（無ければ無限に遠い）の両方から gap 秒以上離れた点の時刻。
     鎖の端は片側が無いので、もう片側だけで決まる（開始直後の 1 点のあと長く途切れる型＝Split R1 の Omen を拾うため）。"""
@@ -526,7 +539,8 @@ def _dets_by_key(frames: list, icon_frac: float | None, aspect: float) -> dict:
     return by
 
 
-def build(frames: list[tuple[float, list[dict]]], start: float, end: float, scale: float, every: float = 5.0,
+def build(frames: list[tuple[float, list[dict]]], start: float, end: float, scale: float,
+          every: float | None = BUILD_EVERY,
           aspect: float = 1.0, deaths: dict | None = None, fixed: dict | None = None, skip=None,
           ults: dict | None = None, jumps: dict | None = None, icon_frac: float | None = None,
           rules: dict | None = None, walls=None, lone_gap: float | None = None,
@@ -546,7 +560,13 @@ def build(frames: list[tuple[float, list[dict]]], start: float, end: float, scal
     walls: 壁の形（vreplay.walls.Walls）。走る遷移・補間・外れ値の置き換えが壁を越えないようにする（無ければ従来どおり）。
     lone_gap（秒）: 同じエージェントの前後の検出から lone_gap 秒以上離れた孤立した検出の扱い（None で切＝従来どおり）。
       lone_score: 点がこれ未満の孤立した検出は鎖に入れない（None なら落とさない）。
-      lone_hold: 鎖の中で孤立した点（lone_points）は、保持をこの秒数までにし、前後の点との補間の端にしない（None なら制限しない）。"""
+      lone_hold: 鎖の中で孤立した点（lone_points）は、保持をこの秒数までにし、前後の点との補間の端にしない（None なら制限しない）。
+      孤立の判定（drop_lone_weak の 1 点・クラスタの連結、lone_points）には実効値 effective_lone_gap(lone_gap, every)
+      = max(lone_gap, every + 1.0) を使う（格子が粗いときに通常の格子の間隔を孤立とみないためのガード）。
+      lone_span（クラスタの時間幅の上限）はそのまま。
+    every: 格子の間隔（秒）。None なら BUILD_EVERY。"""
+    every = BUILD_EVERY if every is None else float(every)
+    gap = effective_lone_gap(lone_gap, every)
     table = JUMP if rules is None else rules
     by = _dets_by_key(frames, icon_frac, aspect)
     times = []
@@ -566,8 +586,8 @@ def build(frames: list[tuple[float, list[dict]]], start: float, end: float, scal
             en_sp = spawns["defense"] if is_atk else spawns["attack"]
             dets = drop_early_enemy(dets, start, early_enemy_sec, own_sp, en_sp,
                                     aspect=aspect, ults=(ults or {}).get(key))
-        if lone_gap is not None and lone_score is not None:
-            dets = drop_lone_weak(dets, lone_gap, lone_score, max_span=lone_span)
+        if gap is not None and lone_score is not None:
+            dets = drop_lone_weak(dets, gap, lone_score, max_span=lone_span)
         rivals = [d[:3] for d in by.get((3 - key[0], key[1]), [])]
         ch, jp = chain_and_jumps(dets, scale, agent=key[1], aspect=aspect, rules=table.get(key[1], {}),
                                  ults=(ults or {}).get(key), rivals=rivals, walls=walls)
@@ -577,7 +597,7 @@ def build(frames: list[tuple[float, list[dict]]], start: float, end: float, scal
 
         def reach(dt, _a=key[1]):
             return run_reach(dt, scale, _a)
-        lt = lone_points(ch, lone_gap) if lone_gap is not None and lone_hold is not None else None
+        lt = lone_points(ch, gap) if gap is not None and lone_hold is not None else None
         pts = resample(ch, ts, reach=reach, aspect=aspect, tp_times=[j["t"] for j in jp], walls=walls,
                        lone_times=lt, lone_hold=lone_hold)
         sk = (lambda t, _k=key: skip(_k[0], _k[1], t)) if skip is not None else None
