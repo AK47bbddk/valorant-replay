@@ -43,7 +43,7 @@ PARAM_KEYS = ("thr", "margin", "crowded_margin", "min_face_std",
               "gray_floor", "gray_margin", "gray_face_std", "gray_ring", "face_inner",
               "bg_mode", "cand_nms", "cand_per_color", "face_search",
               "cap_over", "gray_crowded",
-            "fs_point", "fs_margin", "gray_w", "self_norm", "exclusive_dist")
+            "fs_point", "fs_margin", "gray_w", "self_norm", "exclusive_dist", "neg_diff")
 COLORS = ("warm", "cool", "yellow")
 # 見落としの理由。前の 5 つは捨てた候補の理由、後ろは候補が出なかった理由。
 MISS_REASONS = ("filled", "flat", "margin", "thr", "cap",
@@ -84,6 +84,7 @@ def replay(dump_dir: str, use_background: bool = True, **params) -> list[dict]:
     meta, teams, icons, mask, background = _load(dump_dir)
     base = {k: v for k, v in (meta.get("params") or {}).items() if k in PARAM_KEYS}
     base.update({k: v for k, v in params.items() if k in PARAM_KEYS and v is not None})
+    neg_icons = AG.load_neg_icons() if base.get("neg_diff") is not None else None
     icon_frac = float(meta.get("icon_frac") or 0.058)
     out = []
     for fr in meta.get("frames") or []:
@@ -98,7 +99,7 @@ def replay(dump_dir: str, use_background: bool = True, **params) -> list[dict]:
                             and background.shape[:2] == img.shape[:2]) else None
         dbg: list = []
         found = AG.match(img, icons, teams, ct, icon_frac=icon_frac, mask=m, alive=alive,
-                         background=bg, debug=dbg, **base)
+                         background=bg, debug=dbg, neg_icons=neg_icons, **base)
         out.append({"file": fr["file"], "round": fr.get("round"), "t": fr.get("t"),
                     "icon_frac": icon_frac, "found": found, "rejected": dbg})
     return out

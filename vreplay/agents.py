@@ -367,7 +367,8 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
           fs_point: float = 0.06, fs_margin: float = 0.0, gray_w: float = 0.0,
           self_norm: float | None = None, prior: list[dict] | None = None, prior_bonus: float = 0.08,
           prior_move: float = 0.08, prior_relax: float = 0.06, prior_search: bool = True,
-          exclusive_dist: float | None = None) -> list[dict]:
+          exclusive_dist: float | None = None,
+          neg_icons: dict[str, np.ndarray] | None = None, neg_diff: float | None = None) -> list[dict]:
     """ミニマップ 1 枚で、誰がどこにいるか。
     ① 縁の輪（暖色・寒色・観戦中の黄色）から、アイコンらしい場所の候補を多めに拾う（重なったアイコンも
        拾えるよう、近い候補も残す）
@@ -413,7 +414,10 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
     track_fix4 のスイッチ（既定は切）：
       exclusive_dist: 両チームに同じエージェントがいるとき、同じエージェント・別チームの 2 件が中心の距離
         exclusive_dist 以内なら、1 つのアイコンを両チームに割り当てたとみて点の高い方だけ残す（exclusive）。
-        捨てた方は debug に理由 "exclusive" で足す"""
+        捨てた方は debug に理由 "exclusive" で足す
+    track_fix5 のスイッチ（既定は切）：
+      neg_icons / neg_diff: Yoru のテザーや Chamber のアンカー等の設置物負テンプレートとの照合スコアが
+        エージェントの顔の score + neg_diff 以上なら設置物とみなして捨てる（理由 "neg"）"""
     if img is None or img.size == 0:
         return []
     H, W = img.shape[:2]
@@ -804,6 +808,14 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
                         "margin": round(point - sec, 2), "source": "prior"})
             kept.add((t, a))
 
+    if neg_icons and neg_diff is not None and out:
+        out, neg_lost = filter_neg(img, out, neg_icons, D, face_inner=face_inner, gray_w=gray_w, neg_diff=neg_diff)
+        if debug is not None:
+            for e in neg_lost:
+                debug.append({"x": round(e["x"], 4), "y": round(e["y"], 4), "color": e.get("rim"),
+                              "agent": e["agent"], "score": e["score"], "second": None, "second_agent": None,
+                              "faces": {}, "ring": e.get("ring", 0.0), "reason": "neg"})
+
     if exclusive_dist is not None:
         out, lost = exclusive(out, exclusive_dist)
         if debug is not None:
@@ -822,6 +834,36 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
                           "second_agent": second_agent_of(i), "faces": faces_of(i),
                           "ring": f["ring"], "reason": reasons.get(i, "thr")})
     return out
+
+
+def load_neg_icons(dir_path: Path | str | None = None) -> dict[str, np.ndarray]:
+    """設置物・アビリティ等の負テンプレート（vreplay/neg_icons/*.png）を読み込む。"""
+    d = Path(dir_path) if dir_path is not None else Path(__file__).resolve().parent / "neg_icons"
+    if not d.is_dir():
+        return {}
+    out: dict[str, np.ndarray] = {}
+    for p in sorted(d.glob("*.png")):
+        im = cv2.imdecode(np.fromfile(str(p), np.uint8), cv2.IMREAD_COLOR)
+        if im is not None and im.size:
+            out[p.stem] = im
+    return out
+
+
+def filter_neg(img: np.ndarray, found: list[dict], neg_icons: dict[str, np.ndarray], D: float,
+               face_inner: float = 0.38, gray_w: float = 0.0, neg_diff: float = 0.15) -> tuple[list[dict], list[dict]]:
+    """負テンプレート（設置物アイコン等）に顔の score + neg_diff 以上似ている検出を設置物として落とす。"""
+    if not neg_icons or not found:
+        return found, []
+    H, W = img.shape[:2]
+    kept, lost = [], []
+    for e in found:
+        px = (int(round(float(e["x"]) * W)), int(round(float(e["y"]) * H)))
+        best_neg = max(_face_score(img, px, tpl, D, inner=face_inner, gray_w=gray_w) for tpl in neg_icons.values())
+        if best_neg >= float(e.get("score") or 0.0) + neg_diff:
+            lost.append(e)
+        else:
+            kept.append(e)
+    return kept, lost
 
 
 def exclusive(found: list[dict], dist: float = 0.06) -> tuple[list[dict], list[dict]]:

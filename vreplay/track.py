@@ -389,14 +389,53 @@ def resample(chain: list[tuple[float, float, float, float]], times: list[float],
     return out
 
 
-def drop_lone_weak(dets: list, gap: float, min_keep: float, min_score: float = 0.58) -> list:
+def drop_lone_weak(dets: list, gap: float, min_keep: float, min_score: float = 0.58,
+                   max_span: float | None = None) -> list:
     """同じエージェントの前後の検出（点が min_score 以上・別の時刻）から gap 秒以上離れた孤立した検出のうち、
-    点が min_keep 未満のものを落とす。dets: [(t, x, y, score[, 割り引き])]。"""
-    ts = sorted({round(float(d[0]), 6) for d in dets if d[3] >= min_score})
+    点が min_keep 未満のものを落とす。dets: [(t, x, y, score[, 割り引き])]。
+    max_span を指定すると、gap 秒未満で繋がるクラスタ全体の時間幅が max_span 秒以下で
+    その中に min_keep 以上の点が 1 つも無い孤立弱クラスタも落とす。"""
+    if max_span is None:
+        ts = sorted({round(float(d[0]), 6) for d in dets if d[3] >= min_score})
 
-    def lone(t: float) -> bool:
-        return all(abs(u - t) >= gap - LONE_EPS for u in ts if abs(u - t) > 1e-6)
-    return [d for d in dets if not (d[3] < min_keep and lone(round(float(d[0]), 6)))]
+        def lone(t: float) -> bool:
+            return all(abs(u - t) >= gap - LONE_EPS for u in ts if abs(u - t) > 1e-6)
+        return [d for d in dets if not (d[3] < min_keep and lone(round(float(d[0]), 6)))]
+
+    good = sorted((d for d in dets if d[3] >= min_score), key=lambda x: x[0])
+    if not good:
+        return [d for d in dets if d[3] >= min_keep]
+    groups: list[list] = [[good[0]]]
+    for d in good[1:]:
+        if d[0] - groups[-1][-1][0] < gap - LONE_EPS:
+            groups[-1].append(d)
+        else:
+            groups.append([d])
+    keep_ts = set()
+    for g in groups:
+        span = g[-1][0] - g[0][0]
+        if any(d[3] >= min_keep for d in g) or span > max_span + LONE_EPS:
+            for d in g:
+                keep_ts.add(round(float(d[0]), 6))
+    return [d for d in dets if round(float(d[0]), 6) in keep_ts or d[3] >= min_keep]
+
+
+def drop_early_enemy(dets: list, start: float, early_sec: float, own_spawn: tuple[float, float],
+                     enemy_spawn: tuple[float, float], aspect: float = 1.0,
+                     ults: list[float] | None = None, max_score: float = 0.75) -> list:
+    """開幕 early_sec 秒以内に、ウルト記録無しで自陣より敵側スポーンに著しく近い弱い検出を落とす。"""
+    out = []
+    for d in dets:
+        t = float(d[0])
+        if start <= t <= start + early_sec and d[3] < max_score:
+            has_ult = any(float(u) <= t + 1.0 for u in (ults or ()))
+            if not has_ult:
+                de = _dist(d[1:3], enemy_spawn, aspect)
+                do = _dist(d[1:3], own_spawn, aspect)
+                if de < do * 0.55:
+                    continue
+        out.append(d)
+    return out
 
 
 def lone_points(chain: list, gap: float) -> list[float]:
@@ -491,7 +530,9 @@ def build(frames: list[tuple[float, list[dict]]], start: float, end: float, scal
           aspect: float = 1.0, deaths: dict | None = None, fixed: dict | None = None, skip=None,
           ults: dict | None = None, jumps: dict | None = None, icon_frac: float | None = None,
           rules: dict | None = None, walls=None, lone_gap: float | None = None,
-          lone_score: float | None = None, lone_hold: float | None = None) -> dict:
+          lone_score: float | None = None, lone_hold: float | None = None,
+          lone_span: float | None = None, early_enemy_sec: float | None = None,
+          spawns: dict | None = None, attack_team: int | None = None) -> dict:
     """1 ラウンドぶんの照合結果 [(時刻, agents.match の結果)] から、エージェントごとの軌跡。
     返り値 {(team, agent): [(開始からの秒, x, y, conf, src)]}。src は det / interp / tp（採用した跳躍の着地）。
     deaths: {(team, agent): 死んだ時刻} があれば、その時刻以降の検出は鎖に入れず、格子もそこで切る。
@@ -518,8 +559,15 @@ def build(frames: list[tuple[float, list[dict]]], start: float, end: float, scal
         cut = (deaths or {}).get(key)
         if cut is not None:
             dets = [d for d in dets if d[0] < cut]
+        if (early_enemy_sec is not None and spawns and attack_team in (1, 2)
+                and "attack" in spawns and "defense" in spawns):
+            is_atk = key[0] == attack_team
+            own_sp = spawns["attack"] if is_atk else spawns["defense"]
+            en_sp = spawns["defense"] if is_atk else spawns["attack"]
+            dets = drop_early_enemy(dets, start, early_enemy_sec, own_sp, en_sp,
+                                    aspect=aspect, ults=(ults or {}).get(key))
         if lone_gap is not None and lone_score is not None:
-            dets = drop_lone_weak(dets, lone_gap, lone_score)
+            dets = drop_lone_weak(dets, lone_gap, lone_score, max_span=lone_span)
         rivals = [d[:3] for d in by.get((3 - key[0], key[1]), [])]
         ch, jp = chain_and_jumps(dets, scale, agent=key[1], aspect=aspect, rules=table.get(key[1], {}),
                                  ults=(ults or {}).get(key), rivals=rivals, walls=walls)

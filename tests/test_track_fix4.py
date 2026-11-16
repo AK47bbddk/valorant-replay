@@ -149,10 +149,12 @@ def test_agent_tracks_without_deaths_keep_everything(monkeypatch, tmp_path):
 
 
 def test_track_params_defaults_and_null():
-    assert TT._track_params({}) == {"death_grace": 1.0, "lone_gap": None, "lone_score": None, "lone_hold": None}
+    assert TT._track_params({}) == {"death_grace": 1.0, "lone_gap": None, "lone_score": None,
+                                    "lone_hold": None, "lone_span": None, "early_enemy_sec": None}
     got = TT._track_params({"tactics": {"track": {"death_grace": None, "lone_gap": 4, "lone_score": 0.7,
                                                   "lone_hold": 1.5}}})
-    assert got == {"death_grace": None, "lone_gap": 4.0, "lone_score": 0.7, "lone_hold": 1.5}
+    assert got == {"death_grace": None, "lone_gap": 4.0, "lone_score": 0.7, "lone_hold": 1.5,
+                   "lone_span": None, "early_enemy_sec": None}
 
 
 # ---- 対策3：孤立した弱い検出 -------------------------------------------------------------------

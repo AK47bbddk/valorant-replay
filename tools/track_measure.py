@@ -171,7 +171,7 @@ def main():
         import yaml
         tcfg = (yaml.safe_load(Path(a.config).read_text("utf-8")) or {}).get("tactics") or {}
         tk = TT._track_params({"tactics": tcfg})
-        lone = {k: tk[k] for k in ("lone_gap", "lone_score", "lone_hold")}
+        lone = {k: tk[k] for k in ("lone_gap", "lone_score", "lone_hold", "lone_span", "early_enemy_sec")}
         excl = ((tcfg.get("agent_match") or {}).get("exclusive_dist"))
         variants = {"base": (base, True, {}, None), "now": (TR, True, lone, excl)}
     result: dict = {"scale": round(scale, 4), "aspect": round(ASPECT, 4), "rounds": {}}
@@ -183,8 +183,12 @@ def main():
         for name, (mod, use_walls, extra, excl) in variants.items():
             fixed: dict = {}
             jumps: dict = {}
+            ex = dict(extra)
+            if mod is TR and ex.get("early_enemy_sec") is not None:
+                ex["spawns"] = spawns
+                ex["attack_team"] = ctx["attack_team"]
             trk = build_round(mod, frames, ctx, scale, True, fixed, ults=True, icon_frac=icon_frac, jumps=jumps,
-                              walls=walls if use_walls else None, extra=extra, exclusive_dist=excl)
+                              walls=walls if use_walls else None, extra=ex, exclusive_dist=excl)
             rr["metrics"][name] = metrics(trk, ctx, scale, spawns, icon_frac, area_of, ranks, walls)
             rr["tracks"][name] = _keyed(trk)
             if fixed:

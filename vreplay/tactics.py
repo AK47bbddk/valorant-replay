@@ -1160,7 +1160,7 @@ def _agent_match_params(cfg: dict) -> dict:
             "filled_rescue", "tpl_fill_min", "margin_exclusive", "margin_pair",
             "gray_floor", "gray_margin", "gray_face_std", "gray_ring", "face_inner",
             "bg_mode", "cand_nms", "cand_per_color", "face_search", "cap_over", "gray_crowded",
-            "fs_point", "fs_margin", "gray_w", "self_norm", "exclusive_dist")
+            "fs_point", "fs_margin", "gray_w", "self_norm", "exclusive_dist", "neg_diff")
     return {k: am[k] for k in keys if k in am}
 
 
@@ -1185,7 +1185,22 @@ def _track_params(cfg: dict) -> dict:
         v = tk.get(key, default)
         return None if v is None else float(v)
     return {"death_grace": num("death_grace", 1.0), "lone_gap": num("lone_gap", None),
-            "lone_score": num("lone_score", None), "lone_hold": num("lone_hold", None)}
+            "lone_score": num("lone_score", None), "lone_hold": num("lone_hold", None),
+            "lone_span": num("lone_span", None), "early_enemy_sec": num("early_enemy_sec", None)}
+
+
+def _spawns_of(placed: list[dict] | None) -> dict[str, tuple[float, float]]:
+    """placed から攻撃側・防衛側スポーンの座標 {"attack": (x, y), "defense": (x, y)} を取り出す。"""
+    sp: dict[str, tuple[float, float]] = {}
+    for c in placed or []:
+        if str(c.get("name") or "").lower() != "spawn":
+            continue
+        low = str(c.get("super") or "").lower()
+        if "attacker" in low:
+            sp["attack"] = (float(c["x"]), float(c["y"]))
+        elif "defender" in low:
+            sp["defense"] = (float(c["x"]), float(c["y"]))
+    return sp
 
 
 def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed, aspect, T, background,
@@ -1199,6 +1214,7 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
         return None
     icon_frac = icon_frac or ICON_FRAC
     am = _agent_match_params(cfg)
+    neg_icons = AG.load_neg_icons() if am.get("neg_diff") is not None else None
     tp = _agent_temporal(cfg)
     ct_fn = color_team if callable(color_team) else (lambda n_, _c=color_team: _c)
     base = board_base(background, mask, art=art)
@@ -1224,7 +1240,7 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
             return AG.match(mm, icons, agent_teams, color_team_n, icon_frac=icon_frac,
                             mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
                             alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None,
-                            **am, **kw)
+                            neg_icons=neg_icons, **am, **kw)
         for d_, t_, mm in frames:
             per.append((t_ - frames[0][1] + d_, mt(mm)))
         if tp is not None and len(per) > 1:
@@ -1366,11 +1382,12 @@ def _agents_dump(cfg, todo, out_dir, agent_teams, icons, icon_frac, params, ct_f
             except Exception:
                 alive = None
         dbg: list = []
+        neg_icons = AG.load_neg_icons() if params.get("neg_diff") is not None else None
         found = AG.match(mm, icons, agent_teams, color_team_n, icon_frac=icon_frac,
                          mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
                          alive=alive,
                          background=background if background is not None and background.shape[:2] == mm.shape[:2] else None,
-                         debug=dbg, **params)
+                         debug=dbg, neg_icons=neg_icons, **params)
         sec = t - starts.get(n, t)
         fname = f"r{n:02d}_t{max(0, int(round(sec))):03d}.png"
         cv2.imwrite(str(d / fname), mm)
@@ -1466,7 +1483,9 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
         return
     icon_frac = icon_frac or ICON_FRAC
     am = _agent_match_params(cfg)
+    neg_icons = AG.load_neg_icons() if am.get("neg_diff") is not None else None
     scale = spawn_scale(placed, aspect)
+    spawns = _spawns_of(placed)
     frames_by_n: dict[int, list] = {}
     for (n, _g), (_d, t, mm) in keep_trk.items():
         frames_by_n.setdefault(n, []).append((t, mm))
@@ -1496,7 +1515,7 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
         found = AG.match(mm, icons, agent_teams, ct_fn(n), icon_frac=icon_frac,
                          mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
                          alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None,
-                         **am, **({"prior": prior, **tp["match"]} if prior else {}))
+                         neg_icons=neg_icons, **am, **({"prior": prior, **tp["match"]} if prior else {}))
         # 死んだ選手（キルの時刻 + death_grace 秒以降）の検出は、cap_over で残したものも含めて使わない
         return t, AG.drop_dead(found, t, deaths_n, tk["death_grace"])
 
@@ -1534,10 +1553,14 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
         rules = TR.jump_rules((cfg.get("tactics") or {}).get("jump"))
         fixed: dict = {}
         jumps: dict = {}
+        side1 = _canon(rt.get("side1"))
+        atk_team = 1 if side1 == ATTACK else 2 if side1 == DEFENSE else None
         trk = TR.build(found, start, float(rt["end"]), scale, every=every, aspect=aspect,
                        deaths=(deaths_by_n or {}).get(n), fixed=fixed, ults=ults_r, jumps=jumps,
                        icon_frac=icon_frac, rules=rules, walls=walls,
-                       lone_gap=tk["lone_gap"], lone_score=tk["lone_score"], lone_hold=tk["lone_hold"])
+                       lone_gap=tk["lone_gap"], lone_score=tk["lone_score"], lone_hold=tk["lone_hold"],
+                       lone_span=tk["lone_span"], early_enemy_sec=tk["early_enemy_sec"],
+                       spawns=spawns, attack_team=atk_team)
         out: dict = {}
         for (team, agent), pts in trk.items():
             lst = []
