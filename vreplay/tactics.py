@@ -656,11 +656,39 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
     # エージェントごとの位置（アイコン照合）と、Valotactics のような配置図
     agent_info = None
     mcache: dict = {}                     # 節目の照合結果を追跡でも使い回す（id(ミニマップ) → 照合結果）
+    opening_fn = None
+    if agent_teams and T.get("ok") and mask is not None:
+        try:
+            from . import barriers as BR
+            dist_maps = BR.opening_dist_maps(mask, T, meta, meta["name"] or map_name)
+            if dist_maps:
+                _scale = spawn_scale(placed, aspect)
+
+                def opening_fn(n_: int, t_: float):
+                    rt_ = round_tac.get(n_)
+                    if rt_ is None:
+                        return None
+                    dt_ = float(t_) - float(rt_["start"])
+                    if dt_ > 3.0:
+                        return None
+                    s1 = rt_.get("side1")
+                    if s1 not in (ATTACK, DEFENSE):
+                        return None
+                    m1 = BR.opening_mask(dist_maps, s1, dt_, _scale)
+                    m2 = BR.opening_mask(dist_maps, _opp(s1), dt_, _scale)
+                    out_m = {}
+                    if m1 is not None:
+                        out_m[1] = m1
+                    if m2 is not None:
+                        out_m[2] = m2
+                    return out_m or None
+        except Exception:
+            opening_fn = None
     if agent_teams and keep:
         agent_info = _agent_positions(cfg, meta, keep, agent_teams, ct, mask, reg, placed, aspect,
                                       T if T.get("ok") else None, background, out_dir, round_tac, log,
                                       icons=icons, icon_frac=icon_frac, alive_fn=alive_fn, art=art_crop,
-                                      cache=mcache)
+                                      cache=mcache, opening_fn=opening_fn)
         _agent_setups(agent_info, round_tac, ranks)
     if agent_teams and (keep_trk or keep):
         try:
@@ -669,7 +697,8 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
                           every=track_every or 5.0, cache=mcache, threads=int(tcfg.get("track_threads") or 4),
                           out_dir=out_dir, deaths_by_n={int(r["n"]): _round_deaths(r) for r in rlist},
                           ults_by_n={int(r["n"]): _round_ults(r) for r in rlist},
-                          walls=_track_walls(tcfg, mask, art_crop is not None, log))
+                          walls=_track_walls(tcfg, mask, art_crop is not None, log),
+                          opening_fn=opening_fn)
         except Exception as e:                       # 追跡に失敗しても、ほかの結果は出す
             if log:
                 log(f"    エージェントの追跡はスキップしました（{e}）")
@@ -1204,7 +1233,8 @@ def _spawns_of(placed: list[dict] | None) -> dict[str, tuple[float, float]]:
 
 
 def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed, aspect, T, background,
-                     out_dir, round_tac, log, icons=None, icon_frac=None, alive_fn=None, art=None, cache=None):
+                     out_dir, round_tac, log, icons=None, icon_frac=None, alive_fn=None, art=None, cache=None,
+                     opening_fn=None):
     """節目ごとのミニマップ（前後 1 秒の数枚）でエージェントのアイコンを照合し、位置・ゾーンと配置図を作る。"""
     from . import agents as AG
     from . import minimap as MM
@@ -1242,12 +1272,17 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
                             alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None,
                             neg_icons=neg_icons, **am, **kw)
         for d_, t_, mm in frames:
-            per.append((t_ - frames[0][1] + d_, mt(mm)))
+            t_masks = opening_fn(n, t_) if opening_fn is not None else None
+            per.append((t_ - frames[0][1] + d_, mt(mm, team_masks=t_masks)))
         if tp is not None and len(per) > 1:
             # 節目の前後の何枚かで、ほかのフレームで確かに見つかった検出を prior にして照合し直す
-            res2 = AG.rematch_with_priors([x[0] for x in per], [x[1] for x in per],
-                                          lambda k, pr: mt(frames[k][2], prior=pr, **tp["match"]),
-                                          window=tp["window"], strong=tp["strong"])
+            res2 = AG.rematch_with_priors(
+                [x[0] for x in per], [x[1] for x in per],
+                lambda k, pr: mt(frames[k][2], prior=pr,
+                                 team_masks=(opening_fn(n, frames[k][1]) if opening_fn is not None else None),
+                                 **tp["match"]),
+                window=tp["window"], strong=tp["strong"],
+            )
             per = [(x[0], f2) for x, f2 in zip(per, res2)]
         for (_d, _t, mm), (_dt, f_) in zip(frames, per):
             if cache is not None:
@@ -1468,7 +1503,7 @@ def _track_walls(tcfg: dict, mask, art_ok: bool, log=None):
 def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, placed, aspect, background,
                   round_tac, log, icons=None, icon_frac=None, alive_fn=None, every: float = 5.0,
                   cache: dict | None = None, threads: int = 4, out_dir=None, deaths_by_n: dict | None = None,
-                  ults_by_n: dict | None = None, walls=None):
+                  ults_by_n: dict | None = None, walls=None, opening_fn=None):
     """track_every 秒ごと（＋節目の前後）のミニマップでアイコンを照合し、走れる速さの制約で
     エージェントごとの軌跡にする（vreplay.track）。rt["tracks"] = {"1": {"Jett": [[e, x, y, conf, src, zone, callout]]}}
     deaths_by_n: {ラウンド: {(team, agent): 死んだ時刻}}。あればその時刻で軌跡を切る（死んだ後の検出は使わない）。
@@ -1512,10 +1547,11 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
                 alive = {1: a1, 2: a2} if a1 is not None and a2 is not None else None
             except Exception:
                 alive = None
+        t_masks = opening_fn(n, t) if opening_fn is not None else None
         found = AG.match(mm, icons, agent_teams, ct_fn(n), icon_frac=icon_frac,
                          mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
                          alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None,
-                         neg_icons=neg_icons, **am, **({"prior": prior, **tp["match"]} if prior else {}))
+                         neg_icons=neg_icons, team_masks=t_masks, **am, **({"prior": prior, **tp["match"]} if prior else {}))
         # 死んだ選手（キルの時刻 + death_grace 秒以降）の検出は、cap_over で残したものも含めて使わない
         return t, AG.drop_dead(found, t, deaths_n, tk["death_grace"])
 

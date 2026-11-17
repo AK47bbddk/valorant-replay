@@ -368,7 +368,8 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
           self_norm: float | None = None, prior: list[dict] | None = None, prior_bonus: float = 0.08,
           prior_move: float = 0.08, prior_relax: float = 0.06, prior_search: bool = True,
           exclusive_dist: float | None = None,
-          neg_icons: dict[str, np.ndarray] | None = None, neg_diff: float | None = None) -> list[dict]:
+          neg_icons: dict[str, np.ndarray] | None = None, neg_diff: float | None = None,
+          team_masks: dict[int, np.ndarray] | None = None) -> list[dict]:
     """ミニマップ 1 枚で、誰がどこにいるか。
     ① 縁の輪（暖色・寒色・観戦中の黄色）から、アイコンらしい場所の候補を多めに拾う（重なったアイコンも
        拾えるよう、近い候補も残す）
@@ -589,6 +590,11 @@ def match(img: np.ndarray, icons: dict[str, np.ndarray], teams: dict[int, list[s
     total = S + 0.2 * np.array([f["ring"] for f in cands])[:, None]
     for i, f in enumerate(cands):
         for j, (t, _) in enumerate(slots):
+            tm_mask = team_masks.get(t) if team_masks else None
+            if tm_mask is not None and tm_mask.shape[:2] == (H, W):
+                if not _on_floor(tm_mask, f["px"][0], f["px"][1], W, H, tol=1):
+                    total[i, j] = -99.0
+                    continue
             tc = team_color.get(t)
             if f["color"] == "yellow" or tc is None:
                 continue
