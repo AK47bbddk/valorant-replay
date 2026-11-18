@@ -524,12 +524,29 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
     side1_by_n = {int(r["n"]): _canon(r.get("side1")) for r in rlist}
     warm1_of: dict[int, bool] = {}
     color_mode = "team"
+    color_note = ""
+    color_uncertain = False
     if T.get("ok"):
-        warm1_of, color_mode, cmsg = color_by_round(samples, placed, start_by_n, alive_fn, side1_by_n)
+        face_votes = _face_warm_by_half(cfg, keep, keep_trk, agent_teams, icons, icon_frac or ICON_FRAC,
+                                        mask=mask, background=background)
+        warm1_of, color_mode, cmsg = color_by_round(samples, placed, start_by_n, alive_fn, side1_by_n,
+                                                    face_votes=face_votes)
         if color_mode == "side":
             warm1 = warm1_of.get(1, warm1)
+            color_note = cmsg
             if log:
                 log(f"    {cmsg}")
+        else:
+            # 顔スコアが両ハーフ一致して team と確定した場合はその team 対応を優先する
+            f1 = (face_votes.get(1) or (None, ""))[0]
+            f2 = (face_votes.get(2) or (None, ""))[0]
+            if f1 is not None and f1 == f2:
+                warm1 = f1
+            if cmsg:
+                color_note = cmsg
+                color_uncertain = "判定できなかった" in cmsg
+                if log:
+                    log(f"    {cmsg}")
 
     def ct(n_) -> dict:
         w_ = warm1_of.get(int(n_), warm1)
@@ -722,6 +739,8 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         "orientation": k,
         "warm_team1": bool(warm1),
         "color_mode": color_mode,                     # team＝色がチームで決まる／side＝攻守で決まる
+        "color_note": color_note or None,
+        "color_uncertain": color_uncertain,
         "warm_team1_by_round": {str(k_): v_ for k_, v_ in sorted(warm1_of.items())} if warm1_of else None,
         "calibration": cal_msg,
         "calibration_score": round(float(score), 3),
@@ -960,11 +979,90 @@ def _warm_team1(samples: list[dict], placed: list[dict], starts: dict, alive_fn=
     return yes >= no, f"スポーンと生存人数で {max(yes, no)}/{yes + no}"
 
 
-def color_by_round(samples: list[dict], placed: list[dict], starts: dict, alive_fn, side1_by_n: dict
+def _pick_half_frames(keep: dict, keep_trk: dict, lo: int, hi: int, limit: int = 16) -> list[np.ndarray]:
+    """指定ハーフ（lo <= round <= hi）からラウンドに偏りなく最大 limit 枚のミニマップを選ぶ。"""
+    by_n: dict[int, list[np.ndarray]] = {}
+    for (n, _label), lst in sorted(keep.items()):
+        if lo <= int(n) <= hi:
+            items = lst if isinstance(lst, list) else [lst]
+            for it in items:
+                if len(it) >= 3 and it[2] is not None and it[2].size:
+                    by_n.setdefault(int(n), []).append(it[2])
+    for (n, _g), it in sorted(keep_trk.items()):
+        if lo <= int(n) <= hi and len(it) >= 3 and it[2] is not None and it[2].size:
+            by_n.setdefault(int(n), []).append(it[2])
+    picked: list[np.ndarray] = []
+    idx = 0
+    while len(picked) < limit:
+        added = False
+        for n in sorted(by_n):
+            if idx < len(by_n[n]):
+                picked.append(by_n[n][idx])
+                added = True
+                if len(picked) >= limit:
+                    break
+        if not added:
+            break
+        idx += 1
+    return picked
+
+
+def _face_warm_by_half(cfg: dict, keep: dict, keep_trk: dict, agent_teams: dict | None, icons: dict | None,
+                       icon_frac: float, mask=None, background=None, limit: int = 16
+                       ) -> dict[int, tuple[bool | None, str]]:
+    """前半（1〜12）と後半（13〜24）それぞれで warm=team1 / warm=team2 の両方で顔照合を試し、
+    両チームで共通でない固有エージェントの検出数・スコア合計から暖色がチーム1かを判定する。"""
+    if not agent_teams or not icons:
+        return {}
+    t1 = set(agent_teams.get(1) or [])
+    t2 = set(agent_teams.get(2) or [])
+    unique = (t1 - t2) | (t2 - t1)
+    if not unique:
+        return {}
+    from concurrent.futures import ThreadPoolExecutor
+    from . import agents as AG
+
+    am = _agent_match_params(cfg)
+    neg_icons = AG.load_neg_icons() if am.get("neg_diff") is not None else None
+    out: dict[int, tuple[bool | None, str]] = {}
+
+    def eval_frame(mm: np.ndarray) -> tuple[int, float, int, float]:
+        m_ = mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None
+        bg_ = background if background is not None and background.shape[:2] == mm.shape[:2] else None
+        rt = AG.match(mm, icons, agent_teams, {"warm": 1, "cool": 2}, icon_frac=icon_frac,
+                      mask=m_, background=bg_, neg_icons=neg_icons, **am)
+        rf = AG.match(mm, icons, agent_teams, {"warm": 2, "cool": 1}, icon_frac=icon_frac,
+                      mask=m_, background=bg_, neg_icons=neg_icons, **am)
+        ut = [e for e in rt if e.get("agent") in unique]
+        uf = [e for e in rf if e.get("agent") in unique]
+        return len(ut), sum(float(e.get("score") or 0.0) for e in ut), len(uf), sum(float(e.get("score") or 0.0) for e in uf)
+
+    threads = max(1, min(4, int((cfg.get("tactics") or {}).get("track_threads") or 4)))
+    for half, (lo, hi) in ((1, (1, 12)), (2, (13, 24))):
+        frs = _pick_half_frames(keep, keep_trk, lo, hi, limit=limit)
+        if not frs:
+            continue
+        with ThreadPoolExecutor(max_workers=threads, thread_name_prefix="色判定") as ex:
+            stats = list(ex.map(eval_frame, frs))
+        cnt_t = sum(x[0] for x in stats)
+        sum_t = sum(x[1] for x in stats)
+        cnt_f = sum(x[2] for x in stats)
+        sum_f = sum(x[3] for x in stats)
+        hi_s, lo_s = max(sum_t, sum_f), min(sum_t, sum_f)
+        clear = (cnt_t + cnt_f >= 4 and abs(sum_t - sum_f) >= 0.5
+                 and (lo_s <= 0.0 or hi_s >= 1.15 * lo_s))
+        w = (sum_t > sum_f) if clear else None
+        desc = f"固有顔スコア T1={cnt_t}件({sum_t:.1f}) vs T2={cnt_f}件({sum_f:.1f})"
+        out[half] = (w, desc)
+    return out
+
+
+def color_by_round(samples: list[dict], placed: list[dict], starts: dict, alive_fn, side1_by_n: dict,
+                   face_votes: dict[int, tuple[bool | None, str]] | None = None
                    ) -> tuple[dict[int, bool], str, str]:
     """色の決まり方（チームで決まる／攻守で決まる）を見分け、ラウンドごとの「暖色＝チーム1か」を返す。
-    前半（1〜12）と後半（13〜24）で別々に _warm_team1 を求め、食い違えば攻守で決まる放送とみなす
-    （そのときは延長も含め、各ラウンドの攻守から決める）。返り値 (warm1_of, "team"|"side", 説明)。"""
+    ① 開始直後のスポーンとの位置関係、② 固有エージェントの顔照合スコア、③ 生存人数＋スポーン、の順で判定する。
+    前後半で食い違えば攻守で決まる放送（side）とみなし、どれでも決められない場合のみ team にフォールバックして警告を残す。"""
     h1 = [s_ for s_ in samples if s_["n"] <= 12]
     h2 = [s_ for s_ in samples if 13 <= s_["n"] <= 24]
     if not h1 or not h2:
@@ -984,7 +1082,8 @@ def color_by_round(samples: list[dict], placed: list[dict], starts: dict, alive_
                     math.hypot(s_["warm"][0] - sp["d"][0], s_["warm"][1] - sp["d"][1])
                 dc = math.hypot(s_["cool"][0] - sp["a"][0], s_["cool"][1] - sp["a"][1]) - \
                     math.hypot(s_["cool"][0] - sp["d"][0], s_["cool"][1] - sp["d"][1])
-                per.setdefault(s_["n"], []).append(dw < dc)
+                if abs(dw - dc) > 0.02:
+                    per.setdefault(s_["n"], []).append(dw < dc)
             vals = [sum(v) / len(v) >= 0.5 for v in per.values() if v]
             return (sum(vals) / len(vals), len(vals)) if vals else (None, 0)
         f1, n1 = frac(h1)
@@ -999,16 +1098,28 @@ def color_by_round(samples: list[dict], placed: list[dict], starts: dict, alive_
                                      f"→ ラウンドごとに色とチームを対応づけます")
             if sure(f1) and sure(f2):
                 return {}, "team", ""
+    # ② 位置で決められないときは、固有エージェントの顔照合スコアで前後半それぞれを判定する
+    s1 = next((v for k_, v in sorted(side1_by_n.items()) if k_ <= 12 and v in (ATTACK, DEFENSE)), None)
+    if face_votes:
+        fw1, d1 = face_votes.get(1) or (None, "")
+        fw2, d2 = face_votes.get(2) or (None, "")
+        if fw1 is not None and fw2 is not None:
+            if fw1 != fw2 and s1 is not None:
+                warm_is_atk = fw1 == (s1 == ATTACK)
+                out = {n_: (sd == ATTACK) == warm_is_atk for n_, sd in side1_by_n.items() if sd in (ATTACK, DEFENSE)}
+                return out, "side", (f"ミニマップの色は攻守で決まる放送です（暖色＝{'攻め' if warm_is_atk else '守り'}・"
+                                     f"前半 {d1}／後半 {d2}）→ ラウンドごとに色とチームを対応づけます")
+            if fw1 == fw2:
+                return {}, "team", f"ミニマップの色はチームで決まる放送です（前半 {d1}／後半 {d2}）"
+    # ③ 顔スコアでも決まらないときだけ従来の生存人数＋スポーンへ
     w1, v1 = _warm_team1(h1, placed, starts, alive_fn)
     w2, v2 = _warm_team1(h2, placed, starts, alive_fn)
-    s1 = next((v for k_, v in sorted(side1_by_n.items()) if k_ <= 12 and v in (ATTACK, DEFENSE)), None)
-    if w1 == w2 or s1 is None:
-        return {}, "team", ""
-    # 前半の最初のラウンドで、暖色が攻めだったか
-    warm_is_atk = w1 == (s1 == ATTACK)
-    out = {n_: (sd == ATTACK) == warm_is_atk for n_, sd in side1_by_n.items() if sd in (ATTACK, DEFENSE)}
-    return out, "side", (f"ミニマップの色は攻守で決まる放送です（暖色＝{'攻め' if warm_is_atk else '守り'}・"
-                         f"前半 {v1}／後半 {v2}）→ ラウンドごとに色とチームを対応づけます")
+    if w1 != w2 and s1 is not None:
+        warm_is_atk = w1 == (s1 == ATTACK)
+        out = {n_: (sd == ATTACK) == warm_is_atk for n_, sd in side1_by_n.items() if sd in (ATTACK, DEFENSE)}
+        return out, "side", (f"ミニマップの色は攻守で決まる放送です（暖色＝{'攻め' if warm_is_atk else '守り'}・"
+                             f"前半 {v1}／後半 {v2}）→ ラウンドごとに色とチームを対応づけます")
+    return {}, "team", f"色とチームの対応（攻守固定／チーム固定）を十分な確信度で判定できなかったため、単一対応（team モード）のままにします（前半 {v1}／後半 {v2}）"
 
 
 def _agent_setups(agent_info: dict | None, round_tac: dict, ranks: dict | None = None) -> None:
