@@ -2595,8 +2595,9 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
     opps = "、".join(f"{o}（{d or '?'}）" for _, _, d, o in maps[-6:])
     slides.append(_slide(map_name, title, f'<p class="sub" style="font-size:20px">{_e(comp)}</p>'
                          f'<p class="sub">元にした試合：{_e(opps)}</p>'
-                         f'<p class="sub">はじめの 4 枚は「この構成をそのまま真似するための手順」です。'
-                         f'そのあとに数字の裏づけ（strong / weak point・型ごとの集計）が続きます。</p>', foot, h1=True))
+                         f'<p class="sub">本編は 守り（Map Prio → Objectives → 配置 → Micro Plays）→ 攻め（Map Prio → '
+                         f'Objectives → デフォルトと展開）→ 鍵になる 1 体・ULT・ピストル。数字の裏づけは後ろの付録にあります。</p>',
+                         foot, h1=True))
 
     # ミニマップ合わせがずれているマップの位置は、動き・実例・エリアテイクに使わない
     walk = walk_grid(cfg, map_name)
@@ -2626,6 +2627,15 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
         except Exception as e:
             log(f"  {title}: メタのスライドを作れませんでした（{e}）")
     prs = {sd: playbook_rows([r for r in rows if r["side"] == sd], sd) for sd in (DEFENSE, ATTACK)}
+    # 本編（v3：お手本の冊子の並び）を表紙のすぐ後ろに。ここまでのメタのスライドと、この後ろは付録
+    n_main = 0
+    try:
+        from . import deck_v3 as V3
+        main = V3.main_slides(cfg, key, rows, prs, calls, out_dir, img_dir, foot, kb, log=log)
+        slides[1:1] = main
+        n_main = len(main)
+    except Exception as e:
+        log(f"  {title}: 本編（v3）を作れませんでした（{e}）")
     slides += howto_slides(cfg, key, rows, prs, foot)
     slides += motion_slides(cfg, map_name, prs, rows, calls, foot, walk=walk)
     cheat = build_cheatsheet(cfg, key, rows, prs, out_dir)
@@ -2823,7 +2833,7 @@ def build_deck(cfg: dict, key: dict, rows: list[dict], base: list[dict], out_dir
             note = ("" if L.complete(key["llm"]) else
                     '<p class="sub">※ 文章が途中で切れていた分は落としています。'
                     '書けなかった側は strong / weak point を見てください。</p>')
-            slides.insert(1, _slide("Summary", "ATK / DEF summary（LLM が数字から書いた叩き台）",
+            slides.insert(1 + n_main, _slide("Summary", "ATK / DEF summary（LLM が数字から書いた叩き台）",
                                     f'<div class="cols3">{"".join(cols)}</div>{note}', foot))
 
     # ULT・選手・経済

@@ -205,8 +205,19 @@ def main():
     qa.add_argument("--root", help="report.json を探すフォルダ（既定 output.dir）")
     qa.add_argument("--config")
 
+    from .opening_playbook import add_openings_args
+    op_p = sub.add_parser("openings", help="TactiVal バリア・KB から各マップの初動配置と HTML プレイブックを生成する")
+    add_openings_args(op_p)
+
     a = ap.parse_args()
-    cfg = config.load(a.config)
+    try:
+        cfg = config.load(a.config)
+    except SystemExit:
+        if a.cmd == "openings" and not a.config:
+            import yaml
+            cfg = yaml.safe_load(config.DEFAULT.read_text(encoding="utf-8")) or {}
+        else:
+            raise
 
     if a.cmd == "run":
         if getattr(a, "maps", None):
@@ -373,6 +384,9 @@ def main():
         scrim.run(cfg, a.video, a.map, a.team1, a.team2, sp(a.agents1), sp(a.agents2), start_side=side,
                   team1_right=a.team1_right, players1=sp(a.players1) or None, players2=sp(a.players2) or None,
                   day=parse_day(a.date).isoformat() if a.date else None, title=a.title)
+    elif a.cmd == "openings":
+        from .opening_playbook import run_openings_cli
+        run_openings_cli(a, cfg=cfg)
     elif a.cmd == "pick":
         from . import pick
         win = True if a.win else False if a.loss else None

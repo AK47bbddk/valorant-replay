@@ -1,0 +1,9 @@
+# チーム内の呼び名（お手本の「Venom」「Burger King」のような名前）。
+# チーム（タグか正式名）→ マップ → 自動で付いた型の名前 → 呼び名。
+# 冊子では「“呼び名”（自動の名前）」と出す。<output.dir>/kb/names.yaml を置くと上書き（Drive で編集できる）。
+# 例：
+# BONK:
+#   Split:
+#     "B Main テイクデフォ": Venom
+#     "A Main 捨て B スプリット": Burger King
+{}

@@ -194,6 +194,7 @@ vreplay playbook --sync --team G2 --map Split
   放送の座標に写した公式のマップ画像（白地。スキルの線や後ろの試合画面が映らない）。合わせられなければ背景の中央値。
   プレイブックの重ね合わせ図の下地は `_tactics/{map}_uv.jpg`（放送のミニマップをコールアウトの座標に写したもの）。
   確認用 `_tactics/agents_check.jpg`（いちばん多く見つかった 1 枚）。`tactics.agents: false` で止める。
+- **スモーク・アビリティ検知 & 照合精度向上**（`agents.py`, `tactics.py`）：`agent_match`（`thr: 0.62`, `face_inner: 0.38`, `gray_w: 0.2`, `self_norm: 2.0`, `face_search: true`, `rim_check: true` 等）で、逆色縁の低リング誤検出・同一位置重複・塗りつぶし円を除外しつつ Precision 95% 以上を維持する。また `AG.detect_smokes` でミニマップ上のドーム型スモーク・リング型オーブ・壁型カーテンを検出し、`round_tac["smokes"]` および `opening_playbook.py` の初動分類（スモーク位置・エージェント配置 `who`・フェイク・スプリット）に反映する。
 - **公式のマップ画像で合わせる**（`minimap.register_art`）：valorant-api の displayIcon（透過つき、コールアウトと同じ 0..1 の座標）の
   床の縁の点を、放送のミニマップの白い縁の線の距離画像に重ね（chamfer）、回転・倍率・位置を粗→細で詰める（初期値はコールアウトと
   床で合わせた結果か、90 度ごとの向き＋縁の線の外接矩形）。縁の点の 50% 以上が 2px 以内に乗れば成功で、床の 2 値画像は公式の画像を

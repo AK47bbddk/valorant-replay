@@ -542,6 +542,12 @@ Drive の `valorant-replay/calibrate/` に、枠を描いた `rois.jpg` とカ�
 指定した区間に購入フェーズが入っていれば、装備表の検出結果（`table.jpg`、読めた武器に枠）と
 選手ごとの「メイン / サブ武器」も出ます。
 
+また、ミニマップの開幕位置・スモーク検知・初動分類を目視で検証するためのブラインドテスト HTML も生成できます：
+
+```powershell
+python scripts/blind_test.py --dumps <dump_dir...> --classified "playbook_JSON/loud_summit_classified (1).json" --gifs <gifs_dir> --max 30 --out blind_test_30.html
+```
+
 ## YouTube に弾かれるとき（「Sign in to confirm you're not a bot」）
 
 Colab は Google のデータセンターの IP なので、YouTube にボット判定されやすいです。

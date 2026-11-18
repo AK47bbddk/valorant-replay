@@ -1,6 +1,12 @@
-# コーディング担当（OpenCode）への約束
+# コーディング担当（Antigravity Subagent / OpenCode）への約束
 
-このリポジトリは「Opus が指示書を書く → OpenCode（DeepSeek V4.1 Flash Free）が実装 → Gemini 4 Argon がレビュー → Opus がマージを決める」で回す。手順の全体は `docs/WORKFLOW.md`。
+このリポジトリは **Antigravity (`agy`) オーケストレーション**（`GEMINI.md` および `.agents/skills/`）を軸に、指示書作成 → 実装・テスト → レビュー → マージで回す（従来の OpenCode 運用とも互換）。手順の全体は `docs/WORKFLOW.md`。
+
+- **ワークスペースルール**: `GEMINI.md`
+- **スキル**:
+  - `.agents/skills/vreplay-orchestrator/SKILL.md`（全体の進行・タスク投入）
+  - `.agents/skills/vreplay-review/SKILL.md`（差分レビュー）
+  - `.agents/skills/vreplay-remote-sync/SKILL.md`（ノート PC / 自宅 PC / Discord Bot 連携）
 
 ## やること
 

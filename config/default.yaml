@@ -100,6 +100,44 @@ tactics:
   # 1:40 から何秒ごとの配置（ゾーン・エリアの人数）を残すか。プレイブックの「手」の判定と時間の並びに使う
   snap_every: 10
   track_threads: 4     # 追跡の照合を何本のスレッドで並べるか
+  # ミニマップ上のスモーク・カーテン等のアビリティを検知してラウンド情報・初動分類に付与するか
+  smokes: true
+  # エージェントの照合の厳しさ。数字は tools/agents_eval.py / tools/agents_blind_eval.py で実データを数えてから直す
+  agent_match:
+    thr: 0.62
+    margin: 0.06
+    crowded_margin: 0.10
+    min_face_std: 12
+    filled_rescue: 0.62
+    tpl_fill_min: 0.30
+    margin_exclusive: true
+    margin_pair: false
+    gray_floor: 0.45
+    gray_margin: 0.15
+    gray_face_std: 18
+    gray_ring: 0.50
+    gray_crowded: true
+    face_inner: 0.38
+    bg_mode: subtract
+    cand_nms: 0.8
+    cand_per_color: 16
+    face_search: true
+    fs_point: 0.0
+    fs_margin: 0.06
+    gray_w: 0.2
+    self_norm: 2.0
+    cap_over: 0.62
+    rim_check: true
+  agent_temporal:
+    enabled: false
+    window: 2.5
+    strong: 0.66
+    bonus: 0.05
+    relax: 0.04
+    max_move: 0.08
+    search: true
+  # 確かめ用：1 マップにつき何枚のミニマップを _tactics/agents_dump/ に書き出すか（0 で書き出さない）
+  agents_dump: 0
 
 output:
   dir: /content/drive/MyDrive/valorant-replay

@@ -163,6 +163,7 @@ def detect_dots(img, min_area: int = 4, max_area: int = 450, per_color: int = 5,
     h, w = img.shape[:2]
     D = (icon_frac or ICON_FRAC) * h
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     out = []
     for color, ranges in (("warm", WARM_RANGES), ("cool", COOL_RANGES)):
         mask = _mask(hsv, ranges)
@@ -177,7 +178,18 @@ def detect_dots(img, min_area: int = 4, max_area: int = 450, per_color: int = 5,
                 continue
             if area > max(max_area, 12 * D * D):            # 大きな色面（UI・背景）
                 continue
-            kk = int(min(3, max(1, round(side / (D * 1.15)))))
+            fill_rect = area / max(1.0, float(ww * hh))
+            if side >= 1.35 * D:
+                # 中空のスモーク輪や内部が一様なドームを選手の重なりと誤認しないよう除外
+                cy0, cy1 = y + hh // 4, max(y + hh // 4 + 1, y + (3 * hh) // 4)
+                cx0, cx1 = x + ww // 4, max(x + ww // 4 + 1, x + (3 * ww) // 4)
+                c_mask = mask[cy0:cy1, cx0:cx1]
+                c_gray = gray[cy0:cy1, cx0:cx1]
+                c_fill = float((c_mask > 0).mean()) if c_mask.size else 0.0
+                c_std = float(c_gray.std()) if c_gray.size else 0.0
+                if fill_rect < 0.38 and c_fill < 0.22 and c_std < 15.0:
+                    continue
+            kk = int(min(3, max(1, round(side / (D * 1.15))))) if fill_rect >= 0.45 else 1
             found.append((area, float(cents[i][0] / w), float(cents[i][1] / h), kk, ww, hh))
         found.sort(reverse=True)
         for area, fx, fy, kk, ww, hh in found[:per_color]:
@@ -646,17 +658,46 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
     # エージェントごとの位置（アイコン照合）と、Valotactics のような配置図
     agent_info = None
     mcache: dict = {}                     # 節目の照合結果を追跡でも使い回す（id(ミニマップ) → 照合結果）
+    opening_fn = None
+    if agent_teams and T.get("ok") and mask is not None:
+        try:
+            from . import barriers as BR
+            dist_maps = BR.opening_dist_maps(mask, T, meta, meta["name"] or map_name)
+            if dist_maps:
+                _scale = spawn_scale(placed, aspect)
+
+                def opening_fn(n_: int, t_: float):
+                    rt_ = round_tac.get(n_)
+                    if rt_ is None:
+                        return None
+                    dt_ = float(t_) - float(rt_["start"])
+                    if dt_ > 3.0:
+                        return None
+                    s1 = rt_.get("side1")
+                    if s1 not in (ATTACK, DEFENSE):
+                        return None
+                    m1 = BR.opening_mask(dist_maps, s1, dt_, _scale)
+                    m2 = BR.opening_mask(dist_maps, _opp(s1), dt_, _scale)
+                    out_m = {}
+                    if m1 is not None:
+                        out_m[1] = m1
+                    if m2 is not None:
+                        out_m[2] = m2
+                    return out_m or None
+        except Exception:
+            opening_fn = None
     if agent_teams and keep:
         agent_info = _agent_positions(cfg, meta, keep, agent_teams, ct, mask, reg, placed, aspect,
                                       T if T.get("ok") else None, background, out_dir, round_tac, log,
                                       icons=icons, icon_frac=icon_frac, alive_fn=alive_fn, art=art_crop,
-                                      cache=mcache)
+                                      cache=mcache, opening_fn=opening_fn)
         _agent_setups(agent_info, round_tac, ranks)
     if agent_teams and (keep_trk or keep):
         try:
             _agent_tracks(cfg, keep_trk, keep, agent_teams, ct, mask, reg, placed, aspect, background,
                           round_tac, log, icons=icons, icon_frac=icon_frac, alive_fn=alive_fn,
-                          every=track_every or 5.0, cache=mcache, threads=int(tcfg.get("track_threads") or 4))
+                          every=track_every or 5.0, cache=mcache, threads=int(tcfg.get("track_threads") or 4),
+                          opening_fn=opening_fn, out_dir=out_dir)
         except Exception as e:                       # 追跡に失敗しても、ほかの結果は出す
             if log:
                 log(f"    エージェントの追跡はスキップしました（{e}）")
@@ -968,7 +1009,8 @@ def color_by_round(samples: list[dict], placed: list[dict], starts: dict, alive_
 
 
 def _agent_setups(agent_info: dict | None, round_tac: dict, ranks: dict | None = None) -> None:
-    """アイコンで 4 人以上を読めたチームは、初動の配置（型・形）をエージェントの位置で上書きする。
+    """アイコンで 4 人以上（単一節目で届かない場合は序盤複数節目の統合で 3 人以上）を読めたチームは、
+    初動の配置（型・形）をエージェントの位置で上書きする。
     点の数え方（重なり・スモークの誤検出）より確か。誰がどこにいるか（'A: Sova・Jett'）も付ける。"""
     if not agent_info:
         return
@@ -980,13 +1022,30 @@ def _agent_setups(agent_info: dict | None, round_tac: dict, ranks: dict | None =
                 ents = [e for e in marks.get(label) or [] if e.get("team") == tm]
                 if len(ents) >= 4 and (best is None or len(ents) > len(best[1])):
                     best = (label, ents)
+            if best:
+                label, ents = best
+                ents = [e for e in ents if not is_spawn(e.get("zone"), e.get("callout"))]
+                zones = Counter(e["zone"] for e in ents if e.get("zone") in CORE_ZONES)
+                if sum(zones.values()) < 4:
+                    best = None
             if not best:
-                continue
-            label, ents = best
-            ents = [e for e in ents if not is_spawn(e.get("zone"), e.get("callout"))]
-            zones = Counter(e["zone"] for e in ents if e.get("zone") in CORE_ZONES)
-            if sum(zones.values()) < 4:
-                continue
+                # 1 枚の節目だけでは重なり等により 4 人未満のとき、1:15→1:30→1:40→1:00 の順でエージェント別に補完
+                merged_by_ag: dict[str, dict] = {}
+                for lbl in ("1:15", "1:30", "1:40", "1:00"):
+                    for e in marks.get(lbl) or []:
+                        ag = e.get("agent")
+                        if e.get("team") == tm and ag and ag not in merged_by_ag:
+                            if not is_spawn(e.get("zone"), e.get("callout")) and e.get("zone") in CORE_ZONES:
+                                merged_by_ag[ag] = e
+                                if len(merged_by_ag) >= 5:
+                                    break
+                if len(merged_by_ag) < 3:
+                    continue
+                label = "1:15+"
+                ents = list(merged_by_ag.values())
+                zones = Counter(e["zone"] for e in ents if e.get("zone") in CORE_ZONES)
+                if sum(zones.values()) < 3:
+                    continue
             side = ATTACK if (rt.get("side1") == ATTACK) == (tm == 1) else DEFENSE
             who, who_area = {}, {}
             for e in sorted((e for e in ents if e.get("agent")), key=lambda e: e["agent"]):
@@ -1000,7 +1059,7 @@ def _agent_setups(agent_info: dict | None, round_tac: dict, ranks: dict | None =
             area = key_area(areas, side, ranks)
             az = next((e.get("zone") for e in ents
                        if area_name(e.get("zone"), e.get("callout")) == area), None)
-            rt.setdefault("setups", {})[str(tm)] = {
+            new_su = {
                 **old_su, "name": setup_name(zones, side, area=area, ranks=ranks, code=code),
                 "shape": shape, "code": code,
                 "zones": dict(zones), "areas": dict(areas), "area": area, "area_zone": az,
@@ -1009,6 +1068,15 @@ def _agent_setups(agent_info: dict | None, round_tac: dict, ranks: dict | None =
                 "who": {z: v for z, v in who.items() if z in CORE_ZONES},
                 "who_area": who_area,           # 誰がどのエリアに立つか（5 人の担当）
                 "dots_shape": old_su.get("shape")}
+            if rt.get("smokes"):
+                early_sm = []
+                for slbl in ("1:40", "1:30", "1:15"):
+                    for s in (rt["smokes"].get(slbl) or []):
+                        if s.get("team") in (None, tm):
+                            early_sm.append(s)
+                if early_sm:
+                    new_su["smokes"] = early_sm
+            rt.setdefault("setups", {})[str(tm)] = new_su
 
 
 def map_art(cfg: dict, map_name: str):
@@ -1136,8 +1204,30 @@ def board_png(base: np.ndarray, entries: list[dict], icons: dict, path: Path, to
     return path
 
 
+def _agent_match_params(cfg: dict) -> dict:
+    """config の tactics.agent_match から、agents.match に渡す厳しさの設定だけを取り出す。"""
+    am = (cfg.get("tactics") or {}).get("agent_match") or {}
+    keys = ("thr", "margin", "crowded_margin", "min_face_std",
+            "filled_rescue", "tpl_fill_min", "margin_exclusive", "margin_pair",
+            "gray_floor", "gray_margin", "gray_face_std", "gray_ring", "face_inner",
+            "bg_mode", "cand_nms", "cand_per_color", "face_search", "cap_over", "gray_crowded",
+            "fs_point", "fs_margin", "gray_w", "self_norm", "rim_check")
+    return {k: am[k] for k in keys if k in am}
+
+
+def _agent_temporal(cfg: dict) -> dict | None:
+    """config の tactics.agent_temporal（照合の前に前後のフレームの検出を prior として使う）。切なら None。"""
+    tp = (cfg.get("tactics") or {}).get("agent_temporal") or {}
+    if not tp.get("enabled"):
+        return None
+    return {"window": float(tp.get("window", 2.5)), "strong": float(tp.get("strong", 0.66)),
+            "match": {"prior_bonus": float(tp.get("bonus", 0.08)), "prior_move": float(tp.get("max_move", 0.08)),
+                      "prior_relax": float(tp.get("relax", 0.06)), "prior_search": bool(tp.get("search", True))}}
+
+
 def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed, aspect, T, background,
-                     out_dir, round_tac, log, icons=None, icon_frac=None, alive_fn=None, art=None, cache=None):
+                     out_dir, round_tac, log, icons=None, icon_frac=None, alive_fn=None, art=None, cache=None,
+                     opening_fn=None):
     """節目ごとのミニマップ（前後 1 秒の数枚）でエージェントのアイコンを照合し、位置・ゾーンと配置図を作る。"""
     from . import agents as AG
     from . import minimap as MM
@@ -1146,6 +1236,9 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
     if not icons:
         return None
     icon_frac = icon_frac or ICON_FRAC
+    am = _agent_match_params(cfg)
+    tp = _agent_temporal(cfg)
+    detect_smk = bool((cfg.get("tactics") or {}).get("smokes", True))
     ct_fn = color_team if callable(color_team) else (lambda n_, _c=color_team: _c)
     base = board_base(background, mask, art=art)
     out = {}
@@ -1165,16 +1258,27 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
             except Exception:
                 alive = None
         per = []
+
+        def mt(mm, t_=t, **kw):
+            t_masks = opening_fn(n, t_) if opening_fn is not None else None
+            return AG.match(mm, icons, agent_teams, color_team_n, icon_frac=icon_frac,
+                            mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
+                            alive=alive, background=background if background is not None and background.shape[:2] == mm.shape[:2] else None,
+                            team_masks=t_masks, **am, **kw)
+
         for d_, t_, mm in frames:
-            f_ = AG.match(mm, icons, agent_teams, color_team_n, icon_frac=icon_frac,
-                          mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
-                          alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None)
-            per.append((t_ - frames[0][1] + d_, f_))
+            per.append((t_ - frames[0][1] + d_, mt(mm, t_=t_)))
+        if tp is not None and len(per) > 1:
+            res2 = AG.rematch_with_priors([x[0] for x in per], [x[1] for x in per],
+                                          lambda k, pr: mt(frames[k][2], t_=frames[k][1], prior=pr, **tp["match"]),
+                                          window=tp["window"], strong=tp["strong"])
+            per = [(x[0], f2) for x, f2 in zip(per, res2)]
+        for (_d, _t, mm), (_dt, f_) in zip(frames, per):
             if cache is not None:
                 cache[id(mm)] = f_
             if f_ and (first is None or len(f_) > len(first[1])):
                 first = (mm, f_)
-        found = AG.consensus(per, alive=alive) if len(per) > 1 else per[0][1]
+        found = AG.consensus(per, alive=alive, cap_over=am.get("cap_over")) if len(per) > 1 else per[0][1]
         n_try += 1
         n_frames += len(frames)
         n_found += len(found)
@@ -1192,15 +1296,32 @@ def _agent_positions(cfg, meta, keep, agent_teams, color_team, mask, reg, placed
                          "score": round(f["score"], 2), "color": team_color.get(f["team"])})
         out.setdefault(str(n), {})[label] = ents
         rt = round_tac.get(n)
+        if rt is not None and detect_smk and frames:
+            mm0 = frames[0][2]
+            raw_sm = AG.detect_smokes(
+                mm0, icon_frac=icon_frac,
+                mask=mask if mask is not None and mask.shape[:2] == mm0.shape[:2] else None,
+                background=background if background is not None and background.shape[:2] == mm0.shape[:2] else None,
+                found_agents=found, color_team=color_team_n,
+            )
+            sm_ents = []
+            for s in raw_sm:
+                c = MM.region_of(reg, placed, s["x"], s["y"]) if reg else None
+                if c is None:
+                    c, dist = MM.nearest(placed, s["x"], s["y"], aspect)
+                    if dist > 0.18:
+                        c = None
+                zone = zone_of(c)
+                callout = f"{zone} {c['name']}" if c and zone in SITE_SUPERS else (c["name"] if c else "?")
+                sm_ents.append({**s, "zone": zone, "callout": callout, "area": area_name(zone, c["name"]) if c else zone})
+            if sm_ents:
+                rt.setdefault("smokes", {})[label] = sm_ents
         if rt is not None and out_dir and label == "1:40":     # 配置図はラウンド開始時だけ
             p = Path(out_dir) / "_tactics" / f"board_r{n:02d}_140.jpg"
             bw, bh = base.shape[1], base.shape[0]
             if len(ents) >= 3:
-                # 放送のミニマップの座標のまま描く（下地は放送の座標に写した公式のマップ画像）
                 board_png(base, ents, icons, p, lambda e: (e["x"] * bw, e["y"] * bh), f"R{n} 1:40")
             else:
-                # 開始直後はスポーンでアイコンが重なって照合しきれないことがある。そのときは別の時刻の図にせず、
-                # 開始時の放送のミニマップそのものを載せる
                 raw = cv2.resize(frames[0][2], (bw, bh), interpolation=cv2.INTER_CUBIC)
                 board_png(raw, ents, icons, p, lambda e: (e["x"] * bw, e["y"] * bh), f"R{n} 1:40")
             rt.setdefault("boards", {})["1:40"] = str(p)
@@ -1229,9 +1350,108 @@ def spawn_scale(placed: list[dict], aspect: float = 1.0) -> float:
     return 0.75
 
 
+def _dump_sheets(tiles: list, d: Path, per: int = 12, cols: int = 3) -> None:
+    """書き出したフレームを 2 倍に拡大し、残した検出（緑の丸＋「名前 点」）と捨てた候補
+    （赤の ×＋理由）を重ねて並べる。1 枚に per フレームまで、あふれたら sheet_2.jpg…。"""
+    for page in range(0, len(tiles), per):
+        cells = []
+        for fname, mm, found, dbg in tiles[page:page + per]:
+            img = cv2.resize(mm, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+            h, w = img.shape[:2]
+            for f in found:
+                x, y = int(f["x"] * w), int(f["y"] * h)
+                cv2.circle(img, (x, y), 12, (0, 220, 0), 2, cv2.LINE_AA)
+                label = f"{f.get('agent')} {f['score']:.2f}"
+                cv2.putText(img, label, (x + 6, y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 3, cv2.LINE_AA)
+                cv2.putText(img, label, (x + 6, y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1, cv2.LINE_AA)
+            for r in dbg:
+                x, y = int(r["x"] * w), int(r["y"] * h)
+                cv2.drawMarker(img, (x, y), (0, 0, 255), cv2.MARKER_TILTED_CROSS, 14, 2)
+                cv2.putText(img, str(r["reason"]), (x + 6, y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                            (0, 0, 255), 1, cv2.LINE_AA)
+            cv2.putText(img, fname, (4, h - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+            cells.append(img)
+        cw = max(c.shape[1] for c in cells)
+        ch = max(c.shape[0] for c in cells)
+        padded = []
+        for c in cells:
+            p = np.full((ch, cw, 3), 30, np.uint8)
+            p[:c.shape[0], :c.shape[1]] = c
+            padded.append(p)
+        rows = []
+        for i in range(0, len(padded), cols):
+            row = padded[i:i + cols]
+            row += [np.full((ch, cw, 3), 30, np.uint8)] * (cols - len(row))
+            rows.append(np.hstack(row))
+        name = "sheet.jpg" if page == 0 else f"sheet_{page // per + 1}.jpg"
+        cv2.imwrite(str(d / name), np.vstack(rows), [cv2.IMWRITE_JPEG_QUALITY, 85])
+
+
+def _agents_dump(cfg, todo, out_dir, agent_teams, icons, icon_frac, params, ct_fn, alive_fn, mask,
+                 background, starts, log=None):
+    """確認用に、照合するフレーム（todo）をラウンドと時刻にまんべんなく散るよう等間隔に選び、
+    <out_dir>/_tactics/agents_dump/ に書き出す。"""
+    from . import agents as AG
+    n_dump = int((cfg.get("tactics") or {}).get("agents_dump") or 0)
+    if n_dump < 1 or not todo:
+        return
+    d = Path(out_dir) / "_tactics" / "agents_dump"
+    d.mkdir(parents=True, exist_ok=True)
+    step = max(1, len(todo) // n_dump)
+    picked = todo[::step][:n_dump]
+    icons_dir = d / "icons"
+    icons_dir.mkdir(parents=True, exist_ok=True)
+    for name, ic in icons.items():
+        if ic is not None and ic.size:
+            cv2.imwrite(str(icons_dir / f"{AG._norm(name)}.png"), ic)
+    if mask is not None and mask.size:
+        cv2.imwrite(str(d / "mask.png"), (np.asarray(mask).astype(np.uint8) * 255)
+                    if mask.dtype == bool else np.asarray(mask).astype(np.uint8))
+    if background is not None and background.size:
+        cv2.imwrite(str(d / "background.png"), background)
+    frames_meta, tiles = [], []
+    stat = Counter()
+    for n, (t, mm) in picked:
+        color_team_n = ct_fn(n)
+        alive = None
+        if alive_fn is not None:
+            try:
+                a1, a2 = alive_fn(t)
+                alive = {1: a1, 2: a2} if a1 is not None and a2 is not None else None
+            except Exception:
+                alive = None
+        dbg: list = []
+        found = AG.match(mm, icons, agent_teams, color_team_n, icon_frac=icon_frac,
+                         mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
+                         alive=alive,
+                         background=background if background is not None and background.shape[:2] == mm.shape[:2] else None,
+                         debug=dbg, **params)
+        sec = t - starts.get(n, t)
+        fname = f"r{n:02d}_t{max(0, int(round(sec))):03d}.png"
+        cv2.imwrite(str(d / fname), mm)
+        frames_meta.append({"file": fname, "round": int(n), "t": round(sec, 1),
+                            "color_team": {k: int(v) for k, v in color_team_n.items()},
+                            "alive": ({str(k): int(v) for k, v in alive.items()} if alive else None),
+                            "found": found, "rejected": dbg})
+        stat["cand"] += len(found) + len(dbg)
+        stat["kept"] += len(found)
+        for r in dbg:
+            stat[r["reason"]] += 1
+        tiles.append((fname, mm, found, dbg))
+    (d / "meta.json").write_text(json.dumps(
+        {"teams": {str(k): list(v) for k, v in agent_teams.items()},
+         "icon_frac": round(float(icon_frac), 4), "params": dict(params), "frames": frames_meta},
+        ensure_ascii=False), "utf-8")
+    _dump_sheets(tiles, d)
+    if log:
+        log(f"    エージェントの照合：候補 {stat['cand']}・残した {stat['kept']}・捨てた"
+            f"（filled {stat['filled']} / flat {stat['flat']} / margin {stat['margin']} / "
+            f"thr {stat['thr']} / cap {stat['cap']}）")
+
+
 def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, placed, aspect, background,
                   round_tac, log, icons=None, icon_frac=None, alive_fn=None, every: float = 5.0,
-                  cache: dict | None = None, threads: int = 4):
+                  cache: dict | None = None, threads: int = 4, opening_fn=None, out_dir=None):
     """track_every 秒ごと（＋節目の前後）のミニマップでアイコンを照合し、走れる速さの制約で
     エージェントごとの軌跡にする（vreplay.track）。rt["tracks"] = {"1": {"Jett": [[e, x, y, conf, src, zone, callout]]}}"""
     from . import agents as AG
@@ -1242,6 +1462,8 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
     if not icons:
         return
     icon_frac = icon_frac or ICON_FRAC
+    am = _agent_match_params(cfg)
+    tp = _agent_temporal(cfg)
     scale = spawn_scale(placed, aspect)
     frames_by_n: dict[int, list] = {}
     for (n, _g), (_d, t, mm) in keep_trk.items():
@@ -1254,9 +1476,9 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
 
     ct_fn = color_team if callable(color_team) else (lambda n_, _c=color_team: _c)
 
-    def one(item, n=0):
+    def one(item, n=0, prior=None):
         t, mm = item
-        if id(mm) in cache:
+        if prior is None and id(mm) in cache:
             return t, cache[id(mm)]
         alive = None
         if alive_fn is not None:
@@ -1265,15 +1487,30 @@ def _agent_tracks(cfg, keep_trk, keep, agent_teams, color_team, mask, reg, place
                 alive = {1: a1, 2: a2} if a1 is not None and a2 is not None else None
             except Exception:
                 alive = None
+        t_masks = opening_fn(n, t) if opening_fn is not None else None
         return t, AG.match(mm, icons, agent_teams, ct_fn(n), icon_frac=icon_frac,
                            mask=mask if mask is not None and mask.shape[:2] == mm.shape[:2] else None,
-                           alive=alive, background=background if background.shape[:2] == mm.shape[:2] else None)
+                           alive=alive, background=background if background is not None and background.shape[:2] == mm.shape[:2] else None,
+                           team_masks=t_masks, **am, **({"prior": prior, **tp["match"]} if (prior and tp) else {}))
 
-    # 照合（1 枚 0.1〜0.2 秒）は OpenCV が GIL を外すので、スレッドで並べる
     from concurrent.futures import ThreadPoolExecutor
     todo = [(n, it) for n, frs in sorted(frames_by_n.items()) for it in sorted(frs, key=lambda x: x[0])]
+    if out_dir and int((cfg.get("tactics") or {}).get("agents_dump") or 0) >= 1:
+        _agents_dump(cfg, todo, out_dir, agent_teams, icons, icon_frac, am, ct_fn, alive_fn, mask,
+                     background, {n: float(rt["start"]) for n, rt in round_tac.items()}, log)
     with ThreadPoolExecutor(max_workers=max(1, threads), thread_name_prefix="素材-追跡") as ex:
         res = list(ex.map(lambda x: (x[0], one(x[1], x[0])), todo))
+        if tp is not None:
+            pri = [None] * len(todo)
+            for n in {n for n, _ in todo}:
+                ks = [k for k, (n2, _) in enumerate(todo) if n2 == n]
+                times = [res[k][1][0] for k in ks]
+                found = [res[k][1][1] for k in ks]
+                for li, k in enumerate(ks):
+                    pri[k] = AG.priors_for(times, found, li, window=tp["window"], strong=tp["strong"]) or None
+            redo = [k for k in range(len(todo)) if pri[k]]
+            for k, r2 in zip(redo, ex.map(lambda k: one(todo[k][1], todo[k][0], prior=pri[k]), redo)):
+                res[k] = (todo[k][0], r2)
     found_by_n: dict[int, list] = {}
     for n, tf in res:
         found_by_n.setdefault(n, []).append(tf)

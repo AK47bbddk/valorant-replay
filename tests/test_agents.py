@@ -357,3 +357,59 @@ def test_llm_daily_limit_and_order(monkeypatch, tmp_path):
     assert calls == ["gemini-3.8-flash", "x/y:free"] and not sleeps
     cfg["llm"]["order"] = "openrouter,gemini"
     assert [c[0] for c in llm._chain(cfg)][0] == "openrouter"
+
+
+def _paste(img, icon, x, y, color, D):
+    t = cv2.resize(icon, (D, D))
+    m = np.zeros((D, D), np.uint8)
+    cv2.circle(m, (D // 2, D // 2), D // 2 - 1, 255, -1)
+    x0, y0 = int(x * img.shape[1]) - D // 2, int(y * img.shape[0]) - D // 2
+    roi = img[y0:y0 + D, x0:x0 + D]
+    roi[m > 0] = t[m > 0]
+    rim = {"warm": (40, 40, 230), "cool": (200, 190, 30), "yellow": (40, 220, 235)}[color]
+    cv2.circle(img, (int(x * img.shape[1]), int(y * img.shape[0])), int(D * 0.52), rim, 3)
+
+
+def test_rim_check_drops_contradicting_color_and_keeps_valid_icons():
+    """rim_check=True で、通常の正しいアイコンは維持しつつ、逆色縁の低リング誤検出を抑える。"""
+    names = ["Sova", "Jett", "Omen", "Killjoy"]
+    icons = {n: _icon(i) for i, n in enumerate(names)}
+    places = [("Sova", "warm", 0.25, 0.25), ("Jett", "warm", 0.7, 0.3), ("Omen", "cool", 0.3, 0.75)]
+    img = _minimap(icons, places)
+    teams = {1: ["Sova", "Jett"], 2: ["Omen", "Killjoy"]}
+    got = AG.match(img, icons, teams, {"warm": 1, "cool": 2}, rim_check=True)
+    assert {(e["team"], e["agent"]) for e in got} >= {(1, "Sova"), (1, "Jett"), (2, "Omen")}
+
+
+def test_detect_smokes_dome_ring_and_wall_curtain():
+    """暗いドーム型スモーク・リング型オーブ・壁型カーテンを検出し、エージェントアイコンは誤認しない。"""
+    H = W = 400
+    frac = 0.055
+    D = frac * H
+    bg = np.full((H, W, 3), 122, np.uint8)
+    img = bg.copy()
+    mask = np.full((H, W), 255, np.uint8)
+
+    # 1) 暗いドーム型スモーク (0.30, 0.30)
+    cv2.circle(img, (int(0.30 * W), int(0.30 * H)), int(0.85 * D), (68, 68, 68), -1)
+    cv2.circle(img, (int(0.30 * W), int(0.30 * H)), int(0.85 * D), (40, 40, 220), 2)
+
+    # 2) 壁型カーテン (0.55, 0.25) -> (0.85, 0.25)
+    cv2.line(img, (int(0.55 * W), int(0.25 * H)), (int(0.85 * W), int(0.25 * H)), (210, 190, 30), 4)
+
+    # 3) エージェントアイコン (0.70, 0.70) は除外されること
+    ic = _icon(2)
+    _paste(img, ic, 0.70, 0.70, "warm", int(D))
+
+    sm = AG.detect_smokes(
+        img,
+        icon_frac=frac,
+        mask=mask,
+        background=bg,
+        found_agents=[{"agent": "Omen", "team": 1, "x": 0.70, "y": 0.70}],
+        color_team={"warm": 1, "cool": 2},
+    )
+    kinds = {(s["kind"], s["subkind"]) for s in sm}
+    assert ("smoke", "dome") in kinds
+    assert ("wall", "curtain") in kinds
+    assert all(abs(s["x"] - 0.70) > 0.05 or abs(s["y"] - 0.70) > 0.05 for s in sm)

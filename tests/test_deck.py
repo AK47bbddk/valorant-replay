@@ -511,3 +511,34 @@ def test_alignment_gate_drops_maps_whose_dots_miss_the_floor():
     for r in rows:
         r["align_ok"] = False
     assert deck.agent_tracks({"rows": rows}) is None
+
+
+def test_v3_main_comes_first_and_numbers_go_to_appendix(tmp_path, monkeypatch):
+    """お手本（rudi の冊子）の並び：守り Map Prio → Objectives → 配置（図＋5 行）→ 攻め → 付録。"""
+    import re
+    monkeypatch.setattr("vreplay.tactics.load_map", lambda *a, **k: None)
+    cfg = _cfg(tmp_path)
+    conn = db.connect(db.warehouse_path(cfg))
+    for i in range(4):
+        db.ingest_report(conn, report(str(i), "G2", "SEN", i))
+    conn.commit()
+    out = tmp_path / "pb"
+    decks = deck.build(cfg, out, log=lambda *a: None, use_llm=False)
+    page = next(p for p in decks if p.name.startswith("team_G2")).read_text("utf-8")
+    heads = [re.sub("<.*?>", "", h) for h in re.findall(r"<h[12]>(.*?)</h[12]>", page)]
+    app = heads.index("付録：数字の裏づけ")
+    main = heads[:app]
+    assert main.index("Map Prio") < main.index("Objectives") < next(i for i, h in enumerate(main) if h.startswith("Standard"))
+    assert any(h.endswith("からの展開") for h in main) and "Micro Plays" in main
+    assert app <= 24                                  # 本編は 20 枚前後
+    assert all("Strategy" != h for h in main)         # strong / weak point は付録
+    assert page.count('class="who"') >= 3              # 配置・デフォルトにはエージェントごとの 1 行
+
+
+def test_v3_names_dictionary(tmp_path):
+    from vreplay import deck_v3 as V
+    (tmp_path / "kb").mkdir()
+    (tmp_path / "kb" / "names.yaml").write_text('G2:\n  Split:\n    "B Main テイクデフォ": Venom\n', "utf-8")
+    names = V.load_names({"output": {"dir": str(tmp_path)}})
+    assert V.nick(names, {"map": "Split", "team": "G2 Esports"}, "G2", "B Main テイクデフォ") == "“Venom”（B Main テイクデフォ）"
+    assert V._control("B Main テイクデフォ") == "B Main Control"
