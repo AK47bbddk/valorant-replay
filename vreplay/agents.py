@@ -997,3 +997,226 @@ def contact_sheet(img: np.ndarray, found: list[dict], icons: dict[str, np.ndarra
     path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(path), np.vstack(rows))
     return path
+
+# ---- スモーク検出（ノートPC KD9D72P の opening-playbook / blind_test 用。2026-11-18 統合で追加）----
+SMOKE_EXTRA = [((34, 35, 70), (74, 255, 255)), ((125, 35, 65), (162, 255, 255))]
+RANGES["smoke_extra"] = SMOKE_EXTRA
+
+
+def _quadrant_ring_ok(mask_bin: np.ndarray, x: int, y: int, r0: float, r1: float, min_quads: int = 3) -> bool:
+    """(x, y) の周囲 [r0, r1] の円環を上下左右4象限に分け、min_quads 以上の象限に画素があるか。"""
+    H, W = mask_bin.shape[:2]
+    ir1 = int(math.ceil(r1))
+    x0, x1 = max(0, x - ir1), min(W, x + ir1 + 1)
+    y0, y1 = max(0, y - ir1), min(H, y + ir1 + 1)
+    if x1 <= x0 or y1 <= y0:
+        return False
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    dx, dy = xx - x, yy - y
+    rr = np.hypot(dx, dy)
+    ring = (rr >= r0) & (rr <= r1) & (mask_bin[y0:y1, x0:x1] > 0)
+    if not ring.any():
+        return False
+    q1 = (dx >= 0) & (dy < 0) & ring
+    q2 = (dx < 0) & (dy <= 0) & ring
+    q3 = (dx <= 0) & (dy > 0) & ring
+    q4 = (dx > 0) & (dy >= 0) & ring
+    cnt = int(q1.sum() >= 2) + int(q2.sum() >= 2) + int(q3.sum() >= 2) + int(q4.sum() >= 2)
+    return cnt >= min_quads
+
+
+def detect_smokes(
+    img: np.ndarray,
+    icon_frac: float = 0.058,
+    mask: np.ndarray | None = None,
+    background: np.ndarray | None = None,
+    found_agents: list[dict] | None = None,
+    color_team: dict[str, int] | None = None,
+) -> list[dict]:
+    """ミニマップ 1 枚からスモーク・ドーム型アビリティ・壁型カーテンを検出する。
+
+    検出対象:
+      1. ドーム型スモーク (kind="smoke", subkind="dome"):
+         Omen ダークカヴァー / Brimstone スカイスモーク / Clove ルーズ / Astra ネビュラ / Jett クラウドバースト 等。
+         背景床（background または床中央値）より一定以上暗く、内部が一様で円形に近いドーム領域。
+      2. リング型スモーク・オーブ (kind="smoke", subkind="ring"):
+         Viper ポイズンオーブ / Harbor コーヴ / Cypher サイバーケージ / Sage スローオーブ 等。
+         4象限連続の円環を持ち、内部にエージェントの顔テクスチャが無い円形スキル領域。
+      3. 壁型スモーク・カーテン (kind="wall", subkind="curtain"):
+         Viper トキシックカーテン / Harbor ハイタイド / Astra コズミックディバイド / Neon ファストレーン 等。
+         床領域の内部を横切る細長いチーム色（warm/cool）の直線状セグメント。
+
+    返り値:
+      [{"kind": "smoke"|"wall", "subkind": str, "x": float, "y": float, "r": float,
+        "color": str|None, "team": int|None, "conf": float, ...}]
+    """
+    if img is None or img.size == 0:
+        return []
+    H, W = img.shape[:2]
+    D = max(8.0, float(icon_frac) * H)
+    ct = color_team or {}
+    agents_px = [(float(a["x"]) * W, float(a["y"]) * H) for a in (found_agents or []) if "x" in a and "y" in a]
+
+    floor_bool = None
+    if mask is not None and mask.shape[:2] == (H, W):
+        floor_bool = mask.astype(bool)
+        floor_inner = cv2.erode(floor_bool.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+    else:
+        floor_bool = np.ones((H, W), bool)
+        floor_inner = np.ones((H, W), bool)
+        floor_inner[:4, :] = floor_inner[-4:, :] = floor_inner[:, :4] = floor_inner[:, -4:] = False
+
+    if not floor_bool.any():
+        return []
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    bg_gray = (
+        cv2.cvtColor(background, cv2.COLOR_BGR2GRAY)
+        if (background is not None and background.shape[:2] == (H, W))
+        else None
+    )
+    floor_med = float(np.median(gray[floor_bool])) if floor_bool.any() else 120.0
+
+    results: list[dict] = []
+
+    def _near_agent(px: float, py: float, min_d: float = 0.52) -> bool:
+        return any(math.hypot(px - ax, py - ay) < min_d * D for ax, ay in agents_px)
+
+    def _near_existing(px: float, py: float, min_d: float = 0.65) -> bool:
+        return any(math.hypot(px - e["x"] * W, py - e["y"] * H) < min_d * D for e in results)
+
+    # 1) 暗い円形ドーム型スモーク (Omen / Brimstone / Clove / Astra 等)
+    if bg_gray is not None:
+        drop = bg_gray.astype(np.float32) - gray.astype(np.float32)
+    else:
+        drop = floor_med - gray.astype(np.float32)
+
+    dark_dome = (
+        floor_inner
+        & (drop >= 14.0)
+        & (gray >= 42)
+        & (gray <= min(108, int(floor_med - 12)))
+        & (hsv[..., 1] <= 95)
+    ).astype(np.uint8) * 255
+    k_open = max(3, int(round(0.18 * D))) | 1
+    dark_dome = cv2.morphologyEx(dark_dome, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_open, k_open)))
+    dark_dome = cv2.morphologyEx(dark_dome, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_open, k_open)))
+
+    n_cc, labels, stats, cents = cv2.connectedComponentsWithStats(dark_dome, 8)
+    for idx in range(1, n_cc):
+        x0, y0, ww, hh, area = (int(v) for v in stats[idx])
+        cx, cy = float(cents[idx][0]), float(cents[idx][1])
+        side = max(ww, hh)
+        if side < 0.78 * D or side > 2.75 * D:
+            continue
+        if area < 0.36 * D * D or area > 4.6 * D * D:
+            continue
+        aspect = ww / max(1.0, float(hh))
+        if not (0.58 <= aspect <= 1.72):
+            continue
+        fill_rect = area / max(1.0, float(ww * hh))
+        if fill_rect < 0.44:
+            continue
+        if _near_agent(cx, cy, 0.52) or _near_existing(cx, cy, 0.65):
+            continue
+        std_in = _face_std(img, cx, cy, side * 0.85)
+        if std_in > 22.0:
+            continue
+        comp_mask = labels[y0:y0 + hh, x0:x0 + ww] == idx
+        mean_drop = float(drop[y0:y0 + hh, x0:x0 + ww][comp_mask].mean()) if comp_mask.any() else 16.0
+        w_r, c_r = _rim_color(img, int(round(cx)), int(round(cy)), side)
+        col = "warm" if (w_r >= 0.10 and w_r > c_r + 0.02) else ("cool" if (c_r >= 0.10 and c_r > w_r + 0.02) else None)
+        conf = round(min(0.98, max(0.50, mean_drop / 34.0)), 2)
+        results.append({
+            "kind": "smoke",
+            "subkind": "dome",
+            "x": round(cx / W, 4),
+            "y": round(cy / H, 4),
+            "r": round(side / (2.0 * H), 4),
+            "color": col,
+            "team": ct.get(col) if col else None,
+            "conf": conf,
+        })
+
+    # 2) リング型スモーク・オーブ（Harbor / Viper / Cyber Cage / 描画スモーク円）
+    for scale in (1.0, 1.35, 1.75):
+        Ds = D * scale
+        for col_key in ("warm", "cool", "smoke_extra"):
+            ranges = RANGES[col_key]
+            cmask = (_color_mask(img, ranges) > 0.5).astype(np.uint8)
+            R = _ring_response(img, ranges, Ds)
+            if background is not None and background.shape[:2] == (H, W):
+                Rb = cv2.dilate(_ring_response(background, ranges, Ds), np.ones((3, 3), np.uint8))
+                R = R - np.clip(Rb, 0, None)
+            thr_r = 0.28 if scale >= 1.3 else 0.34
+            for px, py, val in _peaks(R, Ds, thr_r, 5, floor_inner, nms=1.25):
+                if _near_agent(px, py, 0.65) or _near_existing(px, py, 0.95):
+                    continue
+                if not _quadrant_ring_ok(cmask, px, py, 0.34 * Ds, 0.62 * Ds, min_quads=4):
+                    continue
+                fstd = _face_std(img, px, py, Ds)
+                # エージェント顔（高コントラスト）ではなく、内部が一様または大径ドームであるもの
+                if scale < 1.25 and fstd >= 14.5:
+                    continue
+                if fstd >= 21.0:
+                    continue
+                norm_col = col_key if col_key in ("warm", "cool") else None
+                results.append({
+                    "kind": "smoke",
+                    "subkind": "ring",
+                    "x": round(px / W, 4),
+                    "y": round(py / H, 4),
+                    "r": round(Ds / (2.0 * H), 4),
+                    "color": norm_col,
+                    "team": ct.get(norm_col) if norm_col else None,
+                    "conf": round(min(0.95, max(0.55, float(val) * 1.4)), 2),
+                })
+
+    # 3) 壁型スモーク・カーテン（Viper トキシックカーテン / Harbor ハイタイド 等）
+    wall_ranges = {
+        "warm": [((0, 95, 110), (10, 255, 255)), ((168, 95, 110), (179, 255, 255))],
+        "cool": [((76, 65, 110), (100, 255, 255))],
+    }
+    for col_key, wr in wall_ranges.items():
+        wmask = (_color_mask(img, wr) > 0.5).astype(np.uint8) & floor_inner.astype(np.uint8)
+        # エージェントアイコンの縁を除外するため、検出済みエージェント周囲をマスク
+        for ax, ay in agents_px:
+            cv2.circle(wmask, (int(round(ax)), int(round(ay))), int(round(0.65 * D)), 0, -1)
+        n_w, wlabels, wstats, wcents = cv2.connectedComponentsWithStats(wmask, 8)
+        for idx in range(1, n_w):
+            x0, y0, ww, hh, area = (int(v) for v in wstats[idx])
+            span = math.hypot(ww, hh)
+            if span < 2.2 * D or area < int(1.2 * D):
+                continue
+            pts_yx = np.argwhere(wlabels == idx)
+            if len(pts_yx) < 12:
+                continue
+            pts_xy = pts_yx[:, ::-1].astype(np.float32)
+            (_, (rw, rh), _) = cv2.minAreaRect(pts_xy)
+            major, minor = max(rw, rh), max(1.0, min(rw, rh))
+            if major < 2.1 * D or minor > 0.65 * D or (major / minor) < 3.2:
+                continue
+            cx, cy = float(wcents[idx][0]), float(wcents[idx][1])
+            # 両端の座標
+            d_axis = pts_xy - pts_xy.mean(axis=0)
+            _, _, vt = np.linalg.svd(d_axis, full_matrices=False)
+            proj = d_axis @ vt[0]
+            p_min = pts_xy[int(np.argmin(proj))]
+            p_max = pts_xy[int(np.argmax(proj))]
+            results.append({
+                "kind": "wall",
+                "subkind": "curtain",
+                "x": round(cx / W, 4),
+                "y": round(cy / H, 4),
+                "x1": round(float(p_min[0]) / W, 4),
+                "y1": round(float(p_min[1]) / H, 4),
+                "x2": round(float(p_max[0]) / W, 4),
+                "y2": round(float(p_max[1]) / H, 4),
+                "r": round(major / (2.0 * H), 4),
+                "color": col_key,
+                "team": ct.get(col_key),
+                "conf": round(min(0.98, max(0.55, major / (4.0 * D))), 2),
+            })
+
+    return results

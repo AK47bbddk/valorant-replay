@@ -52,4 +52,31 @@ def test_demo_items_build_html(tmp_path):
     items = BT.demo_items()
     assert len(items) == 2
     out = BT.build_html(items, tmp_path / "demo.html")
+    text = out.read_text("utf-8")
     assert out.exists() and out.stat().st_size > 1000
+    assert "スモーク・壁検知の正確性" in text
+    assert "初動配置・戦術の分類" in text
+
+
+def test_collect_from_dumps_and_30_questions(tmp_path):
+    import cv2
+    import numpy as np
+
+    dump = tmp_path / "dump_Sunset"
+    (dump / "icons").mkdir(parents=True)
+    img = np.full((240, 240, 3), 120, np.uint8)
+    cv2.circle(img, (120, 100), 14, (65, 65, 65), -1)
+    cv2.circle(img, (120, 100), 14, (40, 40, 220), 2)
+    frames_meta = []
+    for i in range(1, 35):
+        fn = f"r{i:02d}_t015.png"
+        cv2.imwrite(str(dump / fn), img)
+        frames_meta.append({"file": fn, "round": i, "t": 15.0, "color_team": {"warm": 1, "cool": 2}, "alive": {"1": 5, "2": 5}})
+    (dump / "meta.json").write_text(json.dumps({"teams": {"1": [], "2": []}, "icon_frac": 0.055, "frames": frames_meta}), encoding="utf-8")
+
+    items = BT.collect_from_dumps_and_classified([dump], max_items=30, seed=42)
+    assert len(items) == 30
+    assert all("shape_choices" in it and len(it["shape_choices"]) >= 2 for it in items)
+    assert all("overlay" in it for it in items)
+    out = BT.build_html(items, tmp_path / "blind30.html")
+    assert out.exists() and "ITEMS" in out.read_text("utf-8")

@@ -23,7 +23,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from . import barriers as BR
+from . import tactival_barriers as BR
 from . import kb as KB
 from . import tactival as TV
 
