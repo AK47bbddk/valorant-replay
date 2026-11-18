@@ -1,93 +1,182 @@
-import json
-from pathlib import Path
+"""vreplay/barriers.py（スポーンバリアの領域・距離場）と tools/barrier_extract.py の向き・色の割り当て（合成データ）。"""
+import math
 
-import cv2
 import numpy as np
+import pytest
 
-from vreplay import agents as AG
-from vreplay import barriers as BR
+from tools import barrier_extract as BX
+from vreplay import barriers as B
 from vreplay import minimap as MM
-from vreplay import tactival as TV
 
-FX = Path(__file__).parent / "fixtures"
-
-
-def test_load_barriers_all_maps():
-    for mid in TV.MAP_ROT:
-        bars = BR.load_barriers(mid)
-        assert bars.get("ATK") and bars.get("DEF"), mid
-        for side in ("ATK", "DEF"):
-            for poly in bars[side]:
-                assert len(poly) >= 2
-                for u, v in poly:
-                    assert 0.0 <= u <= 1.0 and 0.0 <= v <= 1.0, (mid, side, u, v)
-    assert BR.load_barriers("UnknownMap") == {}
+# 合成マップ：横 120 × 縦 60 の画素。横長の廊下（y 20..40）の左端が攻撃スポーン、右端が防衛スポーン。
+# 真ん中の上に部屋（サイト）がある。攻撃バリアは x=20、防衛バリアは x=100 の縦線。
+H, W = 60, 120
 
 
-def test_opening_masks_sunset_fixture():
-    bg = cv2.imread(str(FX / "minimap_sunset_riot.jpg"))
-    mask = MM.map_mask(bg)
-    m = json.loads((FX / "sunset_callouts.json").read_text("utf-8"))
-    calls = [
-        {
-            "name": n,
-            "super": s,
-            "x": m["xMultiplier"] * y + m["xScalarToAdd"],
-            "y": m["yMultiplier"] * x + m["yScalarToAdd"],
-        }
-        for n, s, x, y in m["callouts"]
-    ]
-    spawns = {
-        "攻撃": next((c["x"], c["y"]) for c in calls if c["name"].lower() == "spawn" and "attacker" in c["super"].lower()),
-        "防衛": next((c["x"], c["y"]) for c in calls if c["name"].lower() == "spawn" and "defender" in c["super"].lower()),
-    }
-    T = MM.fit_mask(mask, {"callouts": calls, "spawns": spawns}, bg=bg)
-    assert T["ok"]
-
-    dmaps = BR.opening_dist_maps(mask, T, {"spawns": spawns}, "Sunset")
-    assert "ATK" in dmaps and "DEF" in dmaps
-
-    H, W = mask.shape
-    atk_m = BR.opening_mask(dmaps, "攻撃", dt=1.0)
-    def_m = BR.opening_mask(dmaps, "防衛", dt=1.0)
-    assert atk_m is not None and def_m is not None
-
-    ax, ay = MM.apply(T, *spawns["攻撃"])
-    dx, dy = MM.apply(T, *spawns["防衛"])
-    apx, apy = int(round(ax * H)), int(round(ay * H))
-    dpx, dpy = int(round(dx * H)), int(round(dy * H))
-
-    assert atk_m[apy, apx] and not atk_m[dpy, dpx]
-    assert def_m[dpy, dpx] and not def_m[apy, apx]
-    assert BR.opening_mask(dmaps, "攻撃", dt=2.5).sum() > atk_m.sum()
+def _walk():
+    w = np.zeros((H, W), bool)
+    w[20:40, 2:118] = True
+    w[5:20, 50:70] = True            # サイトの部屋（廊下の上）
+    return w
 
 
-def test_agents_match_respects_team_masks():
-    # 200x200 のミニマップに、左（自陣側 x=40）と右（敵陣側 x=160）へ同じアイコン模様を置く。
-    # 右側の方がくっきり（高スコア）でも、team_masks で右側を禁止すれば左側が選ばれる。
-    img = np.full((200, 200, 3), 40, np.uint8)
-    icon = np.zeros((24, 24, 3), np.uint8)
-    cv2.circle(icon, (12, 12), 8, (220, 220, 220), -1)
-    cv2.circle(icon, (9, 10), 2, (40, 40, 40), -1)
+def _map(**kw):
+    atk = [((20, 15), (20, 45))]
+    dfn = [((100, 15), (100, 45))]
+    return B.build(_walk(), atk, dfn, (6, 30), (114, 30), sites={"A": (60, 10)}, **kw)
 
-    def draw_unit(cx, cy, contrast=1.0):
-        r = 6
-        face = cv2.resize(icon, (2 * r, 2 * r))
-        face = np.clip(face.astype(np.float32) * contrast, 0, 255).astype(np.uint8)
-        img[cy - r : cy + r, cx - r : cx + r] = face
-        cv2.circle(img, (cx, cy), r + 2, (0, 0, 255), 2)  # 赤（暖色）の縁
 
-    draw_unit(40, 100, contrast=0.85)   # 自陣側（本物）
-    draw_unit(160, 100, contrast=1.0)   # 敵陣側（誤検出候補）
+def test_regions_split_by_barriers():
+    m = _map()
+    assert m.sealed
+    assert m.region((5 / W, 30 / H)) == B.ATK
+    assert m.region((40 / W, 30 / H)) == B.NEUTRAL
+    assert m.region((115 / W, 30 / H)) == B.DEF
+    assert m.region((60 / W, 10 / H)) == B.SITE_CORE
+    assert m.site((60 / W, 10 / H)) == "A"
+    assert m.region((5 / W, 55 / H)) == B.OFF     # 床から遠い点
 
-    icons = {"Jett": icon}
-    teams = {1: ["Jett"], 2: []}
-    color_team = {"warm": 1, "cool": 2}
 
-    no_mask = AG.match(img, icons, teams, color_team, icon_frac=0.07)
-    assert len(no_mask) == 1 and no_mask[0]["x"] > 0.5  # 制限なしだとスコアの高い右側を拾う
+def test_small_gap_is_closed_by_line_caps():
+    # 線が床の縁まで 2 画素届かない：端の延長と線の太さで塞がる
+    m = B.build(_walk(), [((20, 24), (20, 35))], [((100, 15), (100, 45))], (6, 30), (114, 30))
+    assert m.sealed
+    assert m.region((40 / W, 30 / H)) == B.NEUTRAL
 
-    tm1 = np.zeros((200, 200), bool)
-    tm1[:, :100] = True
-    with_mask = AG.match(img, icons, teams, color_team, icon_frac=0.07, team_masks={1: tm1})
-    assert len(with_mask) == 1 and with_mask[0]["x"] < 0.3  # team_masks で自陣側（左側）が選ばれる
+
+def test_open_gap_is_reported_as_not_sealed():
+    # 攻撃バリアが廊下を横切らない（廊下に沿った線）：端を壁まで延ばしても塞がらず、攻撃の陣地が
+    # 中立を通って防衛バリアまで届く → 閉じていないと報告する
+    m = B.build(_walk(), [((16, 30), (24, 30))], [((100, 15), (100, 45))], (6, 30), (114, 30))
+    assert not m.sealed
+    assert m.thickness == B.MAX_BARRIER_PX
+    assert any("閉じない" in n for n in m.notes)
+
+
+def test_distance_field_is_monotonic_along_corridor():
+    m = _map()
+    xs = list(range(24, 96, 4))
+    d_atk = [m.dist_atk((x / W, 30 / H)) for x in xs]
+    d_def = [m.dist_def((x / W, 30 / H)) for x in xs]
+    assert all(b > a for a, b in zip(d_atk, d_atk[1:]))
+    assert all(b < a for a, b in zip(d_def, d_def[1:]))
+    assert m.dist_atk((5 / W, 30 / H)) == 0.0
+    # 距離場はバリアで切らない床の上（防衛陣地の中にも値がある）
+    assert math.isfinite(m.dist_atk((115 / W, 30 / H)))
+    dep = [m.depth((x / W, 30 / H)) for x in xs]
+    assert all(b > a for a, b in zip(dep, dep[1:]))
+
+
+def test_dead_zone_for_entering_neutral():
+    m = _map(dead_zone=0.1)
+    just_out = (25 / W, 30 / H)                # バリアのすぐ外（0.1 未満）
+    deep = (40 / W, 30 / H)
+    assert m.region(just_out) == B.NEUTRAL
+    assert not m.entered_neutral(just_out)
+    assert m.entered_neutral(deep)
+    assert not m.left_def((95 / W, 30 / H))
+    assert m.left_def((70 / W, 30 / H))
+
+
+def test_signed_def_distance():
+    m = _map()
+    assert m.signed_def((110 / W, 30 / H)) < 0       # 陣地の中
+    assert m.signed_def((80 / W, 30 / H)) > 0        # 外へ出ている
+    assert m.signed_def((60 / W, 30 / H)) > m.signed_def((80 / W, 30 / H))
+
+
+def test_build_rejects_bad_input():
+    with pytest.raises(ValueError):
+        B.build(np.zeros((H, W), bool), [((1, 1), (2, 2))], [((3, 3), (4, 4))], (1, 1), (2, 2))
+    with pytest.raises(ValueError):
+        B.build(_walk(), [], [((100, 15), (100, 45))], (6, 30), (114, 30))
+
+
+@pytest.mark.parametrize("T", [
+    {"scale": 0.92, "theta": 0.0, "tx": 0.55, "ty": 0.5},
+    {"scale": 0.92, "theta": math.pi / 2, "tx": 0.55, "ty": 0.5},
+    {"scale": 0.9, "theta": 0.3, "tx": 0.5, "ty": 0.52, "mirror": True},
+])
+def test_icon_frame_roundtrip(T):
+    for u, v in ((0.1, 0.2), (0.5, 0.5), (0.83, 0.61)):
+        px, py = MM.apply(T, u, v)
+        u2, v2 = B.icon_from_frame(T, px, py)
+        assert (u2, v2) == pytest.approx((u, v), abs=1e-9)
+        x, y = B.frame_from_icon(T, u, v, 1.05)
+        assert B.icon_from_track(T, x, y, 1.05) == pytest.approx((u, v), abs=1e-9)
+
+
+@pytest.mark.parametrize("hyp", ["normal", "flip_lr", "flip_ud", "rot180", "rot90", "rot270"])
+def test_orient_points_match_orient_image(hyp):
+    img = np.zeros((7, 11), np.uint8)
+    img[2, 9] = 1
+    out = BX._orient(img, hyp)
+    q = BX._orient_pts(np.array([[9.0, 2.0]]), hyp, img.shape)[0]
+    ys, xs = np.nonzero(out)
+    assert (xs[0], ys[0]) == (int(q[0]), int(q[1]))
+
+
+def test_colors_assigned_by_spawn_geometry_not_color():
+    T = {"scale": 1.0, "theta": 0.0, "tx": 0.5, "ty": 0.5}
+    near_def = [[[0.4, 0.15], [0.6, 0.15]]]      # 防衛スポーン (y=0.1) の近く
+    near_atk = [[[0.4, 0.8], [0.6, 0.8]]]        # 攻撃スポーン (y=0.9) の近く
+    callouts = [{"name": "Spawn", "super": "Attacker Side", "x": 0.5, "y": 0.9},
+                {"name": "Spawn", "super": "Defender Side", "x": 0.5, "y": 0.1}]
+    # 赤が防衛側に引かれている書き出し（Sunset の実測と同じ向き）
+    g = BX.assign_by_geography(near_def, near_atk, T, callouts, 1.0)
+    assert g["attack_color"] == "blue"
+    assert g["attack_barriers"] == near_atk and g["defense_barriers"] == near_def
+    assert g["consistent"]
+    assert g["distances"]["red"]["to_defense_spawn"] == pytest.approx(0.05)
+    # 逆の書き出しでも地理で決まる
+    g2 = BX.assign_by_geography(near_atk, near_def, T, callouts, 1.0)
+    assert g2["attack_color"] == "red" and g2["attack_barriers"] == near_atk
+
+
+def test_for_match_returns_none_without_barriers():
+    assert B.for_match({"map": "Summit"}, np.zeros((8, 8), np.uint8), {"transform": {}}, (10, 10)) is None
+    assert not B.has_barriers({"attack_barriers": [[[0, 0], [1, 1]]]})
+
+
+def test_site_behind_defense_barrier_is_site_core_but_side_def():
+    # サイトが防衛バリアの内側にあるマップ（Sunset の A など）：SITE_CORE になり、陣地の区分は DEF のまま
+    m = B.build(_walk(), [((20, 15), (20, 45))], [((100, 15), (100, 45))], (6, 30), (114, 30),
+                sites={"A": (110, 30)})
+    p = (110 / W, 30 / H)
+    assert m.region(p) == B.SITE_CORE and m.site(p) == "A"
+    assert m.side(p) == B.DEF
+    assert m.signed_def(p) < 0
+    assert m.region((5 / W, 30 / H)) == B.ATK          # 攻撃の陣地は SITE_CORE にしない
+
+
+def test_core_floor_keeps_thin_walls_closed():
+    # 上の廊下（スポーンとバリア）と下の広間が 2 画素の壁で分かれている。床を 1 画素太らせると壁が消えて、
+    # 下の広間を回り込んで陣地が漏れる（広間は線の壁までの延長 WALL_EXT_PX より高い）。太らせる前の床（core）で
+    # 領域を作れば閉じる
+    import cv2
+    core = np.zeros((H, W), bool)
+    core[10:20, 2:118] = True
+    core[22:59, 2:118] = True
+    walk = cv2.dilate(core.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    atk, dfn = [((20, 9), (20, 21))], [((100, 9), (100, 21))]
+    leaky = B.build(walk, atk, dfn, (6, 15), (114, 15))
+    assert not leaky.sealed
+    m = B.build(walk, atk, dfn, (6, 15), (114, 15), core=core)
+    assert m.sealed
+    assert m.region((5 / W, 15 / H)) == B.ATK
+    assert m.region((60 / W, 15 / H)) == B.NEUTRAL
+    assert m.region((115 / W, 15 / H)) == B.DEF
+    # 太らせた縁（core の外）にも値が広がっている
+    assert m.labels[20, 60] in (1, 2, 3) and np.isfinite(m.d_atk[20, 60])
+
+
+def test_spread_does_not_wrap_at_image_border():
+    walk = np.zeros((6, 6), bool)
+    walk[:, 0] = True
+    walk[:, 5] = True
+    known = np.zeros_like(walk)
+    known[:, 5] = True
+    vals = np.zeros((6, 6), np.float32)
+    vals[:, 5] = 7.0
+    out = B._spread(vals, known, walk)
+    assert (out[:, 0] == 0).all()          # 右端の値が左端へ折り返さない
