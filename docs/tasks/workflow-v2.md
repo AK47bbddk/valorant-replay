@@ -1,6 +1,6 @@
 # workflow-v2：Antigravity 内で「実装 → 別モデルのレビュー → 改善」を回す形に作り直す
 
-作成：Claude（2026-11-18）／承認：青木（未）
+作成：Claude（2026-11-18）／前提の改訂：Claude（2026-11-18 夜）／承認：青木（未）
 
 ## 目的
 
@@ -14,10 +14,30 @@
 
 ## 前提
 
-1. 済み（2026-11-18、Claude）：ノート PC で Antigravity が作ったルールファイル（`AGENTS.md`、`GEMINI.md`、`docs/WORKFLOW.md`、`docs/tasks/_TEMPLATE.md`、`.agents/skills/`、`tools/agy_orchestrator.py`、`tools/discord_bot.py`、`scripts/setup_remote_ssh.ps1`）と、この指示書を、ブランチ `task/workflow-v2`（`origin/main` の `addf5d1` から分岐）にコミットした。ノート PC の main と作業ツリーには手を付けていない。
-2. 青木：ノート PC で `git push origin task/workflow-v2` を実行する。
-3. デスクトップでの作業：`git fetch origin` のあと、`git worktree add ../vr-workflow-v2 task/workflow-v2` で作った worktree の中で作業する。デスクトップの main と、ほかの worktree（`vr-barriers` など）には触らない。デスクトップの main に同じ名前の未コミットのファイルがあっても触らず、違いがあれば「質問・ブロッカー」に書く。
-4. 推奨：デスクトップにしか無いブランチを、バックアップのために push する（`main` の `edff44e`、`task/color-half-fix`、`task/barriers-v2`）。push するかどうかは青木が決める。
+### 作業場所（2026-11-18 に確定）
+
+- **正本は DESKTOP-A8C09M8 の 1 台だけ。** リポジトリ・worktree・実行環境（Antigravity、Discord Bot、テスト）はすべてここに置く。リポジトリの場所は `C:\Users\aokki\programing\valorant-replay-v5`、worktree はその横の `vr-<名前>`。
+- **ノート PC（DESKTOP-KD9D72P）とスマホは指示を出すだけ。** リポジトリを置かず、ファイルも編集しない。A8C09M8 へは SSH（ターミナルか VS Code の Remote-SSH）でつなぐか、Remote Control・Discord Bot を使う。ノート PC にあった作業は 2026-11-18 にすべて GitHub へ退避した（ノート PC 側は消してよい）。
+- **Claude デスクトップアプリは A8C09M8 で開いておく。** ノート PC ではアプリを閉じて claude.ai（ブラウザ）を使う。ノート PC でアプリを開くと、Claude の操作先がノート PC に切り替わってしまうため。
+- GitHub の `origin/main` が基準。A8C09M8 の main は `origin/main` と同じ状態に保つ（作業は必ず `task/<名前>` で行い、main で直接コミットしない）。
+
+### モデルの分担（2026-11-18 に確定）
+
+- 実装：Gemini 4 Hydrogen（メイン）。サブは Sonnet。
+- 困ったときの相談：Opus（claude.ai）か Argon。Argon は Muse の使用量確認を見て、その都度決める。
+- マージの実行役：Claude か Antigravity（どちらでもよい）。
+- OpenCode＋DeepSeek は、Google Pro の枠が切れたときの予備（方式 C）だけにする。
+
+### ここまでに済んでいること（2026-11-18）
+
+- A8C09M8 の作業（プレイブック v5、barriers-v2、color-half-fix、laptop-sync）と、ノート PC の退避分（opening-playbook、この指示書）を `origin/main`（`8a109d5`）に統合した。pytest は 482 件 passed（`test_e2e_video` は除く）。
+- 2 台の統合前の状態は、GitHub の `backup/a8c09m8-20261118/*` と `backup/kd9d72p-20261118/*` に残してある。消さない。
+- ノート PC の `barriers.py`（TactiVal のバリア座標）は `vreplay/tactival_barriers.py` に改名した。`vreplay/barriers.py` は barriers-v2（スポーンバリアの幾何）。
+
+### この指示書の作業を始める前に（A8C09M8 で）
+
+1. `git fetch origin` のあと、`git worktree add ../vr-workflow-v2 -b task/workflow-v2-impl origin/main` で作った worktree の中で作業する。
+2. main と、ほかの worktree には触らない。
 
 ## 触ってよいファイル
 
@@ -28,6 +48,7 @@
 - `GEMINI.md`（役割分担の節だけ）
 - `AGENTS.md`（「起動とモデル」と「完了レポート」の節の追加だけ）
 - `tools/discord_bot.py`
+- `.agents/skills/vreplay-remote-sync/SKILL.md`
 - `tools/agy_orchestrator.py`
 - `tests/test_discord_bot.py`、`tests/test_agy_orchestrator.py`（無ければ新しく作る）
 
@@ -118,6 +139,12 @@ Argon に相談するのは、指示書の頭に `Argon 相談: 可（Muse 許�
 - **方式 C（予備）**：Google Pro の枠が切れたときに使う。OpenCode＋DeepSeek V4.1 Flash Free で実装し、別のモデルでレビューする（今の手順のまま）。
 - 冒頭に「agy を起動できるのは青木本人だけ。スクリプト・Bot・Muse からは起動しない」と書く。
 
+### 7. 作業場所の前提をルールファイルに反映する（`.agents/skills/vreplay-remote-sync/SKILL.md`、`docs/WORKFLOW.md`、`AGENTS.md`）
+
+- 「前提」の「作業場所」の 4 点を、そのまま書き込む。
+- `vreplay-remote-sync` の SKILL.md と `docs/WORKFLOW.md` の方式 B から、ノート PC にリポジトリやワークツリーを置く書き方を消す。SSH の接続先は A8C09M8、作業するワークツリーの例は `vr-<名前>` にする（`vr-barriers` や `ticket_barrier_v2.md` のような、済んだ作業の名前は消す）。
+- `AGENTS.md` 9 行目の「ノート PC / 自宅 PC」の説明を「ノート PC・スマホからの指示（SSH / Discord Bot）」に直す。
+
 ## 通すテスト
 
 ```
@@ -133,6 +160,7 @@ python -m pytest -q
 2. `tools/` の中で agy の CLI と `google-antigravity` SDK を呼ぶ箇所が 0 件で、そのことをテストで確かめている。`!vr status` と `!vr test` は今までどおり動く。
 3. `docs/WORKFLOW.md` が方式 A・B・C の新しい形になっていて、冒頭に起動のルールがある。
 4. 完了レポートの形が `AGENTS.md` にあり、`_TEMPLATE.md` に「担当モデル」と「Argon 相談」の欄がある。
+5. ルールファイルに、ノート PC にリポジトリを置く前提が残っていない（`grep -rn "ノート PC" AGENTS.md GEMINI.md docs/WORKFLOW.md .agents/skills` で、出てくるのが「指示を出すだけ」の文脈だけ）。
 
 ## この指示書の担当
 
