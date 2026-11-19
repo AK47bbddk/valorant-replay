@@ -1,77 +1,83 @@
-# 開発の回し方（Antigravity オーケストレーション・モデル分担）
+# 開発の回し方（デスクトップ PC 一元管理・Antigravity Neon + Swarm 運用）
 
-## 方式 A：Antigravity (`agy`) オーケストレーション（推奨・一元管理）
+## 0. ファイル散乱を防ぐ 3 つの鉄則
 
-設計・実装・テスト・レビューまでを Antigravity（デスクトップアプリ / `agy` CLI / Python SDK）内で完結させる標準ワークフロー。
+1. **作業場所は「自宅デスクトップ PC」1 台に完全固定**
+   - コード編集・テスト・ブランチ操作はすべてデスクトップ PC の `C:\Users\Aokki\valorant-replay` で行う。
+   - ノート PC（SSH / Remote-SSH）やスマホ（Antigravity Remote Control / Discord Bot）はデスクトップ PC を操作するクライアントに徹し、ノート PC のローカルで直接編集・コミットしない。
+2. **1 タスク = 1 指示書 = 1 ブランチ**
+   - 作業は必ず `docs/tasks/<名前>.md`（`_TEMPLATE.md` から作成）を起点にし、「触ってよいファイル」を限定する。
+   - マージ済みのブランチ・worktree は即座に削除し、`main` だけを常に綺麗に保つ。
+3. **リポジトリを直接触るのは Antigravity（またはデスクトップ上 CLI）のみ**
+   - 上位相談（Claude / Muse 等）はテキストの「相談票」ベースで行い、複数 AI が同時にファイルを書き換える競合を防ぐ。
 
-| 段階 | 担当 | どこで・どうやって |
-|---|---|---|
-| 1. 設計・指示書作成 | Orchestrator (`Argon` / Plan Mode) | `docs/tasks/_TEMPLATE.md` から `docs/tasks/<名前>.md`（または `ticket_*.md`）を作成（`python tools/agy_orchestrator.py new-task <名前>` でも可） |
-| 2. 実装・テスト・ローカルコミット | Execution Model / Subagent (`flash`) | Plan/Execute、または `invoke_subagent`（`Workspace: "share"`）／`swarm`／`python tools/agy_orchestrator.py run-task <名前>` で実装し、`python -m pytest -x -q` を通す |
-| 3. レビュー | Review Subagent (`.agents/skills/vreplay-review`) | ローカルで `main..HEAD` の差分と指示書を突き合わせて判定（Google ドライブへの `.txt` 手動アップロードやブラウザ変換は不要） |
-| 4. 確認・マージ・仕様同期 | Orchestrator | 「マージしてよい」確認後に `main` へマージし、`PROMPT.md` / `README.md` を更新 |
+---
 
-### クイックコマンド（`tools/agy_orchestrator.py`）
+## 1. 役割分担とモデル構成
+
+| 役割 | 担当 | やること | してはいけないこと |
+|---|---|---|---|
+| **司令塔 (Orchestrator)** | **Antigravity (`Gemini 4 Neon`)** | 要望から指示書 `docs/tasks/<名前>.md` を作成、Swarm で実装・レビューを割り振り、完了レポートをまとめる | 確認なしの `main` マージ・`git push` |
+| **実装担当 (Implementer)** | **Swarm ワーカー**（軽量・高速モデル）または **OpenCode**（OpenRouter 枠） | `workspace: "share"` / ブランチ `task/<名前>` で実装、`python -m pytest -x -q` を通してコミット | `main` 変更、`push`、指示書外の編集 |
+| **レビュー担当 (Reviewer)** | **Swarm の別モデルワーカー**（例：Claude Sonnet 等、実装とは別モデル）または **Claude Code** | `git diff main...HEAD` と指示書を読み、`.agents/skills/vreplay-review` の形式で判定 | ファイル編集、コミット |
+| **上位相談役 (Escalation)** | **Claude（Opus / Claude Code）** / **上位モデル** / **Muse** | 詰まったときの「相談票」に回答し、設計・仕様判断を返す | リポジトリの直接編集 |
+
+---
+
+## 2. 標準の開発手順（1 サイクル）
+
+1. **開始前確認**：`main` が最新かつクリーンであることを確認（`git status -sb`）。
+2. **指示書作成**：ユーザー → Neon に要望を伝達 → Neon が `docs/tasks/<名前>.md` を作成 → ユーザーが内容を確認して GO。
+3. **Swarm 実行（実装 → テスト → 別モデルレビュー、最大 3 周）**：
+   - 実装ワーカーが `task/<名前>` で実装・テスト・コミット。
+   - 別モデルのレビューワーカーが差分を検査。
+   - 判定が「直してからマージ」なら「必ず直すこと」だけを実装ワーカーに戻す（最大 3 周）。
+   - ※単発の小修正は Swarm ではなく通常のサブエージェント（`invoke_subagent`）や OpenCode を使いクォータを節約する。
+4. **詰まったら自動停止 → 相談票**：
+   - 以下のいずれかでループを止め、指示書末尾に「相談票」を出力する：
+     - 3 周しても「必ず直すこと」が消えない／同じ問題で堂々巡りする
+     - 仕様や定義の判断が必要（エリア境界・スモーク分類定義など）
+     - 「触ってよいファイル」の外を変える必要がある
+   - 相談票を Claude（Opus / Claude Code）や Muse に渡し、回答を指示書へ反映して再開する。
+5. **人間の最終確認 → マージ＆掃除**：
+   - レビュー判定「マージしてよい」＋完了レポート（変更ファイル・テスト結果・出力プレビュー）をユーザーが確認。
+   - OK なら `main` へマージ → `git push` → 作業ブランチ・worktree を削除。
+   - 仕様変更がある場合は `PROMPT.md` 該当節と `README.md` を同期する。
+
+---
+
+## 3. 3 台デバイスからの接続・運用
+
+### 自宅デスクトップ PC（母艦）
+- Antigravity の `Settings → App Settings` で `Keep computer awake` と `Run in background` を ON にする。
+- Windows 電源設定で電源接続時のスリープを「なし」にする。
+
+### ノート PC（外出先での開発）
+- SSH（構築済み）でデスクトップ PC に接続し、Remote-SSH またはターミナルから直接デスクトップ PC の `C:\Users\Aokki\valorant-replay` を操作する（詳細は `.agents/skills/vreplay-remote-sync/SKILL.md`）。
+
+### スマホ（進捗確認・指示出し）
+- **Antigravity Remote Control** でデスクトップ PC のセッションへ接続する。
+  - オフラインと表示される場合は、デスクトップ側のスリープ状態・Antigravity アプリの再起動・アカウント一致を確認する。
+- **代替手段（Discord Bot）**：デスクトップ PC で `python tools/discord_bot.py` を常駐させておけば、Discord から以下のコマンドで操作可能：
+  - `!vr status` : ブランチ・`git worktree list`・チケット一覧を確認
+  - `!vr test` : `pytest -x -q` を実行
+  - `!vr review <name>` : レビューパック生成
+
+---
+
+## 4. クイックコマンド
 
 ```powershell
-# 現在のブランチ・ワークツリー・チケット一覧を確認
+# 状態確認
+git status -sb
 python tools/agy_orchestrator.py status
 
-# タスク指示書の雛形を作成
-python tools/agy_orchestrator.py new-task barrier_v2 --files vreplay/tactics.py tests/test_tactics.py
+# タスク指示書の雛形作成
+python tools/agy_orchestrator.py new-task <name> --files vreplay/xxx.py tests/test_xxx.py
 
-# 実装 → pytest 検証 → レビューパック生成 → 通知を一貫実行
-python tools/agy_orchestrator.py run-task barrier_v2 --engine agy
+# レビューパック生成
+python tools/review_pack.py main..HEAD --task docs/tasks/<name>.md --out _work/review_<name>.txt
 
-# 差分レビューパック生成（--use-sdk で Python SDK による自動レビューも実行）
-python tools/agy_orchestrator.py review barrier_v2 --range main..HEAD --use-sdk
+# マージ後のブランチ掃除
+git branch -d task/<name>
 ```
-
----
-
-## 方式 B：外出先・ノート PC からの遠隔オーケストレーション（SSH / Discord Bot / `vr-barriers`）
-
-自宅デスクトップ PC 上の最新ワークツリー（例：`vr-barriers`）や `ticket_barrier_v2.md` をノート PC やスマホから操作する場合（詳細は `.agents/skills/vreplay-remote-sync/SKILL.md`）。
-
-1. **ノート PC の SSH 鍵準備**：
-   `powershell -ExecutionPolicy Bypass -File scripts/setup_remote_ssh.ps1` を実行し、`~/.ssh/id_ed25519` を生成・公開鍵をデスクトップ PC の `authorized_keys` に登録する。
-2. **自宅デスクトップ PC で Discord Bot を常駐**：
-   環境変数（`DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_USER_IDS`, `VREPLAY_WORKTREE_DIR`）を設定し、`python tools/discord_bot.py` を起動する。
-3. **外出先からのコマンド**：
-   - `!vr status` : ブランチ・`git worktree list`・チケット一覧を確認
-   - `!vr test` : 対象ワークツリーで `pytest -x -q` を実行
-   - `!vr review <name>` : レビューパック生成（SDK があれば自動判定まで実施）
-   - `!vr task <name>` : `agy_orchestrator.py run-task` を実行
-   - `!vr prompt <指示>` : `google-antigravity` SDK または `agy` CLI へ直接指示を送る
-
----
-
-## 方式 C：従来方式（claude.ai + OpenCode + Google Drive 経由レビュー）
-
-Claude（Opus）の使用量を減らすため、書く・見るを分ける。
-
-| 段階 | 担当 | どこで |
-|---|---|---|
-| 1. 設計・指示書 `docs/tasks/<名前>.md` | Claude Opus 5.5 | claude.ai（このプロジェクト） |
-| 2. 実装・テスト・ローカルのコミット | OpenCode ＋ DeepSeek V4.1 Flash **Free**（`opencode.json` で固定） | 自宅 PC の `~/valorant-replay` |
-| 2'. 無料版が使えないとき | Claude Sonnet（Claude が下請けに出す） | claude.ai |
-| 3. レビュー | Gemini 4 Argon（Google AI Pro の Gemini アプリ。API は使わない） | Claude がアプリ内ブラウザで Gemini を操作 |
-| 4. 指摘の確認・マージ・push | Claude Opus 5.5（差分全体は読まない） | claude.ai |
-
-## 手順
-
-1. Claude に「◯◯を直したい」と言う → Claude が指示書を書く。
-2. PC で：`opencode run "docs/tasks/<名前>.md を AGENTS.md の手順で実装して"`
-   - 無料版が 403・上限・遅すぎるときは Claude に「Sonnet で」と言う。
-3. 実装が終わると `G:/マイドライブ/valorant-replay/_review/review_<名前>.txt` ができる。
-   Claude に「review_<名前> をレビューに出して」と言う → Claude がドライブでその .txt を「開く → Google ドキュメント」で変換し（Gemini はドライブの .txt を読めない。ドキュメントなら読める）、Gemini（Argon）に読ませて結果を受け取る。
-   - OpenCode を Claude から動かすときは、PC で `opencode serve --port 4096` を開いておく。Claude はアプリ内ブラウザから http://127.0.0.1:4096 の API（`/session`・`prompt_async`・`shell`）で指示を出す。
-4. 「必ず直すこと」があれば、Claude が指摘を指示書の末尾に足し、2 に戻る（OpenCode に直させる）。
-5. 「マージしてよい」なら、Claude がテストを確かめて main に入れ、PROMPT.md（プロジェクトの要約も）を直す。
-
-## 節約のきまり
-
-- Colab の見張りは Claude にさせない。セルの最後に通知（終わった・失敗した）を出し、Claude は終わってからまとめるだけ。
-- 1 つの話題は 1 つのチャット。区切りで `HANDOFF` を残して新しいチャットへ。
-- ログは末尾とエラーだけ貼る。スクショは必要なときだけ。
-- 放送の画像を見て原因を探すデバッグと設計の判断は Opus が担当（安いモデルだとやり直しが増える）。

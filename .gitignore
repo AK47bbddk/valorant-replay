@@ -1,7 +1,9 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.pytest_tmp/
 _work/
+playbook_JSON/generated/
 *.mp4
 *.webm
 config/local.yaml

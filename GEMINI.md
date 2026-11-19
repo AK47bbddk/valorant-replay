@@ -3,13 +3,22 @@
 このリポジトリは Google Antigravity (`agy`) をオーケストレーターとして開発・検証・レビューを一貫して回す。
 既存の `AGENTS.md` / `docs/WORKFLOW.md`（OpenCode 運用）とも互換性を保つこと。
 
-## 1. オーケストレーションの役割分担
+## 1. オーケストレーションの役割分担（デスクトップ PC 一元管理・Swarm 運用）
 
-| 役割 | 担当 | 主な責務 |
-|---|---|---|
-| **Orchestrator** | Planning Model (`Argon`) | 仕様確認（`PROMPT.md` は必要な節だけ読む）、指示書 `docs/tasks/<名前>.md`（または `ticket_*.md`）の作成、サブエージェント/実行モデルへの指示出し、レビュー結果に基づくマージ判断 |
-| **Implementer** | Execution Model / Subagent (`flash`) / OpenCode | ブランチ `task/<名前>`（またはワークツリー `vr-<名前>`）上で指示書の「触ってよいファイル」のみを変更し、`python -m pytest -x -q <対象テスト>` を通す |
-| **Reviewer** | Review Subagent (`.agents/skills/vreplay-review`) | `tools/review_pack.py` の基準（`## 判定` / `## 必ず直すこと` / `## できれば直すこと` / `## 確認したこと`）に沿って差分を検査する |
+- **単一正本（Single Source of Truth）**: コード編集・テスト・ブランチ操作は **自宅デスクトップ PC のみ** で行う。ノート PC（SSH）やスマホ（Remote Control / Discord Bot）はデスクトップ PC を操作するクライアントとして使う。
+- **1 回の起動 = 1 タスク = 1 ブランチ（`task/<名前>`）** を原則とする。
+
+| 役割 | 担当 | 主な責務 | してはいけないこと |
+|---|---|---|---|
+| **司令塔 (Orchestrator)** | **Antigravity (`Gemini 4 Neon`)** | 仕様確認（`PROMPT.md` は必要な節だけ読む）、指示書 `docs/tasks/<名前>.md` の作成、Swarm / サブエージェントへの割り振り、完了レポートの提示 | ユーザー確認なしの `main` マージ・`git push` |
+| **実装担当 (Implementer)** | **Swarm ワーカー**（軽量・高速モデル）または **OpenCode**（OpenRouter 枠） | `workspace: "share"`（独立 worktree）と `task/<名前>` ブランチで指示書の「触ってよいファイル」のみ実装し、`python -m pytest -x -q <対象テスト>` を通してコミット | `main` の変更、`push`、指示書外の編集 |
+| **レビュー担当 (Reviewer)** | **Swarm の別モデルワーカー**（例：Claude Sonnet 等、実装と異なるモデル）または **Claude Code** | `git diff main...HEAD` と指示書のみを読み、`.agents/skills/vreplay-review` の基準（`## 判定` / `## 必ず直すこと` / `## できれば直すこと` / `## 確認したこと`）で厳格判定 | ファイル編集、コミット |
+| **上位相談役 (Escalation)** | **Claude（Opus / Claude Code）** / **上位モデル** / **Muse** | 3 周ループで解決しない難題・仕様判断の「相談票」にテキストで回答 | リポジトリファイルの直接編集 |
+
+### 自動改善ループと停止条件
+1. 実装 → テスト → **実装と別モデルのレビュー** を **最大 3 周** まで回す。
+2. 「マージしてよい」が出たら完了レポートを出してユーザー確認を待つ。
+3. **3 周しても「必ず直すこと」が消えない／同じ問題で詰まる／仕様判断が必要／触ってよいファイル外の変更が必要** になった時点で即停止し、指示書末尾に「相談票」を書いて上位モデルへエスカレーションする。
 
 ## 2. コーディング・安全ルール（`AGENTS.md` 準拠）
 

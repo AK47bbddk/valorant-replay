@@ -1,50 +1,46 @@
 ---
 name: vreplay-orchestrator
 description: >-
-  Orchestrates feature development, bug fixes, subagent implementation,
-  automated pytest verification, and code review in the valorant-replay
-  repository. Use when planning, dispatching, or managing tasks/tickets for
-  valorant-replay.
+  Orchestrates feature development, bug fixes, subagent/swarm implementation,
+  automated pytest verification, cross-model code review, and escalation in the
+  valorant-replay repository. Use when planning, dispatching, or managing
+  tasks/tickets for valorant-replay.
 ---
 
-# valorant-replay Orchestrator Workflow
+# valorant-replay Orchestrator Workflow (Neon + Swarm)
 
-`valorant-replay` において、指示書作成 → 実装・テスト → レビュー → マージを Antigravity (`agy`) 上で一元管理する手順。
+`valorant-replay` において、自宅デスクトップ PC を単一正本とし、**指示書作成 → 実装・テスト → 別モデルレビュー（最大 3 周）→ 相談票エスカレーション → 人間確認・マージ** を一元管理する手順。
 
 ## Step 1: タスク指示書の準備 (Task Spec)
 
-1. 新規タスクの場合、`docs/tasks/_TEMPLATE.md` をコピーして `docs/tasks/<name>.md` を作成する。
-   - 既存チケット（デスクトップ PC 側の `ticket_*.md` など）がある場合はそれを読み込む。
+1. `docs/tasks/_TEMPLATE.md` を元に `docs/tasks/<name>.md` を作成する。
 2. 仕様確認のために `PROMPT.md` の**該当する節だけ**を読む（全文は読まない）。
-3. 「触ってよいファイル」「変更内容」「通すテスト」を明確に定義する。
+3. 「触ってよいファイル」「変更内容」「通すテスト」「受け入れ条件」を明記し、ユーザーの GO を確認する。
 
-## Step 2: 実装の委任 (Implementation Dispatch)
+## Step 2: 実装と別モデルレビューのループ (Max 3 Rounds)
 
-状況に応じて以下のいずれかで実装担当に委任する：
+規模に応じて使い分ける：
 
-- **パターン A（Plan / Execute モード）**:
-  - プランを確定して実行モデル（Execution Model）に引き継ぎ、単一タスクを順番に実装・テストする。
-- **パターン B（並列サブエージェント / Swarm）**:
-  - 複数タスクを並列処理する場合、または親コンテキストを汚さず独立作業させる場合は、`invoke_subagent`（`TypeName: "self"`, `Model: "flash"`, `Workspace: "share"`）または `swarm`（`workspace: "share"`）を使う。
-  - ブランチ `task/<name>` を切り、指示書の「触ってよいファイル」のみ編集して `python -m pytest -x -q <テスト>` を実行させる。
-- **パターン C（CLI / Python SDK 自動実行）**:
-  - スクリプト経由で一括実行・テスト・レビューパック生成・通知まで回す場合：
-    ```powershell
-    python tools/agy_orchestrator.py run-task <name> --engine agy
-    ```
+- **標準（複数モジュール／精度検証を伴うタスク）— Swarm 運用**：
+  - `swarm` の `add` で **実装ワーカー**（`workspace: "share"`、高速モデル）と **レビューワーカー**（`workspace: "inherit"`、**実装とは別のモデル** 例：Claude Sonnet 等）を起動する。
+  - 実装ワーカーはブランチ `task/<name>` で「触ってよいファイル」のみを変更し、`python -m pytest -x -q <対象テスト>` を通してコミットする。
+  - レビューワーカーは `git diff main...HEAD` と指示書を読み、`vreplay-review` 形式で判定する（コード編集禁止）。
+- **軽量（単発の小修正）— サブエージェント / OpenCode**：
+  - `invoke_subagent`（`TypeName: "self"`, `Workspace: "share"`）または OpenCode（OpenRouter 枠）で実装し、別セッション／別モデルでレビューする。
 
-## Step 3: コードレビュー (Review Dispatch)
+### ループ規則
+1. レビュー判定が **「直してからマージ」** なら、「必ず直すこと」だけを実装担当に戻す（**最大 3 周**）。
+2. 以下のいずれかに該当したら **即停止** し、指示書末尾に「**相談票**」を書いて上位モデル（Claude Opus / Claude Code / Muse）へエスカレーションする：
+   - 3 周しても「必ず直すこと」が残る／同じ問題で堂々巡りする
+   - 仕様や定義の判断が必要（エリア境界・スモーク分類定義など）
+   - 「触ってよいファイル」の外を変える必要がある
+   - 環境都合でテストが動かない
 
-1. `vreplay-review` スキル（またはレビュー用サブエージェント、`TypeName: "research"` 等）を使い、`main..HEAD` の差分と指示書を突き合わせてレビューする。
-2. または以下のコマンドでレビューパックを生成し、必要に応じて SDK 経由で自動レビューを実行する：
-   ```powershell
-   python tools/agy_orchestrator.py review <name> --range main..HEAD
-   ```
-3. 判定が「直してからマージ」または「やり直し」の場合は、指摘事項を指示書末尾の「レビュー結果・修正履歴」に追記し、Step 2 へ戻す。
+## Step 3: 完了レポートと人間確認・マージ (Report & Merge)
 
-## Step 4: マージ・ドキュメント同期・通知 (Merge & Notify)
-
-1. レビュー判定が「マージしてよい」であることを確認する。
-2. 仕様変更がある場合は `PROMPT.md` の該当節および `README.md` が更新されていることを確認する。
-3. 対象テストが最終状態で通ることを確認したうえで、`main` へマージする（リモートへの `git push` はユーザーが求めたときのみ）。
-4. 必要に応じて `vreplay.notify.send`（`notify.url` / `VREPLAY_NOTIFY_URL`）で完了通知を送る。
+1. レビュー判定が **「マージしてよい」** になったら、以下をまとめた完了レポートをユーザーに提示して停止する：
+   - 変えたファイル一覧
+   - 実行したテストと結果
+   - レビュー結果・迷った点（および出力プレビューがあればそのパス）
+2. ユーザーの最終承認を得てから `main` へマージし、必要に応じて `PROMPT.md` / `README.md` を同期する。
+3. `git push` はユーザーが求めたときのみ実行し、マージ済みの作業ブランチ・worktree は削除して `main` をクリーンに保つ。
