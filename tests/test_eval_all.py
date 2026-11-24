@@ -143,6 +143,8 @@ def test_evaluate_blind_dir_masks_out_of_map_and_writes_preview_html(tmp_path):
     assert rep["frames_evaluated"] == 4
     assert rep["mask_ok_frames"] == 3
     assert rep["gt_in_mask_rate"] >= 0.98
+    assert rep["mask_metrics"]["smoke_gt_in_floor_mask_rate"] == 1.0
+    assert rep["mask_metrics"]["smoke_gt_in_floor_inner_rate"] == 1.0
     assert rep["fp_outside_mask_filtered"] >= 3
     assert rep["agent_dots"]["tp"] == 3 and rep["agent_dots"]["fp"] == 0
     assert rep["smoke_dome"]["tp"] == 1 and rep["smoke_dome"]["fp"] == 0
@@ -151,4 +153,29 @@ def test_evaluate_blind_dir_masks_out_of_map_and_writes_preview_html(tmp_path):
     assert "const CARDS =" in html
     assert "プレイ領域マスク表示" in html
     assert "gt_in_mask=" in html
+    assert "smoke_floor=" in eval_all.format_markdown(rep)
+
+
+def test_render_preview_html_escapes_script_close_tag():
+    rep = {"agent_dots": {}, "smoke_dome": {}, "mask_metrics": {}}
+    cards = [{
+        "name": "bad</script><script>alert(1)</script>.png",
+        "has_smoke": False,
+        "has_err": False,
+        "has_filtered": False,
+        "mask_ok": True,
+        "filtered_fp": 0,
+        "atp": 0,
+        "afp": 0,
+        "afn": 0,
+        "stp": 0,
+        "sfp": 0,
+        "sfn": 0,
+        "img": "",
+        "img_mask": "",
+    }]
+    html = eval_all._render_preview_html(rep, cards)
+    assert "</script><script>" not in html
+    assert "<\\/script>" in html
+
 

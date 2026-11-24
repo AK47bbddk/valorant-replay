@@ -149,6 +149,8 @@ def detect_smokes(
             return []
 
     h, w = frame_bgr.shape[:2]
+    if mask is not None and (not isinstance(mask, np.ndarray) or mask.ndim != 2 or mask.shape != (h, w)):
+        return []
     eff_min_r = int(min_radius_px) if min_radius_px is not None else max(4, int(round(0.018 * h)))
     eff_max_r = int(max_radius_px) if max_radius_px is not None else max(12, int(round(0.13 * h)))
     if eff_min_r <= 0 or eff_max_r < eff_min_r:
@@ -161,12 +163,17 @@ def detect_smokes(
         ok, auto_mask = MM.detect_minimap_region(ref_img, mask=mask)
         if (not ok or auto_mask is None) and bg_bgr is not None and mask is None:
             ok, auto_mask = MM.detect_minimap_region(frame_bgr)
+            ref_img = frame_bgr
         if not ok or auto_mask is None:
             return []
+        if bg_bgr is not None and ref_img is bg_bgr:
+            fr_line = MM._outline(frame_bgr[:, :, :3])
+            if not MM._frame_matches_mask(auto_mask, fr_line, min_f=0.30, max_line_frac=0.048):
+                return []
         floor_mask, _ = MM.playable_region(ref_img, mask=auto_mask)
         if floor_mask is None or not floor_mask.any():
             return []
-    elif mask is not None and isinstance(mask, np.ndarray) and mask.shape[:2] == (h, w):
+    elif mask is not None:
         from . import minimap as MM
         ref_img = bg_bgr if bg_bgr is not None else frame_bgr
         floor_mask, _ = MM.playable_region(ref_img, mask=mask)
@@ -189,8 +196,15 @@ def detect_smokes(
         if isinstance(a, dict) and "x" in a and "y" in a
     ]
 
-    def _near_agent(px: float, py: float) -> bool:
-        return any(math.hypot(px - ax, py - ay) < 0.55 * D for ax, ay in agents_px)
+    def _near_agent(px: float, py: float, rad: float | None = None, g_std: float | None = None) -> bool:
+        for ax, ay in agents_px:
+            d = math.hypot(px - ax, py - ay)
+            if d >= 0.55 * D:
+                continue
+            if g_std is not None and g_std <= 12.0 and (d >= 0.35 * D or (rad is not None and rad > 0.58 * D)):
+                continue
+            return True
+        return False
 
     frame_rgb = frame_bgr[:, :, :3]
     gray_frame = cv2.cvtColor(frame_rgb, cv2.COLOR_BGR2GRAY)
@@ -228,7 +242,7 @@ def detect_smokes(
             if radius < float(eff_min_r) or radius > float(eff_max_r):
                 continue
             ix, iy = min(w - 1, max(0, int(round(cx)))), min(h - 1, max(0, int(round(cy))))
-            if not floor_inner[iy, ix] or _near_agent(cx, cy):
+            if not floor_inner[iy, ix]:
                 continue
 
             circle_area = math.pi * (radius ** 2)
@@ -248,11 +262,23 @@ def detect_smokes(
             core_pixels = core_mask > 0
             if int(np.count_nonzero(core_pixels)) < 9:
                 core_pixels = cnt_mask > 0
+            rim_k = max(2, min(int(radius // 2), int(round(0.35 * radius))))
+            k_deep = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * rim_k + 1, 2 * rim_k + 1))
+            deep_pixels = cv2.erode(cnt_mask, k_deep) > 0
+            if int(np.count_nonzero(deep_pixels)) < 9:
+                deep_pixels = core_pixels
 
             inner_edge = float(np.mean(lap_frame[core_pixels]))
             diff_std = float(np.std(diff_blur[core_pixels]))
             diff_mean = float(np.mean(diff_blur[core_pixels]))
+            deep_edge = float(np.mean(lap_frame[deep_pixels]))
+            deep_diff_std = float(np.std(diff_blur[deep_pixels]))
+            deep_g_std = float(np.std(gray_frame[deep_pixels]))
+            fr_deep_g = float(np.mean(gray_frame[deep_pixels]))
+            fr_deep_s = float(np.mean(hsv_frame[..., 1][deep_pixels]))
 
+            if _near_agent(cx, cy, radius, deep_g_std):
+                continue
             if inner_edge > 42.0 and diff_std > 45.0:
                 continue
             if diff_mean < 24.0:
@@ -260,22 +286,28 @@ def detect_smokes(
 
             # 実ミニマップ床では 3D 背景の明化揺らぎを抑制（暗化＋周囲床コントラストを確認）
             if floor_mask is not None and floor_med >= 75.0:
-                dark_max_r = min(float(eff_max_r), max(10.0, 0.055 * h))
+                dark_max_r = float(eff_max_r) if max_radius_px is not None else min(float(eff_max_r), max(10.0, 0.055 * h))
                 if radius > dark_max_r:
                     continue
                 bg_core_g = float(np.mean(bg_gray[core_pixels]))
                 bg_core_s = float(np.mean(bg_hsv[..., 1][core_pixels]))
                 fr_core_g = float(np.mean(gray_frame[core_pixels]))
-                fr_core_s = float(np.mean(hsv_frame[..., 1][core_pixels]))
                 if bg_core_s > 60.0 or bg_core_g < 85.0:
                     continue
-                is_darkening = (bg_core_g - fr_core_g) >= 14.0 and fr_core_g <= min(108.0, floor_med - 10.0)
-                is_colored_dome = fr_core_s >= 55.0 and inner_edge <= 10.0 and diff_std <= 12.0 and fr_core_g <= floor_med + 10.0
+                is_darkening = (bg_core_g - fr_core_g) >= 14.0 and fr_core_g <= (floor_med - 10.0)
+                is_colored_dome = (
+                    fr_deep_s >= 55.0
+                    and deep_edge <= 12.0
+                    and deep_diff_std <= 12.0
+                    and fr_deep_g <= floor_med + 25.0
+                )
                 if not (is_darkening or is_colored_dome):
                     continue
-                if inner_edge > 24.0:
+                if deep_edge > 24.0:
                     continue
-                if _rim_team_frac(hsv_frame, cx, cy, 2.0 * radius) > 0.35:
+                rim_f = _rim_team_frac(hsv_frame, cx, cy, 2.0 * radius)
+                is_smooth_dome = (is_colored_dome and deep_g_std <= 12.0) or (deep_g_std <= 10.0 and fr_deep_s <= 28.0)
+                if rim_f > 0.35 and not is_smooth_dome:
                     continue
                 if is_darkening:
                     ix, iy = int(round(cx)), int(round(cy))
@@ -310,18 +342,28 @@ def detect_smokes(
         if bg_gray is not None and bg_hsv is not None:
             drop_bg = bg_gray.astype(np.float32) - gray_frame.astype(np.float32)
             drop_fl = floor_med - gray_frame.astype(np.float32)
-            cand_bg = (drop_bg >= 14.0) & (bg_hsv[..., 1] <= 75) & (bg_gray >= 85)
-            cand_static = (drop_fl >= 18.0) & (bg_hsv[..., 1] <= 55) & (gray_frame <= min(104, int(floor_med - 16)))
+            cand_bg = (
+                (drop_bg >= 14.0)
+                & (bg_hsv[..., 1] <= 75)
+                & (bg_gray >= 85)
+                & (gray_frame <= int(round(floor_med - 12.0)))
+            )
+            cand_static = (
+                (drop_fl >= 16.0)
+                & (bg_hsv[..., 1] <= 55)
+                & (gray_frame <= min(112, int(round(floor_med - 16.0))))
+            )
             cand_drop = cand_bg | cand_static
         else:
-            drop_fl = floor_med - gray_frame.astype(np.float32)
-            cand_drop = drop_fl >= 16.0
+            cand_drop = (
+                ((floor_med - gray_frame.astype(np.float32)) >= 16.0)
+                & (gray_frame <= min(114, int(round(floor_med - 12.0))))
+            )
 
         dark_dome = (
             floor_inner
             & cand_drop
             & (gray_frame >= 48)
-            & (gray_frame <= min(108, int(floor_med - 12)))
             & (hsv_frame[..., 1] <= 88)
         ).astype(np.uint8) * 255
         k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -329,7 +371,7 @@ def detect_smokes(
         dark_dome = cv2.morphologyEx(dark_dome, cv2.MORPH_CLOSE, k3)
 
         n_cc, labels, stats, cents = cv2.connectedComponentsWithStats(dark_dome, 8)
-        dark_max_r = min(float(eff_max_r), max(10.0, 0.055 * h))
+        dark_max_r = float(eff_max_r) if max_radius_px is not None else min(float(eff_max_r), max(10.0, 0.055 * h))
         min_area = math.pi * (eff_min_r ** 2) * 0.45
         max_area = math.pi * (dark_max_r ** 2) * 1.25
 
@@ -346,9 +388,10 @@ def detect_smokes(
                 continue
             if (area / max(1.0, float(ww * hh))) < 0.44:
                 continue
-            if _near_agent(cx, cy):
+            istd = _interior_gray_std(gray_frame, cx, cy, side * 0.85)
+            if istd > 20.0:
                 continue
-            if _interior_gray_std(gray_frame, cx, cy, side * 0.85) > 20.0:
+            if _near_agent(cx, cy, rad, istd):
                 continue
             if _rim_team_frac(hsv_frame, cx, cy, side) > 0.35:
                 continue

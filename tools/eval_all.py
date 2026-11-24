@@ -164,17 +164,21 @@ def _call_smokes(
     *,
     mask: np.ndarray | None = None,
     require_minimap: bool = False,
+    found_agents: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     fn = eff_smokes.detect_smokes
     accepts_mask = _accepts_kw(fn, "mask")
     accepts_req = _accepts_kw(fn, "require_minimap")
+    accepts_agents = _accepts_kw(fn, "found_agents")
 
-    if accepts_mask or accepts_req:
+    if accepts_mask or accepts_req or accepts_agents:
         kwargs: dict[str, Any] = {}
         if accepts_mask and mask is not None:
             kwargs["mask"] = mask
         if accepts_req:
             kwargs["require_minimap"] = require_minimap
+        if accepts_agents and found_agents is not None:
+            kwargs["found_agents"] = found_agents
         return list(fn(img, bg, **kwargs) or [])
 
     # レガシー 2 引数互換モック向け（medianBlur フォールバック）
@@ -274,7 +278,7 @@ def _render_preview_html(rep: dict[str, Any], cards: list[dict[str, Any]]) -> st
         f"Mask OK={mask_ok_cnt}/{n} | gt_in_mask={gt_in_pct:.1f}% | マスク外除外FP={filt_cnt}"
     )
 
-    cards_json = json.dumps(cards, ensure_ascii=False)
+    cards_json = json.dumps(cards, ensure_ascii=False).replace("</", "<\\/")
     return f"""<!doctype html>
 <html lang="ja"><head><meta charset="utf-8"><title>ブラインドテスト目視チェック ({n}枚)</title>
 <style>
@@ -321,6 +325,7 @@ button.toggle.on{{background:#4f46e5;border-color:#818cf8}}
 const CARDS = {cards_json};
 let curMode = 'smoke';
 let showMask = true;
+function esc(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}}
 function render(){{
   const list = CARDS.filter(c =>
     curMode==='all' ? true :
@@ -332,7 +337,7 @@ function render(){{
     <div class="card">
       <img src="data:image/jpeg;base64,${{showMask ? c.img_mask : c.img}}" loading="lazy">
       <div class="meta">
-        <div><b>${{c.name}}</b></div>
+        <div><b>${{esc(c.name)}}</b></div>
         <div class="${{(c.sfp+c.sfn)?'bad':'ok'}}">Smoke: TP=${{c.stp}} FP=${{c.sfp}} FN=${{c.sfn}}</div>
         <div class="${{(c.afp+c.afn)?'bad':'ok'}}">Agent: TP=${{c.atp}} FP=${{c.afp}} FN=${{c.afn}}</div>
         <div class="info">Mask: ${{c.mask_ok ? 'OK' : 'NG'}} | マスク外除外=${{c.filtered_fp}}</div>
@@ -387,7 +392,7 @@ def evaluate_blind_dir(
             bg_medians[k] = np.median(np.stack(imgs), axis=0).astype(np.uint8)
 
     # 各フレームのミニマップ存在・プレイ可能床マスクを事前計算
-    frame_masks: list[tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]] = []
+    frame_masks: list[tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None, np.ndarray | None]] = []
     mask_ok_frames = 0
     for _img_path, img, _labels in loaded:
         gkey = _group_key(_img_path.stem, img.shape[:2])
@@ -398,15 +403,15 @@ def evaluate_blind_dir(
             ok_m, raw_m = MM.detect_minimap_region(img)
             ref = img
         if ok_m and raw_m is not None:
-            if bg is not None and ref is bg and MM._edge_agreement(raw_m, MM._outline(img)) < 0.20:
-                frame_masks.append((bg, None, None))
+            if bg is not None and ref is bg and not MM._frame_matches_mask(raw_m, MM._outline(img), min_f=0.30, max_line_frac=0.048):
+                frame_masks.append((bg, None, None, None))
                 continue
             floor_mask, dot_mask = MM.playable_region(ref, mask=raw_m)
             if floor_mask is not None and dot_mask is not None:
                 mask_ok_frames += 1
-                frame_masks.append((bg, floor_mask, dot_mask))
+                frame_masks.append((bg, raw_m, floor_mask, dot_mask))
                 continue
-        frame_masks.append((bg, None, None))
+        frame_masks.append((bg, None, None, None))
 
     enforce_minimap = (mask_ok_frames > 0) if require_minimap is None else bool(require_minimap)
 
@@ -421,13 +426,13 @@ def evaluate_blind_dir(
     sm_single_frames = 0
 
     ag_gt_in_mask = ag_gt_total_for_mask = 0
-    sm_gt_in_mask = sm_gt_total_for_mask = 0
+    sm_gt_in_mask = sm_gt_in_floor = sm_gt_in_floor_inner = sm_gt_total_for_mask = 0
     fp_outside_mask_filtered = 0
 
     cards: list[dict[str, Any]] = []
     want_cards = bool(preview_html)
 
-    for (img_path, img, labels), (bg, floor_mask, dot_mask) in zip(loaded, frame_masks):
+    for (img_path, img, labels), (bg, raw_m, floor_mask, dot_mask) in zip(loaded, frame_masks):
         h, w = img.shape[:2]
         ag_boxes = labels.get(0, [])
         sm_boxes = labels.get(1, [])
@@ -436,6 +441,9 @@ def evaluate_blind_dir(
 
         # マスク健全性の集計（GT がプレイ可能領域に収まっている割合）
         if floor_mask is not None and dot_mask is not None:
+            floor_inner = cv2.erode(floor_mask.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+            if not floor_inner.any():
+                floor_inner = floor_mask
             for cx, cy in ag_gt:
                 ag_gt_total_for_mask += 1
                 xi = min(w - 1, max(0, int(round(cx * w))))
@@ -448,12 +456,16 @@ def evaluate_blind_dir(
                 yi = min(h - 1, max(0, int(round(cy * h))))
                 if dot_mask[yi, xi]:
                     sm_gt_in_mask += 1
+                if floor_mask[yi, xi]:
+                    sm_gt_in_floor += 1
+                if floor_inner[yi, xi]:
+                    sm_gt_in_floor_inner += 1
 
         # 1) エージェント点検出 (class 0)
         frame_filtered_fp = 0
         if floor_mask is not None and dot_mask is not None:
             raw_dots = tactics.detect_dots(img)
-            dots = tactics.detect_dots(img, mask=floor_mask)
+            dots = tactics.detect_dots(img, mask=raw_m if raw_m is not None else floor_mask)
             raw_preds = [(float(d["x"]), float(d["y"])) for d in raw_dots]
             _, raw_fp, _, _ = _match_points(ag_gt, raw_preds, tol)
             ag_pred = [(float(d["x"]), float(d["y"])) for d in dots]
@@ -487,12 +499,14 @@ def evaluate_blind_dir(
                 sm_single_frames += 1
 
             if floor_mask is not None and dot_mask is not None:
+                eff_mask = (raw_m if raw_m is not None else floor_mask) if _accepts_kw(eff_smokes.detect_smokes, "mask") else floor_mask
                 found_sm = _call_smokes(
                     eff_smokes,
                     img,
                     bg,
-                    mask=floor_mask,
+                    mask=eff_mask,
                     require_minimap=False,
+                    found_agents=dots,
                 )
                 # マスク無しで出たであろうマップ外 FP 数も参考計測（bg がある時のみ、または非レガシー）
                 if _accepts_kw(eff_smokes.detect_smokes, "mask") and bg is not None:
@@ -507,7 +521,7 @@ def evaluate_blind_dir(
             elif enforce_minimap:
                 found_sm = []
             else:
-                found_sm = _call_smokes(eff_smokes, img, bg, mask=None, require_minimap=False)
+                found_sm = _call_smokes(eff_smokes, img, bg, mask=None, require_minimap=False, found_agents=dots)
 
             sm_pred = [(float(s["x"]), float(s["y"])) for s in found_sm]
             stp, sfp, sfn, sdists = _match_points(sm_gt, sm_pred, tol)
@@ -546,12 +560,16 @@ def evaluate_blind_dir(
     gt_in_mask_rate = round((ag_gt_in_mask + sm_gt_in_mask) / gt_tot_mask, 4) if gt_tot_mask > 0 else 0.0
     ag_gt_rate = round(ag_gt_in_mask / ag_gt_total_for_mask, 4) if ag_gt_total_for_mask > 0 else 0.0
     sm_gt_rate = round(sm_gt_in_mask / sm_gt_total_for_mask, 4) if sm_gt_total_for_mask > 0 else 0.0
+    sm_gt_floor_rate = round(sm_gt_in_floor / sm_gt_total_for_mask, 4) if sm_gt_total_for_mask > 0 else 0.0
+    sm_gt_floor_inner_rate = round(sm_gt_in_floor_inner / sm_gt_total_for_mask, 4) if sm_gt_total_for_mask > 0 else 0.0
 
     mask_metrics = {
         "mask_ok_frames": mask_ok_frames,
         "gt_in_mask_rate": gt_in_mask_rate,
         "agent_gt_in_mask_rate": ag_gt_rate,
         "smoke_gt_in_mask_rate": sm_gt_rate,
+        "smoke_gt_in_floor_mask_rate": sm_gt_floor_rate,
+        "smoke_gt_in_floor_inner_rate": sm_gt_floor_inner_rate,
         "fp_outside_mask_filtered": fp_outside_mask_filtered,
     }
 
@@ -601,7 +619,9 @@ def format_markdown(report: dict[str, Any]) -> str:
         "",
         f"- マスク健全性: `mask_ok_frames={mm.get('mask_ok_frames', 0)}/{report['frames_evaluated']}`, "
         f"`gt_in_mask_rate={mm.get('gt_in_mask_rate', 0.0):.4f}` "
-        f"(agent={mm.get('agent_gt_in_mask_rate', 0.0):.4f}, smoke={mm.get('smoke_gt_in_mask_rate', 0.0):.4f}), "
+        f"(agent={mm.get('agent_gt_in_mask_rate', 0.0):.4f}, smoke={mm.get('smoke_gt_in_mask_rate', 0.0):.4f}, "
+        f"smoke_floor={mm.get('smoke_gt_in_floor_mask_rate', 0.0):.4f}, "
+        f"smoke_inner={mm.get('smoke_gt_in_floor_inner_rate', 0.0):.4f}), "
         f"`fp_outside_mask_filtered={mm.get('fp_outside_mask_filtered', 0)}`",
         "",
         "| 対象 | 状態 | GT数 | 検出数 | TP | FP | FN | Precision | Recall | F1 | 平均誤差 |",

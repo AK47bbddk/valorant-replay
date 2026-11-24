@@ -447,3 +447,91 @@ def test_analyze_video_skips_non_minimap_cutaway_and_passes_mask_to_smokes(tmp_p
     assert tac["rounds"]["1"]["smokes"].get("1:40")
     assert tac["rounds"]["1"]["smokes"].get("1:30") == []
 
+
+def test_detect_dots_rejects_bad_masks_purple_bleed_and_handles_diagonal_and_attached_sightlines():
+    # 1) 3D・サイズ不一致マスクは require_minimap の有無に関わらず []
+    img = _synthetic_minimap(304, 320)
+    cv2.circle(img, (int(0.50 * 320), int(0.50 * 304)), 6, (0, 0, 255), -1)
+    assert tactics.detect_dots(img, mask=np.ones((304, 320, 3), bool)) == []
+    assert tactics.detect_dots(img, mask=np.ones((120, 120), bool)) == []
+    assert tactics.detect_dots(img, mask=np.ones((304, 320, 3), bool), require_minimap=True) == []
+    assert tactics.detect_dots(img, mask=np.ones((120, 120), bool), require_minimap=True) == []
+
+    # 2) 320x304 紫背景＋左上巨大赤ブロックでもマップ外を拾わず床上ドットを返す
+    im_p = _synthetic_minimap(304, 320, bg_col=(180, 50, 160), wall_col=(180, 50, 160))
+    cv2.putText(im_p, "R2 1:29", (4, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (230, 230, 230), 2)
+    cv2.circle(im_p, (int(0.08 * 320), int(0.08 * 304)), 14, (0, 0, 255), -1)
+    cv2.circle(im_p, (int(0.17 * 320), int(0.50 * 304)), 5, (0, 0, 255), -1)
+    cv2.circle(im_p, (int(0.16 * 320), int(0.70 * 304)), 5, (230, 200, 0), -1)
+    dots_p = tactics.detect_dots(im_p, per_color=1, require_minimap=True)
+    assert len(dots_p) == 2 and all(d["x"] > 0.12 for d in dots_p)
+
+    # 3) 45°斜め視線（外接矩形は正方形寄り）を除外しつつ真のアイコンを残す
+    im_diag = _synthetic_minimap(170, 180, bg_col=(30, 110, 225), wall_col=(30, 110, 225))
+    cv2.line(im_diag, (int(0.50 * 180), int(0.25 * 170)), (int(0.72 * 180), int(0.47 * 170)), (0, 0, 255), 2)
+    cv2.circle(im_diag, (int(0.26 * 180), int(0.50 * 170)), 5, (0, 0, 255), -1)
+    dots_diag = tactics.detect_dots(im_diag, per_color=1, require_minimap=True)
+    assert len(dots_diag) == 1 and abs(dots_diag[0]["x"] - 0.26) < 0.05
+
+    # 4) 長い視線がくっついた真の選手アイコンを選択的 MORPH_OPEN で救済
+    im_att = _synthetic_minimap(304, 320)
+    cv2.circle(im_att, (int(0.74 * 320), int(0.50 * 304)), 6, (0, 0, 255), -1)
+    cv2.line(im_att, (int(0.74 * 320), int(0.50 * 304)), (int(0.74 * 320) - 45, int(0.50 * 304)), (0, 0, 255), 2)
+    dots_att = tactics.detect_dots(im_att, per_color=1, require_minimap=True)
+    assert len(dots_att) == 1 and abs(dots_att[0]["x"] - 0.74) < 0.05
+
+
+def test_analyze_video_cutaway_streams_all_majority_and_mark_fallback(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.setattr(tactics, "load_map", lambda name, cfg, log=None: _meta())
+    monkeypatch.setattr(tactics, "map_art", lambda cfg, name: None)
+
+    fx = Path(__file__).parent / "fixtures"
+    cut = cv2.resize(cv2.imread(str(fx / "panels_cn.jpg")), (320, 304))
+    cv2.circle(cut, (40, 40), 7, (0, 0, 255), -1)
+
+    base = _synthetic_minimap(304, 320)
+    mm_dot = base.copy()
+    cv2.circle(mm_dot, (int(0.50 * 320), int(0.50 * 304)), 6, (0, 0, 255), -1)
+    mm_sm = mm_dot.copy()
+    ov = mm_sm.copy()
+    cv2.circle(ov, (int(0.74 * 320), int(0.50 * 304)), 9, (70, 72, 74), -1)
+    cv2.addWeighted(ov, 0.75, mm_sm, 0.25, 0.0, dst=mm_sm)
+
+    cfg = _cfg(tmp_path)
+    cfg["tactics"]["icon_frac"] = 0.048
+    ts = [float(i) for i in range(1, 30)]
+    rounds = [{"n": 1, "start": 0.0, "end": 32.0, "side1": "攻撃"}]
+
+    # Case 2: 節目ドンピシャ (t=10, 25) がカットアウェイでも、前後バッファからスモークを検出
+    fr2 = [cut.copy() if t in (10.0, 25.0) else mm_sm.copy() for t in ts]
+    tac2 = tactics.analyze_video(
+        cfg, Path(tmp_path / "v2.mp4"), "Test", rounds, log=lambda *a: None,
+        store=type("S2", (), {"get": lambda self, i, _n: fr2[i]})(),
+        obs={"t": ts, "idx": list(range(len(ts)))},
+    )
+    assert tac2 is not None
+    assert tac2["rounds"]["1"]["smokes"].get("1:30")
+    assert tac2["rounds"]["1"]["smokes"].get("1:15")
+
+    # Case 3: 全フレームがカットアウェイなら None を返す
+    fr3 = [cut.copy() for _ in ts]
+    tac3 = tactics.analyze_video(
+        cfg, Path(tmp_path / "v3.mp4"), "Test", rounds, log=lambda *a: None,
+        store=type("S3", (), {"get": lambda self, i, _n: fr3[i]})(),
+        obs={"t": ts, "idx": list(range(len(ts)))},
+    )
+    assert tac3 is None
+
+    # Case 4: カットアウェイ優勢 (20/29) でも有効ミニマップから背景再構築し、カットアウェイの偽点を除外
+    fr4 = [cut.copy() if i < 20 else mm_dot.copy() for i in range(len(ts))]
+    tac4 = tactics.analyze_video(
+        cfg, Path(tmp_path / "v4.mp4"), "Test", rounds, log=lambda *a: None,
+        store=type("S4", (), {"get": lambda self, i, _n: fr4[i]})(),
+        obs={"t": ts, "idx": list(range(len(ts)))},
+    )
+    assert tac4 is not None and tac4["positions"]
+    assert all(p[1] > 20.0 for p in tac4["positions"])
+
+

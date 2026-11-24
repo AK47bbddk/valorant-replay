@@ -199,3 +199,58 @@ def test_detect_smokes_rejects_non_minimap_when_required():
     _draw_dome_smoke(frame, 120, 120, 14, (180, 120, 220), alpha=0.7)
     assert smokes.detect_smokes(frame, blank, require_minimap=True) == []
 
+
+def test_detect_smokes_rejects_bad_masks_and_non_minimap_frame_with_valid_bg():
+    from pathlib import Path
+    fx = Path(__file__).parent / "fixtures"
+
+    bg = _make_realistic_minimap(304, 320)
+    fr = bg.copy()
+    _draw_dome_smoke(fr, 160, 152, 9, (74, 76, 78), alpha=0.75)
+
+    # 3D・サイズ不一致マスクは require_minimap の有無に関わらず []
+    assert smokes.detect_smokes(fr, bg, mask=np.ones((304, 320, 3), bool)) == []
+    assert smokes.detect_smokes(fr, bg, mask=np.ones((120, 120), bool)) == []
+    assert smokes.detect_smokes(fr, bg, mask=np.ones((304, 320, 3), bool), require_minimap=True) == []
+    assert smokes.detect_smokes(fr, bg, mask=np.ones((120, 120), bool), require_minimap=True) == []
+
+    # bg_bgr が有効なミニマップでも、frame_bgr が黒画面・UIパネル・高密度文字なら []
+    assert smokes.detect_smokes(np.zeros_like(bg), bg, require_minimap=True) == []
+    for bad_name in ("panels_cn.jpg", "killfeed_strip_mastercard.jpg"):
+        bad = cv2.resize(cv2.imread(str(fx / bad_name)), (320, 304))
+        assert smokes.detect_smokes(bad, bg, require_minimap=True) == [], bad_name
+    cut = np.full_like(bg, 20)
+    for y in range(20, 294, 18):
+        cv2.putText(cut, "VICTORY ROUND 12 VALORANT", (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (240, 240, 240), 1)
+    assert smokes.detect_smokes(cut, bg, require_minimap=True) == []
+
+
+def test_detect_smokes_colored_rimmed_domes_mild_darkening_and_max_radius_override():
+    bg = _make_realistic_minimap(304, 320)
+
+    # 1) Omen / Viper / Clove / Harbor cyan の 1px 明縁付きドームを検知し、テクスチャ付きアイコンは拒否
+    for col in ((170, 95, 120), (80, 165, 65), (165, 95, 195), (190, 155, 60)):
+        fr = bg.copy()
+        _draw_dome_smoke(fr, 160, 152, 10, col, alpha=0.80)
+        res = smokes.detect_smokes(fr, bg, require_minimap=True)
+        assert len(res) == 1, col
+
+    fr_icon = bg.copy()
+    _draw_player_dot(fr_icon, 160, 152, radius=9)
+    cv2.circle(fr_icon, (157, 150), 2, (20, 20, 20), -1)
+    assert smokes.detect_smokes(fr_icon, bg, require_minimap=True) == []
+
+    # 2) floor_med=128 上で diff=16 の半透明暗化スモークを 3 モードとも検知
+    fr16 = bg.copy()
+    cv2.circle(fr16, (160, 152), 9, (112, 112, 112), -1)
+    assert len(smokes.detect_smokes(fr16, bg, require_minimap=True)) == 1
+    assert len(smokes.detect_smokes(fr16, None, require_minimap=True)) == 1
+    assert len(smokes.detect_smokes(fr16, fr16.copy(), require_minimap=True)) == 1
+
+    # 3) 197x208 で max_radius_px=20 指定時に r=12 が上限クランプされないこと
+    bg_small = _make_realistic_minimap(197, 208)
+    fr_small = bg_small.copy()
+    cv2.circle(fr_small, (104, 98), 12, (76, 76, 76), -1)
+    assert len(smokes.detect_smokes(fr_small, bg_small, max_radius_px=20, require_minimap=True)) == 1
+
+

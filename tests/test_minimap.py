@@ -203,3 +203,72 @@ def test_playable_region_excludes_margins_walls_hud_and_keeps_wall_edge_icons():
     assert not floor_mask[edge_y, edge_x]
     assert dot_mask[edge_y, edge_x]
 
+
+def test_detect_minimap_region_rejects_ui_crops_jagged_polygons_and_dense_text_cutaways():
+    from pathlib import Path
+    import cv2
+
+    fx = Path(__file__).parent / "fixtures"
+    kf = cv2.imread(str(fx / "killfeed_strip_mastercard.jpg"))
+    kh, kw = kf.shape[:2]
+    assert M.detect_minimap_region(kf[kh // 2 - 90:kh // 2 + 90, kw // 2 - 90:kw // 2 + 90]) == (False, None)
+
+    tf = cv2.imread(str(fx / "cn_summit/topband_full.jpg"))
+    th, tw = tf.shape[:2]
+    assert M.detect_minimap_region(tf[th // 2 - 128:th // 2 + 128, tw // 2 - 128:tw // 2 + 128]) == (False, None)
+
+    thalf = cv2.imread(str(fx / "cn_summit/topband_half.jpg"))
+    hh, hw = thalf.shape[:2]
+    assert M.detect_minimap_region(thalf[:256, :256]) == (False, None)
+    assert M.detect_minimap_region(thalf[hh // 2 - 128:hh // 2 + 128, hw // 2 - 128:hw // 2 + 128]) == (False, None)
+
+    # 内部に壁穴のないギザギザ UI ポリゴンは拒否
+    jagged = np.zeros((243, 256, 3), np.uint8)
+    pts = []
+    for i in range(24):
+        ang = 2.0 * math.pi * i / 24.0
+        r = 85 if i % 2 == 0 else 55
+        pts.append([int(128 + r * math.cos(ang)), int(121 + r * math.sin(ang))])
+    poly = np.array(pts, np.int32)
+    cv2.fillPoly(jagged, [poly], (128, 128, 128))
+    cv2.polylines(jagged, [poly], True, (235, 235, 235), 2)
+    assert M.detect_minimap_region(jagged) == (False, None)
+
+    # 高密度文字の暗転画面は既存の有効マスクに対しても _frame_matches_mask で拒否
+    spl = cv2.imread(str(fx / "minimap_split_riot.jpg"))
+    ok, m_spl = M.detect_minimap_region(spl)
+    assert ok and m_spl is not None
+    assert M._frame_matches_mask(m_spl, M._outline(spl))
+    cutaway = np.full_like(spl, 20)
+    for y in range(20, spl.shape[0] - 10, 18):
+        cv2.putText(cutaway, "VICTORY ROUND 12 VALORANT", (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (240, 240, 240), 1)
+    assert not M._frame_matches_mask(m_spl, M._outline(cutaway))
+
+
+def test_playable_region_strips_offset_hud_rejects_bad_masks_and_keeps_wall_voids_closed():
+    import cv2
+
+    # 1) 境界に接しないオフセット HUD 文字・ピルを除去
+    im170 = _make_synthetic_minimap(170, 180, bg_col=(30, 110, 225), wall_col=(30, 110, 225), hud=True)
+    fl170, dm170 = M.playable_region(im170)
+    assert fl170 is not None and dm170 is not None
+    assert not fl170[12, 10]
+    assert not dm170[int(0.08 * 170), int(0.08 * 180)]
+
+    im304 = _make_synthetic_minimap(304, 320, bg_col=(180, 50, 160), wall_col=(72, 72, 72), hud=True)
+    ok, raw_m = M.detect_minimap_region(im304)
+    assert ok and raw_m is not None
+    pill_mask = raw_m.copy()
+    pill_mask[3:30, 3:85] = True
+    fl_pill, _ = M.playable_region(im304, mask=pill_mask)
+    assert fl_pill is not None and not fl_pill[15, 10]
+    # 暗い灰 (72, 72, 72) の壁穴は 4-連結湾曲補完で漏れない
+    assert not fl_pill[int(0.66 * 304), int(0.39 * 320)]
+
+    # 2) 3D マスク・サイズ不一致マスクは例外やフォールバックを起こさず拒否
+    assert M.detect_minimap_region(im304, mask=np.ones((304, 320, 3), bool)) == (False, None)
+    assert M.detect_minimap_region(im304, mask=np.ones((120, 120), bool)) == (False, None)
+    assert M.playable_region(im304, mask=np.ones((304, 320, 3), bool)) == (None, None)
+    assert M.playable_region(im304, mask=np.ones((120, 120), bool)) == (None, None)
+
+
