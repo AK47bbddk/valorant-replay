@@ -406,15 +406,16 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
                 cur = keep_trk.get((int(r["n"]), g_))
                 if cur is None or abs(e_ - g_) < cur[0]:
                     keep_trk[(int(r["n"]), g_)] = (abs(e_ - g_), t, mm.copy())
-        if agent_teams:
-            st_ = float(r["start"])
-            for label, e in MARKS.items():
-                d_, key = abs(t - st_ - e), (int(r["n"]), label)
-                if d_ <= 2.0:
-                    lst = keep.setdefault(key, [])
-                    lst.append((d_, t, mm.copy()))
-                    lst.sort(key=lambda x: x[0])
-                    del lst[3:]
+        st_ = float(r["start"])
+        for label, e in MARKS.items():
+            if not agent_teams and label not in ("1:40", "1:30", "1:15", "1:00"):
+                continue
+            d_, key = abs(t - st_ - e), (int(r["n"]), label)
+            if d_ <= 2.0:
+                lst = keep.setdefault(key, [])
+                lst.append((d_, t, mm.copy()))
+                lst.sort(key=lambda x: x[0])
+                del lst[3:]
         h, w = mm.shape[:2]
         aspect = w / max(1, h)
         if len(bgs) < 40 and (not bgs or len(samples) % 7 == 0) and (not bgs or bgs[0].shape == mm.shape):
@@ -669,6 +670,30 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         if rt["plant_site"]:
             rt["site"] = rt["plant_site"]
             rt["site_conf"] = max(rt["site_conf"], 0.8 if T.get("ok") else 0.5)
+
+        smokes_by_mark: dict[str, list[dict]] = {}
+        if keep and background is not None:
+            try:
+                from . import smokes as SM
+                eff_T = T if T.get("ok") else None
+                eff_map = (meta.get("name") if meta else None) or map_name
+                for lbl in ("1:40", "1:30", "1:15", "1:00"):
+                    frames = keep.get((n, lbl))
+                    if not frames:
+                        continue
+                    mm_best = frames[0][2] if isinstance(frames, list) else frames[2]
+                    smokes_by_mark[lbl] = SM.detect_smokes(
+                        mm_best,
+                        background,
+                        transform=eff_T,
+                        map_name=eff_map,
+                        placed=placed,
+                        reg=reg,
+                        aspect=aspect,
+                    )
+            except Exception:
+                smokes_by_mark = {}
+        rt["smokes"] = smokes_by_mark
 
     # エージェントごとの位置（アイコン照合）と、Valotactics のような配置図
     agent_info = None
