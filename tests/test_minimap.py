@@ -95,3 +95,111 @@ def test_fit_mask_reads_site_letters_on_symmetric_map():
     T = M.fit_mask(mask, {"callouts": calls}, bg=bg)
     placed = {(c["super"], c["name"]): c for c in M.place(T, calls)}
     assert placed[("A", "Site")]["x"] > 0.6 and placed[("B", "Site")]["x"] < 0.35, T["msg"]
+
+
+def _make_synthetic_minimap(h: int = 304, w: int = 320, bg_col=(20, 90, 180), wall_col=(40, 120, 210), hud: bool = False):
+    import cv2
+    img = np.full((h, w, 3), 5, dtype=np.uint8)
+    img[:int(0.2 * h), :int(0.2 * w)] = bg_col
+    img[int(0.8 * h):, int(0.8 * w):] = bg_col
+    fl = np.zeros((h, w), np.uint8)
+    cv2.rectangle(fl, (int(0.18 * w), int(0.16 * h)), (int(0.34 * w), int(0.84 * h)), 1, -1)
+    cv2.rectangle(fl, (int(0.66 * w), int(0.16 * h)), (int(0.82 * w), int(0.84 * h)), 1, -1)
+    cv2.rectangle(fl, (int(0.18 * w), int(0.44 * h)), (int(0.82 * w), int(0.56 * h)), 1, -1)
+    cv2.rectangle(fl, (int(0.30 * w), int(0.24 * h)), (int(0.70 * w), int(0.34 * h)), 1, -1)
+    cv2.rectangle(fl, (int(0.44 * w), int(0.14 * h)), (int(0.56 * w), int(0.86 * h)), 1, -1)
+    wall_hole = np.zeros((h, w), np.uint8)
+    cv2.rectangle(wall_hole, (int(0.36 * w), int(0.36 * h)), (int(0.43 * w), int(0.43 * h)), 1, -1)
+    cv2.rectangle(wall_hole, (int(0.57 * w), int(0.36 * h)), (int(0.64 * w), int(0.43 * h)), 1, -1)
+    cv2.rectangle(wall_hole, (int(0.36 * w), int(0.58 * h)), (int(0.43 * w), int(0.76 * h)), 1, -1)
+    cv2.rectangle(wall_hole, (int(0.57 * w), int(0.58 * h)), (int(0.64 * w), int(0.76 * h)), 1, -1)
+    fl[wall_hole > 0] = 0
+    img[wall_hole > 0] = wall_col
+    img[fl > 0] = (128, 128, 128)
+    cv2.rectangle(img, (int(0.19 * w), int(0.24 * h)), (int(0.29 * w), int(0.36 * h)), (95, 145, 150), -1)
+    cv2.rectangle(img, (int(0.71 * w), int(0.24 * h)), (int(0.81 * w), int(0.36 * h)), (95, 145, 150), -1)
+    edge = (fl - cv2.erode(fl, np.ones((3, 3), np.uint8))) > 0
+    img[edge] = (235, 235, 235)
+    if hud:
+        cv2.putText(img, "R2 1:29", (4, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (230, 230, 230), 2)
+    return img
+
+
+def test_map_mask_handles_tan_and_orange_3d_backgrounds():
+    from pathlib import Path
+    import cv2
+    # 茶色（HSV H~15, S~90）と鮮やかな橙（H~14, S~210）の 3D 背景でも漏れない・None にならない
+    for bg_col in ((80, 125, 175), (30, 95, 220)):
+        img = _make_synthetic_minimap(304, 320, bg_col=bg_col, wall_col=bg_col)
+        m = M.map_mask(img)
+        assert m is not None
+        assert 0.20 <= float(m.mean()) <= 0.45
+        assert not m[10, 10]
+        assert not m[int(0.66 * 304), int(0.39 * 320)]
+
+    fx = Path(__file__).parent / "fixtures"
+    for name in ("minimap_split_riot.jpg", "minimap_sunset_riot.jpg"):
+        m = M.map_mask(cv2.imread(str(fx / name)))
+        assert m is not None and 0.15 <= float(m.mean()) <= 0.45
+
+
+def test_detect_minimap_region_accepts_valid_and_rejects_non_minimaps():
+    from pathlib import Path
+    import cv2
+
+    fx = Path(__file__).parent / "fixtures"
+    for valid_name in ("minimap_split_riot.jpg", "minimap_sunset_riot.jpg"):
+        ok, m = M.detect_minimap_region(cv2.imread(str(fx / valid_name)))
+        assert ok and m is not None, valid_name
+
+    for h, w in ((197, 208), (243, 256), (304, 320)):
+        ok, m = M.detect_minimap_region(_make_synthetic_minimap(h, w))
+        assert ok and m is not None, (h, w)
+
+    for bad_name in (
+        "panels_cn.jpg",
+        "panels_riot_a.jpg",
+        "panels_riot_b.jpg",
+        "killfeed_strip_ads.jpg",
+        "killfeed_strip_mastercard.jpg",
+        "cn_summit/topband_full.jpg",
+        "cn_summit/topband_half.jpg",
+    ):
+        ok, m = M.detect_minimap_region(cv2.imread(str(fx / bad_name)))
+        assert not ok and m is None, bad_name
+
+    # 黒画面・一様灰色・ランダムノイズ・単純な白枠矩形を拒否
+    rng = np.random.default_rng(42)
+    rect_ui = np.zeros((240, 240, 3), dtype=np.uint8)
+    cv2.rectangle(rect_ui, (40, 40), (200, 200), (128, 128, 128), -1)
+    cv2.rectangle(rect_ui, (40, 40), (200, 200), (240, 240, 240), 2)
+    for bad in (
+        None,
+        np.zeros((240, 240, 3), dtype=np.uint8),
+        np.full((240, 240, 3), 120, dtype=np.uint8),
+        rng.integers(0, 256, (240, 240, 3), dtype=np.uint8),
+        rect_ui,
+    ):
+        ok, m = M.detect_minimap_region(bad)
+        assert not ok and m is None
+
+
+def test_playable_region_excludes_margins_walls_hud_and_keeps_wall_edge_icons():
+    img = _make_synthetic_minimap(304, 320, bg_col=(45, 110, 210), wall_col=(55, 130, 210), hud=True)
+    # 左上 HUD 隅に明るいパッチが混入したケースも除去されること
+    ok, raw_m = M.detect_minimap_region(img)
+    assert ok and raw_m is not None
+    raw_with_hud = raw_m.copy()
+    raw_with_hud[0:18, 0:45] = True
+
+    floor_mask, dot_mask = M.playable_region(img, mask=raw_with_hud)
+    assert floor_mask is not None and dot_mask is not None
+    assert not floor_mask[6, 15]                                    # 左上 HUD 隅を除外
+    assert not floor_mask[10, 10]                                   # 外側 3D 余白を除外
+    assert not floor_mask[int(0.66 * 304), int(0.39 * 320)]         # 内部の壁ブロックを除外
+    assert floor_mask[int(0.50 * 304), int(0.50 * 320)]             # 通路内部を保持
+    # 壁際（床境界から 2px 外）は floor_mask では False でも dot_mask では許容
+    edge_y, edge_x = int(0.50 * 304), int(0.18 * 320) - 2
+    assert not floor_mask[edge_y, edge_x]
+    assert dot_mask[edge_y, edge_x]
+

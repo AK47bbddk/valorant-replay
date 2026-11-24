@@ -251,16 +251,24 @@ def map_mask(bg: np.ndarray) -> np.ndarray | None:
       ② 白い縁の線のすぐ内側の色から床の色を推定し、それに近い無彩色の画素
     の 2 通りを作り、床の縁が白い線と重なる方を選ぶ。サイトの四角（黄みがかった床）も足す。"""
     import cv2
-    if bg is None or bg.size == 0:
+    if bg is None or not isinstance(bg, np.ndarray) or bg.size == 0 or bg.ndim != 3 or bg.shape[2] < 3:
         return None
     hsv = cv2.cvtColor(bg, cv2.COLOR_BGR2HSV)
     lab = cv2.cvtColor(cv2.GaussianBlur(bg, (3, 3), 0), cv2.COLOR_BGR2LAB).astype(np.int16)
     line = _outline(bg)
-    sq = ((hsv[..., 0] >= 10) & (hsv[..., 0] <= 35) & (hsv[..., 1] >= 35) & (hsv[..., 2] >= 100))
+    # サイトの四角相当（H 20..34, S 35..80, V >= 120）のみに絞り、中立床の近傍のみ接続する
+    sq_raw = ((hsv[..., 0] >= 20) & (hsv[..., 0] <= 34) & (hsv[..., 1] >= 35) & (hsv[..., 1] <= 80)
+              & (hsv[..., 2] >= 120))
+    sq_k = np.ones((15, 15), np.uint8)
+
+    def _attach_sq(base: np.ndarray) -> np.ndarray:
+        near_base = cv2.dilate(base.astype(np.uint8), sq_k) > 0
+        return _keep_main(base | (sq_raw & near_base))
+
     cands = []
     v = cv2.GaussianBlur(hsv[..., 2], (3, 3), 0)
     t, _ = cv2.threshold(v, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    cands.append(_keep_main(((v >= max(t, 95)) & (hsv[..., 1] <= 110)) | sq))
+    cands.append(_attach_sq((v >= max(t, 95)) & (hsv[..., 1] <= 110)))
     neutral = (np.abs(lab[..., 1] - 128) <= 6) & (np.abs(lab[..., 2] - 128) <= 7)
     ring = (cv2.dilate(line.astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
             & ~cv2.dilate(line.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool))
@@ -269,7 +277,8 @@ def map_mask(bg: np.ndarray) -> np.ndarray | None:
         hist = np.bincount(Ls.astype(int), minlength=256)
         hist = np.convolve(hist, np.ones(7), mode="same")
         fl = int(np.argmax(hist))
-        cands.append(_keep_main((neutral & (np.abs(lab[..., 0] - fl) <= 20)) | sq))
+        cands.append(_attach_sq(neutral & (np.abs(lab[..., 0] - fl) <= 20)))
+        cands.append(_attach_sq(neutral & (np.abs(lab[..., 0] - fl) <= 28) & (lab[..., 0] >= 92)))
     # ③ 色の k-means（3・4 色）の各クラスタ。床が不透明で、後ろの試合画面とほぼ同じ明るさの灰色のとき
     #   （Summit の中国の放送など）は ①② では床と背景を分けられないので、色の塊ごとに縁の線との一致を見る
     Z = lab.reshape(-1, 3).astype(np.float32)
@@ -281,12 +290,18 @@ def map_mask(bg: np.ndarray) -> np.ndarray | None:
         except cv2.error:
             continue
         lbl = lbl.reshape(lab.shape[:2])
+        neu_union = np.zeros(lab.shape[:2], bool)
+        n_neu = 0
         for c in range(K):
             L_, a_, b_ = cen[c]
             if not (95 <= L_ <= 185 and abs(a_ - 128) <= 8 and abs(b_ - 128) <= 8):
                 continue
             m = cv2.morphologyEx((lbl == c).astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)).astype(bool)
-            cands.append(_keep_main(m | sq))
+            cands.append(_attach_sq(m))
+            neu_union |= m
+            n_neu += 1
+        if n_neu >= 2:
+            cands.append(_attach_sq(neu_union))
     best = None
     for m in cands:
         frac = float(m.mean())
@@ -301,6 +316,124 @@ def map_mask(bg: np.ndarray) -> np.ndarray | None:
     if best is None:
         return None
     return best[1]
+
+
+def detect_minimap_region(
+    img: np.ndarray | None,
+    mask: np.ndarray | None = None,
+    edge_min_f: float = 0.30,
+) -> tuple[bool, np.ndarray | None]:
+    """切り抜き画像に実際に Valorant のミニマップが含まれるかを構造・白縁・被覆率から判定する。"""
+    import cv2
+    if img is None or not isinstance(img, np.ndarray) or img.size == 0 or img.ndim != 3 or img.shape[2] < 3:
+        return False, None
+    h, w = img.shape[:2]
+    if h < 48 or w < 48:
+        return False, None
+    aspect = w / float(h)
+    if not (0.55 <= aspect <= 1.85):
+        return False, None
+
+    if mask is not None and isinstance(mask, np.ndarray) and mask.shape[:2] == (h, w):
+        m = mask.astype(bool)
+    else:
+        m = map_mask(img)
+    if m is None:
+        return False, None
+
+    frac = float(m.mean())
+    if not (0.08 <= frac <= 0.60):
+        return False, None
+
+    line = _outline(img)
+    if int(line.sum()) < max(120, int(0.004 * h * w)):
+        return False, None
+    if _edge_f(m, line) < edge_min_f:
+        return False, None
+
+    border = np.zeros((h, w), bool)
+    border[0, :] = border[-1, :] = border[:, 0] = border[:, -1] = True
+    border_touch = float((m & border).sum() / max(1, int(border.sum())))
+    if border_touch > 0.45:
+        return False, None
+
+    cnts, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return False, None
+    big = max(cnts, key=cv2.contourArea)
+    area = float(cv2.contourArea(big))
+    perim = float(cv2.arcLength(big, True))
+    if area <= 0.0 or perim <= 0.0:
+        return False, None
+    vtx = len(cv2.approxPolyDP(big, 0.008 * perim, True))
+    iso = (perim ** 2) / (4.0 * math.pi * area)
+    if vtx < 10 or not (2.1 <= iso <= 32.0):
+        return False, None
+
+    return True, m
+
+
+def playable_region(
+    img_or_bg: np.ndarray | None,
+    *,
+    mask: np.ndarray | None = None,
+    art_alpha: np.ndarray | None = None,
+    T_art: dict | None = None,
+    tol_px: int | None = None,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """プレイ可能な床領域 ``floor_mask`` と、壁際アイコンを許容した ``dot_mask`` を返す。"""
+    import cv2
+    if img_or_bg is None or not isinstance(img_or_bg, np.ndarray) or img_or_bg.size == 0 or img_or_bg.ndim < 2:
+        return None, None
+    H, W = img_or_bg.shape[:2]
+
+    if art_alpha is not None and isinstance(T_art, dict) and T_art.get("ok"):
+        floor_mask = warp_art(art_alpha, T_art, (H, W)) > 128
+    elif mask is not None and isinstance(mask, np.ndarray) and mask.shape[:2] == (H, W):
+        floor_mask = mask.astype(bool).copy()
+    else:
+        ok, m = detect_minimap_region(img_or_bg)
+        if not ok or m is None:
+            return None, None
+        floor_mask = m.copy()
+
+    if not floor_mask.any():
+        return None, None
+
+    # 左上隅（R2 1:29 等）の HUD テキスト漏れ断片を除外
+    n_cc, lab_cc, st_cc, _ = cv2.connectedComponentsWithStats(floor_mask.astype(np.uint8), 8)
+    max_hud = max(40, int(0.015 * H * W))
+    for i in range(1, n_cc):
+        x, y, ww, hh, a = (int(v) for v in st_cc[i])
+        if a < max_hud and (x <= 1 or y <= 1) and (x + ww) <= int(0.28 * W) and (y + hh) <= int(0.14 * H):
+            floor_mask[lab_cc == i] = False
+
+    if not floor_mask.any():
+        return None, None
+
+    # 通路内部の小さなスモーク・アイコン由来の穴のみ補完（大きな壁ブロックは埋めない）
+    if img_or_bg.ndim == 3 and img_or_bg.shape[2] >= 3:
+        inv = (1 - floor_mask.astype(np.uint8))
+        n_h, lab_h, st_h, _ = cv2.connectedComponentsWithStats(inv, 4)
+        hsv = cv2.cvtColor(img_or_bg[:, :, :3], cv2.COLOR_BGR2HSV)
+        max_hole = max(40, int(0.004 * H * W))
+        max_side = max(8, int(0.09 * H))
+        for i in range(1, n_h):
+            x, y, ww, hh, a = (int(v) for v in st_h[i])
+            if x == 0 or y == 0 or x + ww >= W or y + hh >= H or a > max_hole or max(ww, hh) > max_side:
+                continue
+            comp = lab_h == i
+            if float(hsv[..., 2][comp].mean()) >= 55.0 and float(hsv[..., 1][comp].mean()) <= 50.0:
+                floor_mask[comp] = True
+
+    tol = int(tol_px) if tol_px is not None else max(2, int(round(0.028 * H)))
+    if tol <= 0:
+        dot_mask = floor_mask.copy()
+    else:
+        dist = cv2.distanceTransform((~floor_mask).astype(np.uint8), cv2.DIST_L2, 3)
+        dot_mask = dist <= float(tol)
+
+    return floor_mask, dot_mask
 
 
 def _letter(crop) -> str | None:

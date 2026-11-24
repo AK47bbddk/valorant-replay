@@ -162,23 +162,40 @@ ICON_FRAC = 0.058          # ミニマップのアイコンの直径（切り抜
 
 
 def detect_dots(img, min_area: int = 4, max_area: int = 450, per_color: int = 5,
-                icon_frac: float | None = None) -> list[dict]:
+                icon_frac: float | None = None, *, mask: np.ndarray | None = None,
+                require_minimap: bool = False, edge_tol_px: int | None = None) -> list[dict]:
     """選手のアイコン（チーム色の縁のついた丸い顔アイコン）を検出する。
 
     縁の色は試合画面の明るさでくすむので色の範囲は広めに取り、アイコン 1 つが縁の切れ目で何個にも割れないよう、
     アイコンの大きさに合わせて塊をつなげてから数える。重なった 2〜3 人は 1 つの大きな塊になるので、大きさから
-    人数（k）も見積もる。床から離れた点（試合画面の色）は呼び出し側で床の 2 値画像を使って捨てる。"""
-    if img is None or img.size == 0:
+    人数（k）も見積もる。``mask`` または ``require_minimap=True`` が指定されたときは、プレイ可能領域
+    （``dot_mask``）外の候補を上位 ``per_color`` の切り捨て前に除外する。"""
+    if img is None or not isinstance(img, np.ndarray) or img.size == 0 or img.ndim != 3 or img.shape[2] < 3:
         return []
     h, w = img.shape[:2]
+    dot_mask = None
+    if require_minimap:
+        from . import minimap as MM
+        ok, auto_mask = MM.detect_minimap_region(img, mask=mask)
+        if not ok or auto_mask is None:
+            return []
+        _, dot_mask = MM.playable_region(img, mask=auto_mask, tol_px=edge_tol_px)
+        if dot_mask is None:
+            return []
+    elif mask is not None and isinstance(mask, np.ndarray) and mask.shape[:2] == (h, w):
+        from . import minimap as MM
+        _, dot_mask = MM.playable_region(img, mask=mask, tol_px=edge_tol_px)
+        if dot_mask is None:
+            return []
+
     D = (icon_frac or ICON_FRAC) * h
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    hsv = cv2.cvtColor(img[:, :, :3], cv2.COLOR_BGR2HSV)
     out = []
     for color, ranges in (("warm", WARM_RANGES), ("cool", COOL_RANGES)):
-        mask = _mask(hsv, ranges)
+        cmask = _mask(hsv, ranges)
         k = max(3, int(D * 0.4)) | 1
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
-        n, _, stats, cents = cv2.connectedComponentsWithStats(mask, 8)
+        cmask = cv2.morphologyEx(cmask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+        n, _, stats, cents = cv2.connectedComponentsWithStats(cmask, 8)
         found = []
         for i in range(1, n):
             x, y, ww, hh, area = (int(v) for v in stats[i])
@@ -187,6 +204,16 @@ def detect_dots(img, min_area: int = 4, max_area: int = 450, per_color: int = 5,
                 continue
             if area > max(max_area, 12 * D * D):            # 大きな色面（UI・背景）
                 continue
+            # 観戦視線・バリア線などの細長い形状を除外
+            aspect_r = max(ww / max(1, hh), hh / max(1, ww))
+            extent = area / max(1, ww * hh)
+            if aspect_r > 2.4 or (side > 1.8 * D and extent < 0.25):
+                continue
+            if dot_mask is not None:
+                cx_px = min(w - 1, max(0, int(round(cents[i][0]))))
+                cy_px = min(h - 1, max(0, int(round(cents[i][1]))))
+                if not dot_mask[cy_px, cx_px]:
+                    continue
             kk = int(min(3, max(1, round(side / (D * 1.15)))))
             found.append((area, float(cents[i][0] / w), float(cents[i][1] / h), kk, ww, hh))
         found.sort(reverse=True)
@@ -382,7 +409,7 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
 
     def flush():
         for t_, r_, mm_ in pending:
-            raw.append((t_, r_, detect_dots(mm_, min_area, max_area, per_color=15, icon_frac=icon_frac)))
+            raw.append((t_, r_, detect_dots(mm_, min_area, max_area, per_color=15, icon_frac=icon_frac), MM._outline(mm_)))
         pending.clear()
 
     for t, mm in scan_source():
@@ -421,7 +448,7 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         if len(bgs) < 40 and (not bgs or len(samples) % 7 == 0) and (not bgs or bgs[0].shape == mm.shape):
             bgs.append(mm.copy())
         if icon_frac is not None:
-            raw.append((t, r, detect_dots(mm, min_area, max_area, per_color=15, icon_frac=icon_frac)))
+            raw.append((t, r, detect_dots(mm, min_area, max_area, per_color=15, icon_frac=icon_frac), MM._outline(mm)))
     if pending:
         if icon_frac is None:
             icon_frac = AG.estimate_icon_frac([x[2] for x in pending[:8]], icons=icons or None,
@@ -454,9 +481,14 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
                 log(f"    公式のマップ画像で合わせられませんでした（{e}）")
     near = None
     if mask is not None:
-        dist = cv2.distanceTransform((~mask).astype(np.uint8), cv2.DIST_L2, 3)
-        near = dist <= max(3.0, 0.02 * mask.shape[0])
-    for t, r, found in raw:
+        _, near = MM.playable_region(background, mask=mask)
+        if near is None:
+            dist = cv2.distanceTransform((~mask).astype(np.uint8), cv2.DIST_L2, 3)
+            near = dist <= max(3.0, 0.02 * mask.shape[0])
+    for t, r, found, line_mm in raw:
+        if mask is not None and line_mm.shape[:2] == mask.shape[:2]:
+            if MM._edge_agreement(mask, line_mm) < 0.20:
+                continue
         if near is not None:
             hh, ww = near.shape
             found = [d for d in found if near[min(hh - 1, int(d["y"] * hh)), min(ww - 1, int(d["x"] * ww))]]
@@ -682,6 +714,10 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
                     if not frames:
                         continue
                     mm_best = frames[0][2] if isinstance(frames, list) else frames[2]
+                    if mask is not None and mm_best.shape[:2] == mask.shape[:2]:
+                        if MM._edge_agreement(mask, MM._outline(mm_best)) < 0.20:
+                            smokes_by_mark[lbl] = []
+                            continue
                     smokes_by_mark[lbl] = SM.detect_smokes(
                         mm_best,
                         background,
@@ -690,6 +726,8 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
                         placed=placed,
                         reg=reg,
                         aspect=aspect,
+                        mask=mask,
+                        icon_frac=icon_frac,
                     )
             except Exception:
                 smokes_by_mark = {}
