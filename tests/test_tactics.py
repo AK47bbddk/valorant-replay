@@ -603,25 +603,40 @@ def test_detect_dots_separates_crowded_agents_and_rejects_flat_ability_blobs():
 def test_detect_dots_edge_cases_and_synthetic_boundaries(tmp_path):
     from vreplay import agent_dots as AD
 
-    # 1) icon_frac = nan / inf / <= 0 は例外を出さずにフォールバックすること
+    # 1) icon_frac = nan / inf / <= 0 / 極端に大きい有限値 (1e6) は例外を出さずにフォールバックすること
     blank = np.zeros((304, 320, 3), np.uint8)
     assert tactics.detect_dots(blank, icon_frac=float("nan")) == []
     assert tactics.detect_dots(blank, icon_frac=float("inf")) == []
     assert tactics.detect_dots(blank, icon_frac=float("-inf")) == []
     assert tactics.detect_dots(blank, icon_frac=-0.05) == []
+    assert tactics.detect_dots(blank, icon_frac=1e6) == []
 
     # 2) per_color <= 0 は即座に [] を返すこと
     c_red = np.full((304, 320, 3), 120, np.uint8)
     cv2.circle(c_red, (160, 150), 7, (20, 20, 250), -1)  # S=235
     assert tactics.detect_dots(c_red, per_color=0) == []
     assert tactics.detect_dots(c_red, per_color=-1) == []
+    assert isinstance(tactics.detect_dots(c_red, icon_frac=1e6), list)
 
-    # 3) 合成単色円境界: S=235 の丸は検知し、14x14 の単色正方形は棄却すること
+    # 3) 合成単色円境界: S=235 の丸は検知し、14x14 の単色正方形・単色三角形は棄却すること
     dots_circle = tactics.detect_dots(c_red)
     assert len(dots_circle) == 1 and dots_circle[0]["color"] == "warm"
     sq = np.full((304, 320, 3), 120, np.uint8)
     cv2.rectangle(sq, (150, 140), (164, 154), (10, 10, 250), -1)
     assert tactics.detect_dots(sq) == []
+    for side in (12, 16, 20, 24):
+        tri = np.full((304, 320, 3), 120, np.uint8)
+        th = int(round(side * 0.866))
+        pts = np.array([[160, 150 - th // 2], [160 - side // 2, 150 + th // 2], [160 + side // 2, 150 + th // 2]], np.int32)
+        cv2.fillPoly(tri, [pts], (10, 10, 250))
+        assert tactics.detect_dots(tri) == [], f"unexpected FP on equilateral triangle side={side}"
+    rtri = np.full((304, 320, 3), 120, np.uint8)
+    cv2.fillPoly(rtri, [np.array([[151, 141], [151, 159], [169, 159]], np.int32)], (10, 10, 250))
+    assert tactics.detect_dots(rtri) == []
+    c_line = np.full((304, 320, 3), 120, np.uint8)
+    cv2.circle(c_line, (160, 150), 8, (10, 10, 250), -1)
+    cv2.line(c_line, (160, 150), (195, 150), (10, 10, 250), 2)
+    assert len(tactics.detect_dots(c_line)) == 1
 
     # 4) 極小ノイズ画像（32x32, 8x8）は誤検知ゼロで即座に [] を返すこと
     rng = np.random.default_rng(42)

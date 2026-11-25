@@ -30,19 +30,19 @@ PATCH_SPAN_D = 1.8     # 24x24 patch covers 1.8 * D (R = 0.5 * D -> 6.67 px)
 H_CANON = 284          # canonical height where D = 0.047 * 284 = 13.35px -> 1.8*D = 24.0px
 CANON_D_FRAC = 0.047
 STRIDE = 4
-MAX_STAGE1_CANDS = 1400
+MAX_STAGE1_CANDS = 2600
 MIN_INPUT_SIDE = 48
 
 
 def _sanitize_icon_frac(icon_frac: float | None) -> float | None:
-    """Validate icon_frac, treating None / non-finite / non-positive values as None."""
+    """Validate icon_frac, treating None / non-finite / out-of-range (<=0 or >0.5) values as None."""
     if icon_frac is None:
         return None
     try:
         val = float(icon_frac)
     except (TypeError, ValueError):
         return None
-    if not math.isfinite(val) or val <= 0.0:
+    if not math.isfinite(val) or val <= 0.0 or val > 0.5:
         return None
     return val
 
@@ -152,6 +152,36 @@ def _build_patch_geometry(n: int = PATCH_SIZE) -> dict[str, Any]:
 _GEOM = _build_patch_geometry(PATCH_SIZE)
 _INNER_K = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)).astype(np.float32)
 _INNER_K /= float(_INNER_K.sum())
+
+
+def _build_cnn_geometry(n: int = CNN_SIZE) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    half = (n - 1) / 2.0
+    yy, xx = np.mgrid[0:n, 0:n].astype(np.float32) - half
+    rr = np.hypot(xx, yy)
+    sur = (rr >= 8.2).astype(np.float32)
+    sur /= float(sur.sum())
+    safe_r = np.maximum(rr, 1e-6)
+    ux = (xx / safe_r).astype(np.float32)
+    uy = (yy / safe_r).astype(np.float32)
+    return sur[None, :, :], ux[None, :, :], uy[None, :, :]
+
+
+_CNN_SUR_W, _CNN_UX, _CNN_UY = _build_cnn_geometry(CNN_SIZE)
+
+
+@lru_cache(maxsize=32)
+def _sur_ring_kernel(r_int: int) -> np.ndarray:
+    """Build normalized outer-surround ring kernel for Stage-1 contrast ranking."""
+    rad = max(3, int(r_int))
+    k = int(round(rad * 3.5)) | 1
+    c = k // 2
+    yy, xx = np.mgrid[0:k, 0:k].astype(np.float32) - c
+    rr = np.hypot(xx, yy)
+    sur = ((rr >= 1.24 * rad) & (rr <= 1.72 * rad)).astype(np.float32)
+    s = float(sur.sum())
+    if s > 0:
+        sur /= s
+    return sur
 
 
 @lru_cache(maxsize=32)
@@ -287,6 +317,8 @@ def _precompute_canonical_maps(imc: np.ndarray) -> dict[str, Any]:
         "A_cnn": (A * 2.0).ravel(),
         "B_cnn": (B * 2.0).ravel(),
         "gmag_cnn": gmag_cnn.ravel(),
+        "cgx_cnn": (cgx * 3.0).ravel(),
+        "cgy_cnn": (cgy * 3.0).ravel(),
         "warm_2d": warm[half:-half, half:-half],
         "cool_2d": cool[half:-half, half:-half],
         "yel_2d": yel[half:-half, half:-half],
@@ -340,7 +372,8 @@ def generate_dense_candidates(
     gmag = np.sqrt(gx * gx + gy * gy) * (1.0 / 255.0)
 
     wcy = np.stack([warm, cool, yel], axis=-1)
-    r_col = cv2.filter2D(wcy, cv2.CV_32F, ring_k).max(axis=2)
+    r_col_3 = cv2.filter2D(wcy, cv2.CV_32F, ring_k)
+    r_col = r_col_3.max(axis=2)
     r_rad = np.abs(
         cv2.filter2D(gx, cv2.CV_32F, kx) + cv2.filter2D(gy, cv2.CV_32F, ky)
     ) * (1.0 / 255.0)
@@ -357,7 +390,10 @@ def generate_dense_candidates(
     cx = gx_g[keep].astype(np.int32)
     cy = gy_g[keep].astype(np.int32)
     if max_cands is not None and len(cx) > max_cands:
-        resp = np.maximum(rc_g[keep], 0.5 * (rr_g[keep] + ig_g[keep]))
+        sur_k = _sur_ring_kernel(7)
+        r_sur_3 = cv2.filter2D(wcy, cv2.CV_32F, sur_k)
+        r_con = np.maximum(0.0, r_col_3 - r_sur_3).max(axis=2)
+        resp = np.maximum(r_con[gy_g, gx_g][keep], 0.5 * (rr_g[keep] + ig_g[keep]))
         top_idx = np.argpartition(resp, -max_cands)[-max_cands:]
         cx = cx[top_idx]
         cy = cy[top_idx]
@@ -391,13 +427,14 @@ def extract_patch_bgr(img: np.ndarray, cx: float, cy: float, D: float) -> np.nda
 
 
 def patches_to_cnn_tensor(patches_bgr: np.ndarray) -> np.ndarray:
-    """Convert (N, 24, 24, 3) uint8 BGR patches to (N, 22, 22, 7) float32 CNN inputs.
+    """Convert (N, 24, 24, 3) uint8 BGR patches to (N, 22, 22, 9) float32 CNN inputs.
 
-    Channels: ``[L_rel, A, B, warm, cool, yel, gmag]`` cropped to center 22x22.
+    Channels: ``[L_rel, A, B, warm, cool, yel, gmag, warm_rel, cool_rel]``
+    cropped to center 22x22, combining raw color cues with outer-surround contrast.
     """
     N = int(patches_bgr.shape[0])
     if N == 0:
-        return np.zeros((0, CNN_SIZE, CNN_SIZE, 7), np.float32)
+        return np.zeros((0, CNN_SIZE, CNN_SIZE, 9), np.float32)
     m = (PATCH_SIZE - CNN_SIZE) // 2  # 1
     crop = patches_bgr[:, m:m + CNN_SIZE, m:m + CNN_SIZE, :]
     flat = crop.reshape(N * CNN_SIZE, CNN_SIZE, 3)
@@ -423,8 +460,10 @@ def patches_to_cnn_tensor(patches_bgr: np.ndarray) -> np.ndarray:
     warm = np.where(((H_ch <= 19) | (H_ch >= 158)) & (S_u8 >= 26) & (V_u8 >= 50), sv_w, 0.0)
     cool = np.where((H_ch >= 68) & (H_ch <= 116) & (S_u8 >= 24) & (V_u8 >= 50), sv_c, 0.0)
     yel = np.where((H_ch >= 18) & (H_ch <= 38) & (S_u8 >= 45) & (V_u8 >= 80), sv_y, 0.0)
+    warm_rel = np.maximum(0.0, warm - (warm * _CNN_SUR_W).sum(axis=(1, 2), keepdims=True))
+    cool_rel = np.maximum(0.0, cool - (cool * _CNN_SUR_W).sum(axis=(1, 2), keepdims=True))
 
-    return np.stack([L_rel, A, B, warm, cool, yel, gmag], axis=-1).astype(np.float32)
+    return np.stack([L_rel, A, B, warm, cool, yel, gmag, warm_rel, cool_rel], axis=-1).astype(np.float32)
 
 
 def slice_cnn_tensor_from_maps(
@@ -432,22 +471,26 @@ def slice_cnn_tensor_from_maps(
     cx_arr: np.ndarray,
     cy_arr: np.ndarray,
 ) -> np.ndarray:
-    """Slice (N, 22, 22, 7) float32 CNN tensor directly from precomputed canonical maps."""
+    """Slice (N, 22, 22, 9) float32 CNN tensor directly from precomputed canonical maps."""
     N = len(cx_arr)
     if N == 0:
-        return np.zeros((0, CNN_SIZE, CNN_SIZE, 7), np.float32)
+        return np.zeros((0, CNN_SIZE, CNN_SIZE, 9), np.float32)
     Wp = maps["Wp"]
     idx = (cy_arr * Wp + cx_arr)[:, None] + maps["c_offs"][None, :]
     L = maps["L"][idx].reshape(N, CNN_SIZE, CNN_SIZE)
-    L_rel = (L - L.mean(axis=(1, 2), keepdims=True)) * 2.5
-    out = np.empty((N, CNN_SIZE, CNN_SIZE, 7), dtype=np.float32)
-    out[..., 0] = L_rel
+    warm = maps["warm"][idx].reshape(N, CNN_SIZE, CNN_SIZE)
+    cool = maps["cool"][idx].reshape(N, CNN_SIZE, CNN_SIZE)
+
+    out = np.empty((N, CNN_SIZE, CNN_SIZE, 9), dtype=np.float32)
+    out[..., 0] = (L - L.mean(axis=(1, 2), keepdims=True)) * 2.5
     out[..., 1] = maps["A_cnn"][idx].reshape(N, CNN_SIZE, CNN_SIZE)
     out[..., 2] = maps["B_cnn"][idx].reshape(N, CNN_SIZE, CNN_SIZE)
-    out[..., 3] = maps["warm"][idx].reshape(N, CNN_SIZE, CNN_SIZE)
-    out[..., 4] = maps["cool"][idx].reshape(N, CNN_SIZE, CNN_SIZE)
+    out[..., 3] = warm
+    out[..., 4] = cool
     out[..., 5] = maps["yel"][idx].reshape(N, CNN_SIZE, CNN_SIZE)
     out[..., 6] = maps["gmag_cnn"][idx].reshape(N, CNN_SIZE, CNN_SIZE)
+    out[..., 7] = np.maximum(0.0, warm - (warm * _CNN_SUR_W).sum(axis=(1, 2), keepdims=True))
+    out[..., 8] = np.maximum(0.0, cool - (cool * _CNN_SUR_W).sum(axis=(1, 2), keepdims=True))
     return out
 
 
@@ -789,6 +832,22 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-np.clip(x, -30.0, 30.0)))
 
 
+def _logit(p: np.ndarray) -> np.ndarray:
+    pc = np.clip(p, 1e-5, 1.0 - 1e-5)
+    return np.log(pc / (1.0 - pc))
+
+
+def _fuse_probs(
+    p_mlp: np.ndarray,
+    p_cnn: np.ndarray,
+    cnn_w: float,
+    use_logit: bool = True,
+) -> np.ndarray:
+    if use_logit:
+        return _sigmoid(cnn_w * _logit(p_cnn) + (1.0 - cnn_w) * _logit(p_mlp)).astype(np.float32)
+    return (cnn_w * p_cnn + (1.0 - cnn_w) * p_mlp).astype(np.float32)
+
+
 def _im2col_3x3(x: np.ndarray) -> tuple[np.ndarray, int, int]:
     """Build (N*Ho*Wo, 9*Ci) im2col matrix for stride-1 valid 3x3 convolution."""
     N, _H, _Wi, Ci = x.shape
@@ -812,15 +871,13 @@ def _maxpool2(x: np.ndarray) -> np.ndarray:
 
 
 def predict_cnn_proba_from_tensor(cnn_models: list[dict[str, np.ndarray]], x0: np.ndarray) -> np.ndarray:
-    """Run pure-NumPy 3-Conv + 2-MaxPool 2D CNN ensemble on pre-built (N, 22, 22, 7) tensor.
-
-    Architecture: (22,22,7) -> Conv3x3(12, 20x20) -> MaxPool(10x10) ->
-                  Conv3x3(20, 8x8) -> MaxPool(4x4) -> Conv3x3(24, 2x2) ->
-                  Dense(96 -> 32) -> Dense(32 -> 1).
-    """
+    """Run pure-NumPy 3-Conv + 2-MaxPool 2D CNN ensemble on pre-built (N, 22, 22, C) tensor."""
     N = int(x0.shape[0])
     if N == 0 or not cnn_models:
         return np.zeros((N,), np.float32)
+    ci_model = int(cnn_models[0]["C1_W"].shape[2])
+    if x0.shape[3] > ci_model:
+        x0 = x0[..., :ci_model]
     # Build input im2col once and batch C1 across all ensemble members
     col0, Ho0, Wo0 = _im2col_3x3(x0)
     Ci0 = x0.shape[3]
@@ -833,12 +890,12 @@ def predict_cnn_proba_from_tensor(cnn_models: list[dict[str, np.ndarray]], x0: n
     probs = np.zeros((N,), np.float32)
     ch_off = 0
     for cm, co1 in zip(cnn_models, co1_sizes):
-        h1 = h1_all[..., ch_off:ch_off + co1]                           # (N, 10, 10, 12)
+        h1 = h1_all[..., ch_off:ch_off + co1]
         ch_off += co1
-        h2 = _maxpool2(_silu(_conv2d_s1(h1, cm["C2_W"], cm["C2_b"])))  # (N, 4, 4, 20)
-        h3 = _silu(_conv2d_s1(h2, cm["C3_W"], cm["C3_b"]))             # (N, 2, 2, 24)
-        flat = h3.reshape(N, -1)                                        # (N, 96)
-        h4 = _silu(flat @ cm["F1_W"] + cm["F1_b"])                      # (N, 32)
+        h2 = _maxpool2(_silu(_conv2d_s1(h1, cm["C2_W"], cm["C2_b"])))
+        h3 = _silu(_conv2d_s1(h2, cm["C3_W"], cm["C3_b"]))
+        flat = h3.reshape(N, -1)
+        h4 = _silu(flat @ cm["F1_W"] + cm["F1_b"])
         logits = (h4 @ cm["F2_W"] + cm["F2_b"]).ravel()
         probs += _sigmoid(logits)
     probs /= len(cnn_models)
@@ -846,12 +903,7 @@ def predict_cnn_proba_from_tensor(cnn_models: list[dict[str, np.ndarray]], x0: n
 
 
 def predict_cnn_proba(cnn_models: list[dict[str, np.ndarray]], patches_bgr: np.ndarray) -> np.ndarray:
-    """Run pure-NumPy 3-Conv + 2-MaxPool 2D CNN ensemble on (N, 24, 24, 3) BGR patches.
-
-    Architecture: (22,22,7) -> Conv3x3(12, 20x20) -> MaxPool(10x10) ->
-                  Conv3x3(20, 8x8) -> MaxPool(4x4) -> Conv3x3(24, 2x2) ->
-                  Dense(96 -> 32) -> Dense(32 -> 1).
-    """
+    """Run pure-NumPy 3-Conv + 2-MaxPool 2D CNN ensemble on (N, 24, 24, 3) BGR patches."""
     N = int(patches_bgr.shape[0])
     if N == 0 or not cnn_models:
         return np.zeros((N,), np.float32)
@@ -893,6 +945,10 @@ def load_model(path: str | Path = MODEL_PATH) -> dict[str, Any] | None:
                     "F2_b": data[f"c{i}_F2_b"].astype(np.float32),
                 })
             cnn_weight = float(data["cnn_weight"]) if "cnn_weight" in data.files else 0.0
+            use_logit_fusion = bool(int(data["use_logit_fusion"])) if "use_logit_fusion" in data.files else False
+            soft_nms_r = float(data["soft_nms_r"]) if "soft_nms_r" in data.files else 0.0
+            soft_nms_margin = float(data["soft_nms_margin"]) if "soft_nms_margin" in data.files else 0.10
+            soft_nms_ratio = float(data["soft_nms_ratio"]) if "soft_nms_ratio" in data.files else 0.78
             return {
                 "mean": data["mean"].astype(np.float32),
                 "std": data["std"].astype(np.float32),
@@ -900,6 +956,10 @@ def load_model(path: str | Path = MODEL_PATH) -> dict[str, Any] | None:
                 "models": models,
                 "cnn_models": cnn_models,
                 "cnn_weight": cnn_weight,
+                "use_logit_fusion": use_logit_fusion,
+                "soft_nms_r": soft_nms_r,
+                "soft_nms_margin": soft_nms_margin,
+                "soft_nms_ratio": soft_nms_ratio,
             }
     except (OSError, ValueError, KeyError, zipfile.BadZipFile, EOFError):
         return None
@@ -964,7 +1024,7 @@ def _detect_synthetic_solid_dots(
         & (hsv[..., 2] >= 160)
     ).astype(np.uint8) * 255
 
-    ko = max(3, int(round(D * 0.25))) | 1
+    ko = min(31, max(3, int(round(D * 0.25))) | 1)
     k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ko, ko))
     pad = ko // 2 + 1
 
@@ -996,7 +1056,8 @@ def _detect_synthetic_solid_dots(
             # Enforce circularity >= 0.72 on compact shapes (r_asp <= 1.15); allow overlapping circle clusters (1.15 < r_asp <= 1.8)
             non_circular = r_asp <= 1.15 and circ < 0.72
             cands = []
-            if r_asp > 1.8 or r_ext < 0.55 or r_ext > 0.88 or non_circular or side > 2.2 * D or area > max(max_area, int(4 * D * D)):
+            needs_open = r_asp > 1.8 or side > 2.2 * D or area > max(max_area, int(4 * D * D))
+            if needs_open:
                 if side >= 0.7 * D:
                     buf = np.zeros((hh + 2 * pad, ww + 2 * pad), np.uint8)
                     buf[pad:pad + hh, pad:pad + ww] = patch.astype(np.uint8)
@@ -1015,11 +1076,13 @@ def _detect_synthetic_solid_dots(
                         sr_asp = (max(srw, srh) + 1.0) / max(1.0, min(srw, srh) + 1.0)
                         sr_ext = float(sarea) / max(1.0, (srw + 1.0) * (srh + 1.0))
                         scirc = _component_circularity(sp, sarea)
-                        if sr_asp <= 1.65 and 0.58 <= sr_ext <= 0.88 and (sr_asp > 1.15 or scirc >= 0.72):
+                        if sr_asp <= 1.65 and 0.58 <= sr_ext <= 0.88 and scirc >= 0.72:
                             cands.append((
                                 float(x + sc[si][0]), float(y + sc[si][1]),
                                 sarea, sww, shh, x + sx, y + sy, sp,
                             ))
+            elif r_ext < 0.55 or r_ext > 0.88 or non_circular:
+                continue
             else:
                 cands.append((
                     float(cents[i][0]), float(cents[i][1]),
@@ -1060,7 +1123,7 @@ def score_image_dense(
     icon_frac: float | None = None,
     thresh: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Run dense stride-4 + +/-2px peak refinement + optional CNN fusion + NMS."""
+    """Run dense stride-4 + +/-2px & +/-1px peak refinement + CNN fusion + hard NMS."""
     H, W = img.shape[:2]
     if min(H, W) < MIN_INPUT_SIDE:
         return []
@@ -1068,6 +1131,7 @@ def score_image_dense(
     eff_thresh = float(model["thresh"] if thresh is None else thresh)
     cnn_models = model.get("cnn_models") or []
     cnn_w = float(model.get("cnn_weight", 0.0)) if cnn_models else 0.0
+    use_logit = bool(model.get("use_logit_fusion", False))
 
     imc, dmc, Hc, Wc = canonical_scale_image(img, dot_mask=dot_mask, icon_frac=eff_if)
     cx_arr, cy_arr = generate_dense_candidates(imc, dmc=dmc, stride=STRIDE, max_cands=MAX_STAGE1_CANDS)
@@ -1086,7 +1150,7 @@ def score_image_dense(
     probs = predict_proba(model, X)
 
     # +/-2px local refinement around promising coarse peaks (pre-NMS to avoid redundant neighbors)
-    refine_thr = 0.06 if cnn_models else max(0.12, eff_thresh * 0.45)
+    refine_thr = 0.05 if cnn_models else max(0.12, eff_thresh * 0.45)
     hot_idx = np.nonzero(probs >= refine_thr)[0]
     if len(hot_idx) == 0:
         return []
@@ -1101,7 +1165,7 @@ def score_image_dense(
             continue
         seed_xy.append((x0, y0))
         seed_idx.append(int(hi))
-        if len(seed_idx) >= 32:
+        if len(seed_idx) >= 48:
             break
     hot_idx = np.array(seed_idx, np.int32)
 
@@ -1148,23 +1212,22 @@ def score_image_dense(
 
     if cnn_models and cnn_w > 0.0:
         cnn_idx = np.nonzero(cand_p_mlp >= 0.03)[0]
-        if len(cnn_idx) > 110:
-            top_k = np.argpartition(cand_p_mlp[cnn_idx], -110)[-110:]
+        if len(cnn_idx) > 130:
+            top_k = np.argpartition(cand_p_mlp[cnn_idx], -130)[-130:]
             cnn_idx = cnn_idx[top_k]
-        cand_p_cnn = np.zeros_like(cand_p_mlp)
+        cand_p = np.zeros_like(cand_p_mlp)
         if len(cnn_idx) > 0:
             if use_maps and maps is not None:
                 cand_x0 = slice_cnn_tensor_from_maps(maps, cand_cx[cnn_idx], cand_cy[cnn_idx])
-                cand_p_cnn[cnn_idx] = predict_cnn_proba_from_tensor(cnn_models, cand_x0)
+                p_cnn_sel = predict_cnn_proba_from_tensor(cnn_models, cand_x0)
             else:
                 cand_patches = np.concatenate(all_patches, axis=0)
-                cand_p_cnn[cnn_idx] = predict_cnn_proba(cnn_models, cand_patches[cnn_idx])
-        cand_p = cnn_w * cand_p_cnn + (1.0 - cnn_w) * cand_p_mlp
+                p_cnn_sel = predict_cnn_proba(cnn_models, cand_patches[cnn_idx])
+            cand_p[cnn_idx] = _fuse_probs(cand_p_mlp[cnn_idx], p_cnn_sel, cnn_w, use_logit=use_logit)
     else:
         cand_p = cand_p_mlp
 
-    D_c = CANON_D_FRAC * Hc
-    nms_r2 = (0.50 * D_c) ** 2
+    nms_r2 = (0.52 * D_c) ** 2
     order = np.argsort(cand_p)[::-1]
     kept_xy: list[tuple[float, float]] = []
     D_orig = (eff_if or CANON_D_FRAC) * H
@@ -1205,6 +1268,10 @@ def score_image_dense(
             "_score": p,
             "_margin": margin,
             "_ambig": ambig,
+            "_w_ev": w_ev,
+            "_c_ev": c_ev,
+            "_d_norm": CANON_D_FRAC,
+            "_aspect": float(Wc) / float(Hc),
         })
 
     return accepted
@@ -1215,12 +1282,39 @@ def assign_teams_and_cap(
     *,
     per_color: int = 5,
     thresh: float | None = None,
+    soft_nms_r: float = 0.85,
+    soft_nms_margin: float = 0.12,
+    soft_nms_ratio: float = 0.80,
 ) -> list[dict[str, Any]]:
-    """Apply per_color cap with ambiguous-overflow rebalancing (yellow/shadowed agents)."""
+    """Apply two-tier score-aware NMS and per_color cap with relative color rebalancing."""
     if per_color <= 0:
         return []
-    items = [d for d in accepted if thresh is None or d["_score"] >= thresh]
-    items.sort(key=lambda d: d["_score"], reverse=True)
+    raw_items = [d for d in accepted if thresh is None or d["_score"] >= thresh]
+    raw_items.sort(key=lambda d: d["_score"], reverse=True)
+
+    # Two-tier score-aware NMS: suppress weaker rim/sightline ghosts within soft_nms_r * D
+    # of a stronger peak unless the neighbor is also strongly confident (crowded pair).
+    eff_thr = float(thresh) if thresh is not None else 0.0
+    items: list[dict[str, Any]] = []
+    for d in raw_items:
+        if soft_nms_r > 0.0 and items:
+            d_norm = float(d.get("_d_norm", CANON_D_FRAC))
+            asp = float(d.get("_aspect", 1.0))
+            sr2 = (soft_nms_r * d_norm) ** 2
+            dx0, dy0 = float(d["x"]), float(d["y"])
+            sc = float(d["_score"])
+            suppressed = False
+            for k in items:
+                ddx = (dx0 - float(k["x"])) * asp
+                ddy = dy0 - float(k["y"])
+                if ddx * ddx + ddy * ddy < sr2:
+                    req = max(eff_thr + soft_nms_margin, soft_nms_ratio * float(k["_score"]))
+                    if sc < req:
+                        suppressed = True
+                        break
+            if suppressed:
+                continue
+        items.append(d)
 
     warm_list: list[dict[str, Any]] = []
     cool_list: list[dict[str, Any]] = []
@@ -1231,10 +1325,8 @@ def assign_teams_and_cap(
             if len(warm_list) < per_color:
                 warm_list.append(d)
             elif len(cool_list) < per_color:
-                # Rebalance only if this item or an existing warm item is genuinely ambiguous
                 if d.get("_ambig"):
-                    d_re = dict(d, color="cool")
-                    cool_list.append(d_re)
+                    cool_list.append(dict(d, color="cool"))
                 else:
                     amb_idxs = [i for i, x in enumerate(warm_list) if x.get("_ambig")]
                     if amb_idxs:
@@ -1242,13 +1334,27 @@ def assign_teams_and_cap(
                         moved = dict(warm_list.pop(swap_i), color="cool")
                         cool_list.append(moved)
                         warm_list.append(d)
+                    elif "_w_ev" in d and "_c_ev" in d:
+                        # Relative (w_ev - c_ev) rebalancing for overflow on warm-tinted maps
+                        pool = warm_list + [d]
+                        min_i = min(
+                            range(len(pool)),
+                            key=lambda i: float(pool[i].get("_w_ev", 1.0)) - float(pool[i].get("_c_ev", 0.0)),
+                        )
+                        min_diff = float(pool[min_i].get("_w_ev", 1.0)) - float(pool[min_i].get("_c_ev", 0.0))
+                        if min_diff < 0.45 and float(pool[min_i].get("_c_ev", 0.0)) >= 0.05:
+                            if min_i == len(warm_list):
+                                cool_list.append(dict(d, color="cool"))
+                            else:
+                                moved = dict(warm_list.pop(min_i), color="cool")
+                                cool_list.append(moved)
+                                warm_list.append(d)
         else:
             if len(cool_list) < per_color:
                 cool_list.append(d)
             elif len(warm_list) < per_color:
                 if d.get("_ambig"):
-                    d_re = dict(d, color="warm")
-                    warm_list.append(d_re)
+                    warm_list.append(dict(d, color="warm"))
                 else:
                     amb_idxs = [i for i, x in enumerate(cool_list) if x.get("_ambig")]
                     if amb_idxs:
@@ -1256,6 +1362,20 @@ def assign_teams_and_cap(
                         moved = dict(cool_list.pop(swap_i), color="warm")
                         warm_list.append(moved)
                         cool_list.append(d)
+                    elif "_w_ev" in d and "_c_ev" in d:
+                        pool = cool_list + [d]
+                        min_i = min(
+                            range(len(pool)),
+                            key=lambda i: float(pool[i].get("_c_ev", 1.0)) - float(pool[i].get("_w_ev", 0.0)),
+                        )
+                        min_diff = float(pool[min_i].get("_c_ev", 1.0)) - float(pool[min_i].get("_w_ev", 0.0))
+                        if min_diff < 0.45 and float(pool[min_i].get("_w_ev", 0.0)) >= 0.05:
+                            if min_i == len(cool_list):
+                                warm_list.append(dict(d, color="warm"))
+                            else:
+                                moved = dict(cool_list.pop(min_i), color="warm")
+                                warm_list.append(moved)
+                                cool_list.append(d)
 
     out: list[dict[str, Any]] = []
     for d in warm_list + cool_list:
@@ -1301,14 +1421,15 @@ def detect_agent_dots(
     D_syn = (eff_if or 0.048) * H
     syn_dots = _detect_synthetic_solid_dots(img, D_syn, min_area, max_area, dot_mask)
     if syn_dots and float((img[:, :, :3].max(axis=2) > 10).mean()) < 0.08:
-        return assign_teams_and_cap(syn_dots, per_color=per_color)
+        return assign_teams_and_cap(syn_dots, per_color=per_color, soft_nms_r=0.0)
 
+    eff_thresh = float(model["thresh"] if thresh is None else thresh)
     accepted = score_image_dense(
         img,
         model,
         dot_mask=dot_mask,
         icon_frac=eff_if,
-        thresh=thresh,
+        thresh=eff_thresh,
     )
 
     for sd in syn_dots:
@@ -1316,4 +1437,11 @@ def detect_agent_dots(
         if not any((sx - d["x"] * W) ** 2 + (sy - d["y"] * H) ** 2 < (0.62 * D_syn) ** 2 for d in accepted):
             accepted.append(sd)
 
-    return assign_teams_and_cap(accepted, per_color=per_color)
+    return assign_teams_and_cap(
+        accepted,
+        per_color=per_color,
+        thresh=eff_thresh,
+        soft_nms_r=float(model.get("soft_nms_r", 0.85)),
+        soft_nms_margin=float(model.get("soft_nms_margin", 0.12)),
+        soft_nms_ratio=float(model.get("soft_nms_ratio", 0.80)),
+    )

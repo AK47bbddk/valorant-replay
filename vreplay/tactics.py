@@ -189,7 +189,8 @@ def detect_dots(img, min_area: int = 4, max_area: int = 450, per_color: int = 5,
     h, w = img.shape[:2]
     if mask is not None and (not isinstance(mask, np.ndarray) or mask.ndim != 2 or mask.shape != (h, w)):
         return []
-    eff_icon_frac = icon_frac if (icon_frac is not None and math.isfinite(float(icon_frac)) and float(icon_frac) > 0) else None
+    from . import agent_dots as AD
+    eff_icon_frac = AD._sanitize_icon_frac(icon_frac)
     dot_mask = None
     if require_minimap:
         from . import minimap as MM
@@ -205,7 +206,6 @@ def detect_dots(img, min_area: int = 4, max_area: int = 450, per_color: int = 5,
         if dot_mask is None:
             return []
 
-    from . import agent_dots as AD
     learned = AD.detect_agent_dots(
         img,
         min_area=min_area,
@@ -219,13 +219,13 @@ def detect_dots(img, min_area: int = 4, max_area: int = 450, per_color: int = 5,
 
     D = (eff_icon_frac or ICON_FRAC) * h
     hsv = cv2.cvtColor(img[:, :, :3], cv2.COLOR_BGR2HSV)
-    ko = max(3, int(round(D * 0.25))) | 1
+    ko = min(31, max(3, int(round(D * 0.25))) | 1)
     k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ko, ko))
     pad = ko // 2 + 1
     out = []
     for color, ranges in (("warm", WARM_RANGES), ("cool", COOL_RANGES)):
         cmask = _mask(hsv, ranges)
-        k = max(3, int(D * 0.4)) | 1
+        k = min(51, max(3, int(D * 0.4)) | 1)
         cmask = cv2.morphologyEx(cmask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
         n, lab, stats, cents = cv2.connectedComponentsWithStats(cmask, 8)
         found = []
