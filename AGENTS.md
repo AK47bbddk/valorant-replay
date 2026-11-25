@@ -10,14 +10,14 @@
 
 ## やること
 
-1. 渡された指示書 `docs/tasks/<名前>.md` を読む。仕様の詳細が要るときだけ `PROMPT.md` の該当の節を読む（全部は読まない）。
+1. 渡された指示書 `docs/tasks/<名前>.md`（および必要なら `docs/BACKLOG.md`）を読む。仕様の詳細が要るときだけ `PROMPT.md` の該当の節を読む（全部は読まない）。
 2. ブランチ `task/<名前>` を切る（`git switch -c task/<名前>`）。
 3. 指示書の「触ってよいファイル」だけを変える。足りなければ止めて、理由を `docs/tasks/<名前>.md` の末尾の「質問」に書く。
 4. 指示書の「通すテスト」を実行する：`python -m pytest -x -q <テスト>`。通るまで直す。テストを消したり緩めたりして通さない。
 5. 仕様が変わったら `PROMPT.md` の該当の節と README も直す。
-6. コミット：`git -c user.name="AK47bbddk" -c user.email="aokki123@gmail.com" commit -m "<日本語で何を変えたか>"`。push はしない（main にも入れない）。
-7. レビュー用のファイルを作る：
-   `python tools/review_pack.py main..HEAD --task docs/tasks/<名前>.md --out "G:/マイドライブ/valorant-replay/_review/review_<名前>.txt"`
+6. コミット：`git -c user.name="AK47bbddk" -c user.email="aokki123@gmail.com" commit -m "<日本語で何を変えたか>"`。`main` には入れない（PR 作成は司令塔が行う）。
+7. レビュー用のファイルを作る（ローカル環境で必要な場合）：
+   `python tools/review_pack.py main..HEAD --task docs/tasks/<名前>.md --out _work/review_<名前>.txt`
 8. 最後に 3 行で報告：変えたファイル・テストの結果・迷ったところ。
 
 ## しないこと

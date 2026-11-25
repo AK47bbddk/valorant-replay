@@ -1,5 +1,14 @@
 name: test
-on: [push, pull_request]
+on:
+  push:
+    branches: [main, "task/**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   pytest:
     runs-on: ubuntu-latest
@@ -9,9 +18,30 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg
+          cache: "pip"
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.txt
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg
         timeout-minutes: 8
-      - run: pip install -q requests beautifulsoup4 lxml pyyaml numpy opencv-python-headless pillow pytest rapidocr_onnxruntime yt-dlp
-      - run: |
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          pip install -q pytest opencv-python-headless
+          pip install -q -e ".[video]"
+      - name: Run pytest
+        run: |
           set -o pipefail
-          pytest -q -rf --tb=short 2>&1 | tee pytest.txt || { grep -E "Error|assert|FAILED|^E " pytest.txt | head -20 | while IFS= read -r l; do echo "::error::$l"; done; exit 1; }
+          pytest -q -rf --tb=short 2>&1 | tee pytest.txt
+          STATUS=$?
+          {
+            echo "## pytest 実行結果"
+            echo '```'
+            tail -n 30 pytest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$STATUS" -ne 0 ]; then
+            grep -E "Error|assert|FAILED|^E " pytest.txt | head -20 | while IFS= read -r l; do echo "::error::$l"; done
+            exit "$STATUS"
+          fi
