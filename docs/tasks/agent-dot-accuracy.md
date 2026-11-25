@@ -65,8 +65,13 @@ python3 tools/eval_all.py --blind-dir /tmp/blind_val --tol 0.06
 - Iteration 1: スパース提案＋放射特徴 MLP（7-fold LOMO CV F1=0.793 → オフ中心ネガティブ追加で F1=0.8804）
 - Iteration 2: 正規化スケール（H=284）stride-4 密候補グリッド（99.53% 再現率 @5px）＋ 6x6 空間特徴（7-fold LOMO CV F1=0.8857）
 - Iteration 3–4: 3層シフト不変 純 NumPy 2D CNN（22x22x7）＋周囲背景差分によるチーム色再配分＋Round-2 パイプライン全体ハードネガティブ採掘（すべて `/tmp/blind_train` のみ）→ `/tmp/blind_val` 初回評価 `P=0.886, R=0.939, F1=0.912` → Round-2 HNM 後 **`P=0.921, R=0.933, F1=0.927, 平均誤差=0.0088`**。
+- Review Iteration 2（速度・境界値・テスト修正）:
+  - 全画像 1 回事前計算（Lab/HSV/色証拠/Sobel/Laplacian）＋ BLAS マスク行列積・256 チャンク処理・Stage-1 候補上限（1400）・3 チャンネル `filter2D`・CNN C1 バッチ化＋MLP 事前フィルタにより、実フレーム推論を **約 28× 高速化**（`4,153 ms/frame → ~145 ms/frame`、`random_noise_304x320`: `16,486 ms → ~177 ms`、`tiny_32x32`: `13,310 ms → 0.0 ms`）。
+  - `per_color <= 0` 即時短絡、`min(H, W) < 48` 極小画像ガード、`icon_frac=nan/inf` バリデーション、`load_model()` の `with np.load(...)` 化と破損 `.npz` 例外捕捉・レガシーフォールバックを追加。
+  - `_detect_synthetic_solid_dots` に円形度・占有率上限（`0.58 <= r_ext <= 0.88`, `4*pi*area/perim^2 >= 0.72`）・最小面積 36・`mean_S >= 215.0` を設定（`S=235` 単色円を検知、`14x14` 正方形を棄却、実画像 56 枚で漏洩 `0/56`）。
+  - `test_detect_dots_separates_crowded_agents_and_rejects_flat_ability_blobs` を実アイコン密集フィクスチャ＋ `len(dots) == 2` および座標一致アサーションへ修正し、エッジケース単体テストを追加。`PROMPT.md` と `agent_dots.py` docstring を同期。
 
 ## 完了レポート
-- **変えたファイル**: `vreplay/minimap.py`, `vreplay/agent_dots.py`, `vreplay/data/agent_dot_model.npz` (318 KB), `vreplay/tactics.py`, `tools/train_agent_dot.py`, `tests/test_minimap.py`, `tests/test_tactics.py`, `docs/tasks/agent-dot-accuracy.md`, `docs/BACKLOG.md`
-- **テスト結果**: `tests/test_minimap.py tests/test_tactics.py tests/test_smokes.py tests/test_eval_all.py` → 43 passed (1 OCR deselected); `tools/eval_all.py --blind-dir /tmp/blind_val --tol 0.06` → `detect_dots` TP=364, FP=31, FN=26, **P=0.921, R=0.933, F1=0.927**, mean_dist=0.0088, `mask_ok_frames=52/52`, `agent gt_in_mask_rate=0.9897`.
-- **迷ったところ・今後の伸びしろ**: 106 枚の訓練データのみで Precision=0.921 / Recall=0.933（最低ライン 0.90 を両方超過）を達成。さらに 0.95 超を狙う場合は、次タスクで訓練枚数の拡充またはマルチスケール CNN（小アイコン 0.036H 専用ブランチ）や複数フレーム時間統合を追加するのが有効。
+- **変えたファイル**: `vreplay/minimap.py`, `vreplay/agent_dots.py`, `vreplay/data/agent_dot_model.npz` (318 KB), `vreplay/tactics.py`, `tools/train_agent_dot.py`, `tests/test_minimap.py`, `tests/test_tactics.py`, `docs/tasks/agent-dot-accuracy.md`, `docs/BACKLOG.md`, `PROMPT.md`
+- **テスト結果**: `tests/test_tactics.py` → 20 passed in 22.81s（10 分タイムアウトから大幅改善）; `tests/test_minimap.py tests/test_tactics.py tests/test_smokes.py tests/test_eval_all.py` → 44 passed, 1 deselected in 37.67s; `tools/eval_all.py --blind-dir /tmp/blind_val --tol 0.06` → `detect_dots` TP=363, FP=28, FN=27, **P=0.928, R=0.931, F1=0.930**, mean_dist=0.0089, `mask_ok_frames=52/52`, `agent gt_in_mask_rate=0.9897`.
+- **迷ったところ・今後の伸びしろ**: 106 枚の訓練データのみで Precision=0.928 / Recall=0.931 / F1=0.930（最低ライン 0.90 を両方超過）を達成。さらに 0.95 超を狙う場合は、次タスクで訓練枚数の拡充またはマルチスケール CNN（小アイコン 0.036H 専用ブランチ）や複数フレーム時間統合を追加するのが有効。

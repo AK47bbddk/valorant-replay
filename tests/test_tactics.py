@@ -536,21 +536,31 @@ def test_analyze_video_cutaway_streams_all_majority_and_mark_fallback(tmp_path, 
 
 
 def test_detect_dots_separates_crowded_agents_and_rejects_flat_ability_blobs():
+    from pathlib import Path
     from vreplay import agent_dots as AD
 
-    # 1) 密集した 2 人の選手（~1.0 D 間隔）を 1 塊に潰さず 2 点として分離できること
+    # 1) 密集した 2 人の実アイコン選手（~1.0 D = 14px 間隔）を 1 塊に潰さず 2 点として分離できること
+    fixture_path = Path(__file__).resolve().parent / "fixtures" / "minimap_sunset_riot.jpg"
+    real = cv2.imread(str(fixture_path))
+    assert real is not None
+    rh, rw = real.shape[:2]
+    real_dots = tactics.detect_dots(real, require_minimap=True)
+    assert len(real_dots) >= 1
+    d0 = real_dots[0]
+    rx, ry = int(round(d0["x"] * rw)), int(round(d0["y"] * rh))
+    rad_src = max(8, int(round(0.55 * d0["w"])))
+    src_patch = real[ry - rad_src:ry + rad_src + 1, rx - rad_src:rx + rad_src + 1]
+    icon = cv2.resize(src_patch, (15, 15), interpolation=cv2.INTER_AREA)
+
     img = _synthetic_minimap(304, 320)
-    # 顔テクスチャ付きの 2 つの暖色リングアイコンを ~14px (1.0 D) 間隔で配置
-    rng = np.random.default_rng(7)
-    for cx, cy in ((int(0.50 * 320), int(0.49 * 304)), (int(0.50 * 320) + 14, int(0.49 * 304))):
-        cv2.circle(img, (cx, cy), 6, (40, 50, 210), -1)
-        # 内部に高コントラストの顔風テクスチャを描画
-        patch = rng.integers(30, 230, (9, 9, 3), dtype=np.uint8)
-        yy, xx = np.ogrid[-4:5, -4:5]
-        m = xx * xx + yy * yy <= 16
-        roi = img[cy - 4:cy + 5, cx - 4:cx + 5]
-        roi[m] = patch[m]
-        cv2.circle(img, (cx, cy), 6, (40, 50, 220), 2)
+    r = 7
+    yy, xx = np.ogrid[-r:r + 1, -r:r + 1]
+    cmask = xx * xx + yy * yy <= r * r
+    c1_px = (int(0.50 * 320), int(0.49 * 304))
+    c2_px = (c1_px[0] + 14, c1_px[1])
+    for cx, cy in (c1_px, c2_px):
+        roi = img[cy - r:cy + r + 1, cx - r:cx + r + 1]
+        roi[cmask] = icon[cmask]
 
     # 2) 平坦な薄紫アビリティ風円（内部テクスチャなし）を誤検知しないこと
     cv2.circle(img, (int(0.26 * 320), int(0.70 * 304)), 8, (180, 90, 175), -1)
@@ -558,10 +568,16 @@ def test_detect_dots_separates_crowded_agents_and_rejects_flat_ability_blobs():
     dots = tactics.detect_dots(img, require_minimap=True)
     # モデルがロードされていること & 戻り値スキーマ検証
     assert AD.load_model() is not None
+    assert len(dots) == 2
     for d in dots:
         assert d["color"] in ("warm", "cool")
         assert 0.0 <= d["x"] <= 1.0 and 0.0 <= d["y"] <= 1.0
         assert d["k"] >= 1 and d["area"] > 0 and d["w"] > 0 and d["h"] > 0
+    # 2 人の密集選手それぞれの中心座標近傍に 1 点ずつ一致すること
+    exp1 = (c1_px[0] / 320.0, c1_px[1] / 304.0)
+    exp2 = (c2_px[0] / 320.0, c2_px[1] / 304.0)
+    assert any(math.hypot(d["x"] - exp1[0], d["y"] - exp1[1]) < 0.03 for d in dots)
+    assert any(math.hypot(d["x"] - exp2[0], d["y"] - exp2[1]) < 0.03 for d in dots)
     # 平坦な紫アビリティ位置 (0.26, 0.70) に誤検知しないこと
     assert not any(math.hypot(d["x"] - 0.26, d["y"] - 0.70) < 0.05 for d in dots)
 
@@ -582,3 +598,45 @@ def test_detect_dots_separates_crowded_agents_and_rejects_flat_ability_blobs():
     assert len(balanced) == 10
     assert sum(1 for d in balanced if d["color"] == "warm") == 5
     assert sum(1 for d in balanced if d["color"] == "cool") == 5
+
+
+def test_detect_dots_edge_cases_and_synthetic_boundaries(tmp_path):
+    from vreplay import agent_dots as AD
+
+    # 1) icon_frac = nan / inf / <= 0 は例外を出さずにフォールバックすること
+    blank = np.zeros((304, 320, 3), np.uint8)
+    assert tactics.detect_dots(blank, icon_frac=float("nan")) == []
+    assert tactics.detect_dots(blank, icon_frac=float("inf")) == []
+    assert tactics.detect_dots(blank, icon_frac=float("-inf")) == []
+    assert tactics.detect_dots(blank, icon_frac=-0.05) == []
+
+    # 2) per_color <= 0 は即座に [] を返すこと
+    c_red = np.full((304, 320, 3), 120, np.uint8)
+    cv2.circle(c_red, (160, 150), 7, (20, 20, 250), -1)  # S=235
+    assert tactics.detect_dots(c_red, per_color=0) == []
+    assert tactics.detect_dots(c_red, per_color=-1) == []
+
+    # 3) 合成単色円境界: S=235 の丸は検知し、14x14 の単色正方形は棄却すること
+    dots_circle = tactics.detect_dots(c_red)
+    assert len(dots_circle) == 1 and dots_circle[0]["color"] == "warm"
+    sq = np.full((304, 320, 3), 120, np.uint8)
+    cv2.rectangle(sq, (150, 140), (164, 154), (10, 10, 250), -1)
+    assert tactics.detect_dots(sq) == []
+
+    # 4) 極小ノイズ画像（32x32, 8x8）は誤検知ゼロで即座に [] を返すこと
+    rng = np.random.default_rng(42)
+    assert tactics.detect_dots(rng.integers(0, 256, (32, 32, 3), dtype=np.uint8)) == []
+    assert tactics.detect_dots(rng.integers(0, 256, (8, 8, 3), dtype=np.uint8)) == []
+
+    # 5) 破損・不完全な .npz モデルに対して load_model() は例外を上げず None を返すこと
+    bad_npz = tmp_path / "corrupt.npz"
+    bad_npz.write_bytes(b"not a valid zip or npz file")
+    incomplete_npz = tmp_path / "incomplete.npz"
+    np.savez(str(incomplete_npz), dummy=np.array([1, 2, 3]))
+    AD.load_model.cache_clear()
+    try:
+        assert AD.load_model(bad_npz) is None
+        assert AD.load_model(incomplete_npz) is None
+        assert AD.detect_agent_dots(blank, model_path=bad_npz) is None
+    finally:
+        AD.load_model.cache_clear()
