@@ -368,3 +368,33 @@ def test_detect_smokes_rejects_non_uint8_inputs():
     assert smokes.detect_smokes(bg, fr_f32, require_minimap=True) == []
     assert SD.detect_smokes_learned(fr_f32, None, mask) == []
 
+
+def test_smoke_detector_load_model_rejects_corrupt_weights_and_shapes(tmp_path):
+    from vreplay import smoke_detector as SD
+
+    with np.load(str(SD.MODEL_PATH), allow_pickle=False) as z:
+        base = {k: z[k].copy() for k in z.files}
+
+    cases = [
+        ("nan_mlp_w1", lambda d: d["mlp_sf_w1_0"].__setitem__((0, 0), np.nan)),
+        ("inf_mlp_w1", lambda d: d["mlp_sf_w1_0"].__setitem__((0, 0), np.inf)),
+        ("zero_mlp_std", lambda d: d["mlp_sf_std"].__setitem__(0, 0.0)),
+        ("pos_inf_cnn_fcb", lambda d: d.__setitem__("cnn_sf_fcb_0", np.array([np.inf], np.float32))),
+        ("nan_thr_bg", lambda d: d.__setitem__("thr_bg", np.float32(np.nan))),
+        ("wrong_cnn_c1b", lambda d: d.__setitem__("cnn_sf_c1b_0", np.zeros((99,), np.float32))),
+        ("wrong_cnn_ksize", lambda d: d.__setitem__("cnn_sf_c1w_0", np.zeros((12, 6, 5, 5), np.float32))),
+        ("zero_cnn_sf_n", lambda d: d.__setitem__("cnn_sf_n", np.int32(0))),
+        ("zero_cnn_bg_n", lambda d: d.__setitem__("cnn_bg_n", np.int32(0))),
+    ]
+    for name, mutate in cases:
+        d = {k: v.copy() for k, v in base.items()}
+        mutate(d)
+        fp = tmp_path / f"{name}.npz"
+        np.savez(str(fp), **d)
+        SD.load_model.cache_clear()
+        assert SD.load_model(fp) is None, name
+
+    SD.load_model.cache_clear()
+    assert SD.load_model() is not None
+
+

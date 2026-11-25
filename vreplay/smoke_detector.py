@@ -596,10 +596,19 @@ def load_model(path: str | Path | None = None) -> dict[str, Any] | None:
         with np.load(str(p), allow_pickle=False) as z:
             def _load_mlp(prefix: str, expected_in_dim: int) -> dict[str, Any]:
                 n_m = int(z[f"{prefix}_n"])
+                if n_m <= 0:
+                    raise ValueError(f"Invalid {prefix} ensemble size")
                 mean = z[f"{prefix}_mean"].astype(np.float32)
-                std = np.maximum(1e-5, z[f"{prefix}_std"].astype(np.float32))
-                if mean.ndim != 1 or mean.shape[0] != expected_in_dim or std.shape != (expected_in_dim,):
-                    raise ValueError(f"Invalid {prefix} scaler shape")
+                raw_std = z[f"{prefix}_std"].astype(np.float32)
+                if (
+                    mean.shape != (expected_in_dim,)
+                    or raw_std.shape != (expected_in_dim,)
+                    or not np.all(np.isfinite(mean))
+                    or not np.all(np.isfinite(raw_std))
+                    or not np.all(raw_std > 0.0)
+                ):
+                    raise ValueError(f"Invalid {prefix} scaler")
+                std = np.maximum(1e-5, raw_std)
                 w1s, b1s, w2s, b2s = [], [], [], []
                 for i in range(n_m):
                     w1 = z[f"{prefix}_w1_{i}"].astype(np.float32)
@@ -609,11 +618,18 @@ def load_model(path: str | Path | None = None) -> dict[str, Any] | None:
                     if (
                         w1.ndim != 2
                         or w1.shape[0] != expected_in_dim
+                        or w1.shape[1] <= 0
                         or b1.shape != (w1.shape[1],)
                         or w2.shape != (w1.shape[1], 1)
                         or b2.shape != (1,)
+                        or not (
+                            np.all(np.isfinite(w1))
+                            and np.all(np.isfinite(b1))
+                            and np.all(np.isfinite(w2))
+                            and np.all(np.isfinite(b2))
+                        )
                     ):
-                        raise ValueError(f"Invalid {prefix} MLP weight shape")
+                        raise ValueError(f"Invalid {prefix} MLP weight shape or non-finite values")
                     w1s.append(w1)
                     b1s.append(b1)
                     w2s.append(w2)
@@ -622,6 +638,8 @@ def load_model(path: str | Path | None = None) -> dict[str, Any] | None:
 
             def _load_cnn(prefix: str, expected_in_ch: int) -> list[dict[str, np.ndarray]]:
                 n_m = int(z[f"{prefix}_n"])
+                if n_m <= 0:
+                    raise ValueError(f"Invalid {prefix} ensemble size")
                 out = []
                 for i in range(n_m):
                     c1w = z[f"{prefix}_c1w_{i}"].astype(np.float32)
@@ -634,15 +652,34 @@ def load_model(path: str | Path | None = None) -> dict[str, Any] | None:
                     fcb = z[f"{prefix}_fcb_{i}"].astype(np.float32)
                     if (
                         c1w.ndim != 4
+                        or c1w.shape[0] <= 0
                         or c1w.shape[1] != expected_in_ch
+                        or c1w.shape[2:] != (3, 3)
+                        or c1b.shape != (c1w.shape[0],)
                         or c2w.ndim != 4
+                        or c2w.shape[0] <= 0
                         or c2w.shape[1] != c1w.shape[0]
+                        or c2w.shape[2:] != (3, 3)
+                        or c2b.shape != (c2w.shape[0],)
                         or c3w.ndim != 4
+                        or c3w.shape[0] <= 0
                         or c3w.shape[1] != c2w.shape[0]
+                        or c3w.shape[2:] != (3, 3)
+                        or c3b.shape != (c3w.shape[0],)
                         or fcw.shape != (2 * c3w.shape[0], 1)
                         or fcb.shape != (1,)
+                        or not (
+                            np.all(np.isfinite(c1w))
+                            and np.all(np.isfinite(c1b))
+                            and np.all(np.isfinite(c2w))
+                            and np.all(np.isfinite(c2b))
+                            and np.all(np.isfinite(c3w))
+                            and np.all(np.isfinite(c3b))
+                            and np.all(np.isfinite(fcw))
+                            and np.all(np.isfinite(fcb))
+                        )
                     ):
-                        raise ValueError(f"Invalid {prefix} CNN weight shape")
+                        raise ValueError(f"Invalid {prefix} CNN weight shape or non-finite values")
                     out.append(
                         {
                             "c1w": c1w,
@@ -657,19 +694,30 @@ def load_model(path: str | Path | None = None) -> dict[str, Any] | None:
                     )
                 return out
 
+            def _load_scalar(key: str) -> float:
+                val = float(z[key])
+                if not math.isfinite(val):
+                    raise ValueError(f"Non-finite scalar {key}")
+                return val
+
             model = {
                 "mlp_sf": _load_mlp("mlp_sf", 74),
                 "mlp_bg": _load_mlp("mlp_bg", 88),
                 "cnn_sf": _load_cnn("cnn_sf", 6),
                 "cnn_bg": _load_cnn("cnn_bg", 8),
-                "w_cnn_sf": float(z["w_cnn_sf"]),
-                "thr_sf": float(z["thr_sf"]),
-                "w_2a_bg": float(z["w_2a_bg"]),
-                "w_2b_bg": float(z["w_2b_bg"]),
-                "w_sf_in_bg": float(z["w_sf_in_bg"]),
-                "thr_bg": float(z["thr_bg"]),
+                "w_cnn_sf": _load_scalar("w_cnn_sf"),
+                "thr_sf": _load_scalar("thr_sf"),
+                "w_2a_bg": _load_scalar("w_2a_bg"),
+                "w_2b_bg": _load_scalar("w_2b_bg"),
+                "w_sf_in_bg": _load_scalar("w_sf_in_bg"),
+                "thr_bg": _load_scalar("thr_bg"),
             }
-            if not model["mlp_sf"]["w1s"] or not model["mlp_bg"]["w1s"]:
+            if (
+                not model["mlp_sf"]["w1s"]
+                or not model["mlp_bg"]["w1s"]
+                or not model["cnn_sf"]
+                or not model["cnn_bg"]
+            ):
                 return None
             return model
     except Exception:

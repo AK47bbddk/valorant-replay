@@ -217,7 +217,15 @@ def detect_smokes(
 
     eff_aspect = float(aspect) if aspect is not None else (w / max(1.0, float(h)))
     norm_dim = float(max(1, min(w, h)))
-    D = max(8.0, float(icon_frac or 0.048) * h)
+    icon_f = (
+        float(icon_frac)
+        if isinstance(icon_frac, (int, float, np.integer, np.floating))
+        and not isinstance(icon_frac, bool)
+        and math.isfinite(float(icon_frac))
+        and float(icon_frac) > 0.0
+        else 0.048
+    )
+    D = max(8.0, icon_f * h)
     agents_px = [
         (float(a["x"]) * w, float(a["y"]) * h)
         for a in (found_agents or [])
