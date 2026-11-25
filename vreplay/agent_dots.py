@@ -5,9 +5,10 @@ Stage 1: Canonical-scale (H=284) stride-4 dense candidate grid gated by broadene
          interior-texture cues (99.5%+ recall within 5px on unseen maps).
 Stage 2A: Fast vectorized radial/ring/sector/multi-scale + 6x6 spatial MLP pre-scorer
           and +/-2px local peak refinement using full-image precomputed maps.
-Stage 2B: Compact pure-NumPy 3-layer 2D CNN ensemble operating on crisp 22x22x7
-          (L_rel, A, B, warm, cool, yellow, gmag) patches fused with Stage 2A probabilities.
-Stage 3: Small-radius NMS (0.50 D) + surround-subtracted team color assignment with
+Stage 2B: Compact pure-NumPy 3-layer 2D CNN ensemble operating on crisp 22x22x7/9
+          (L_rel, A, B, warm, cool, yellow, gmag[, warm_rel, cool_rel]) patches fused
+          with Stage 2A probabilities.
+Stage 3: Small-radius NMS (0.52 D) + surround-subtracted team color assignment with
          ambiguous-overflow rebalancing (e.g. spectated yellow or shadowed agents).
 """
 from __future__ import annotations
@@ -154,19 +155,16 @@ _INNER_K = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)).astype(np.float3
 _INNER_K /= float(_INNER_K.sum())
 
 
-def _build_cnn_geometry(n: int = CNN_SIZE) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _build_cnn_geometry(n: int = CNN_SIZE) -> np.ndarray:
     half = (n - 1) / 2.0
     yy, xx = np.mgrid[0:n, 0:n].astype(np.float32) - half
     rr = np.hypot(xx, yy)
     sur = (rr >= 8.2).astype(np.float32)
     sur /= float(sur.sum())
-    safe_r = np.maximum(rr, 1e-6)
-    ux = (xx / safe_r).astype(np.float32)
-    uy = (yy / safe_r).astype(np.float32)
-    return sur[None, :, :], ux[None, :, :], uy[None, :, :]
+    return sur[None, :, :]
 
 
-_CNN_SUR_W, _CNN_UX, _CNN_UY = _build_cnn_geometry(CNN_SIZE)
+_CNN_SUR_W = _build_cnn_geometry(CNN_SIZE)
 
 
 @lru_cache(maxsize=32)
@@ -317,8 +315,6 @@ def _precompute_canonical_maps(imc: np.ndarray) -> dict[str, Any]:
         "A_cnn": (A * 2.0).ravel(),
         "B_cnn": (B * 2.0).ravel(),
         "gmag_cnn": gmag_cnn.ravel(),
-        "cgx_cnn": (cgx * 3.0).ravel(),
-        "cgy_cnn": (cgy * 3.0).ravel(),
         "warm_2d": warm[half:-half, half:-half],
         "cool_2d": cool[half:-half, half:-half],
         "yel_2d": yel[half:-half, half:-half],
@@ -1053,10 +1049,20 @@ def _detect_synthetic_solid_dots(
                 continue
 
             circ = _component_circularity(patch, area)
-            # Enforce circularity >= 0.72 on compact shapes (r_asp <= 1.15); allow overlapping circle clusters (1.15 < r_asp <= 1.8)
-            non_circular = r_asp <= 1.15 and circ < 0.72
+            hull_area = float(cv2.contourArea(cv2.convexHull(pts)))
+            solidity = float(area) / max(hull_area, 1.0)
+            # Enforce circularity >= 0.72 on compact shapes (r_asp <= 1.15) and >= 0.78 on convex compact shapes
+            # (r_asp <= 1.30, solidity >= 1.0) to reject non-square diamonds while preserving overlapping circle clusters.
+            non_circular = (r_asp <= 1.15 and circ < 0.72) or (r_asp <= 1.30 and solidity >= 1.0 and circ < 0.78)
             cands = []
-            needs_open = r_asp > 1.8 or side > 2.2 * D or area > max(max_area, int(4 * D * D))
+            # Gate MORPH_OPEN on concave low-extent blobs (circle + attached sightline), elongated high-extent blobs
+            # (touching circles, r_ext >= 0.55; excludes convex right triangles with r_ext ~0.52), or oversized blobs.
+            needs_open = (
+                (solidity < 0.88 and r_ext < 0.55)
+                or (r_asp > 1.8 and r_ext >= 0.55)
+                or side > 2.2 * D
+                or area > max(max_area, int(4 * D * D))
+            )
             if needs_open:
                 if side >= 0.7 * D:
                     buf = np.zeros((hh + 2 * pad, ww + 2 * pad), np.uint8)
@@ -1076,12 +1082,12 @@ def _detect_synthetic_solid_dots(
                         sr_asp = (max(srw, srh) + 1.0) / max(1.0, min(srw, srh) + 1.0)
                         sr_ext = float(sarea) / max(1.0, (srw + 1.0) * (srh + 1.0))
                         scirc = _component_circularity(sp, sarea)
-                        if sr_asp <= 1.65 and 0.58 <= sr_ext <= 0.88 and scirc >= 0.72:
+                        if sr_asp <= 1.65 and 0.68 <= sr_ext <= 0.88 and scirc >= 0.80:
                             cands.append((
                                 float(x + sc[si][0]), float(y + sc[si][1]),
                                 sarea, sww, shh, x + sx, y + sy, sp,
                             ))
-            elif r_ext < 0.55 or r_ext > 0.88 or non_circular:
+            elif r_asp > 1.8 or r_ext < 0.55 or r_ext > 0.88 or non_circular:
                 continue
             else:
                 cands.append((
@@ -1123,7 +1129,7 @@ def score_image_dense(
     icon_frac: float | None = None,
     thresh: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Run dense stride-4 + +/-2px & +/-1px peak refinement + CNN fusion + hard NMS."""
+    """Run dense stride-4 + +/-2px peak refinement + CNN fusion + hard NMS."""
     H, W = img.shape[:2]
     if min(H, W) < MIN_INPUT_SIDE:
         return []
@@ -1282,7 +1288,7 @@ def assign_teams_and_cap(
     *,
     per_color: int = 5,
     thresh: float | None = None,
-    soft_nms_r: float = 0.85,
+    soft_nms_r: float = 0.0,
     soft_nms_margin: float = 0.12,
     soft_nms_ratio: float = 0.80,
 ) -> list[dict[str, Any]]:
@@ -1441,7 +1447,7 @@ def detect_agent_dots(
         accepted,
         per_color=per_color,
         thresh=eff_thresh,
-        soft_nms_r=float(model.get("soft_nms_r", 0.85)),
+        soft_nms_r=float(model.get("soft_nms_r", 0.0)),
         soft_nms_margin=float(model.get("soft_nms_margin", 0.12)),
         soft_nms_ratio=float(model.get("soft_nms_ratio", 0.80)),
     )

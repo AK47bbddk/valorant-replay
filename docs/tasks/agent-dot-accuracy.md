@@ -50,8 +50,8 @@ python3 tools/eval_all.py --blind-dir /tmp/blind_val --tol 0.06
 ```
 
 ## 受け入れ条件
-- [x] 指定したオフラインテストおよび関連テスト群がネットワークなしで全件通る（43 passed, 1 deselected）
-- [x] `/tmp/blind_val`（`--tol 0.06`）で `detect_dots` が **Precision=0.921, Recall=0.933, F1=0.927**（最低ライン > 0.90 を両方クリア、PR #5 比 +33.2% F1）を達成する
+- [x] 指定したオフラインテストおよび関連テスト群がネットワークなしで全件通る（44 passed, 1 deselected）
+- [x] `/tmp/blind_val`（`--tol 0.06`）で `detect_dots` が **Precision=0.929, Recall=0.933, F1=0.931**（最低ライン > 0.90 を両方クリア、PR #5 比 +33.6% F1）を達成する
 - [x] `mask_ok_frames = 52/52` を維持（`agent gt_in_mask_rate`: `0.9410 → 0.9897`）し、`detect_smokes` の再現率（`0.500`）を劣化させない
 - [x] `/tmp/blind_val` は評価専用とし、学習・CV・ハードネガティブ採掘はすべて `/tmp/blind_train` のみで実施した
 - [x] 空入力・不正マスク・非ミニマップ時に例外で停止せず `[]` を返す

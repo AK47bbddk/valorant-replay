@@ -630,13 +630,30 @@ def test_detect_dots_edge_cases_and_synthetic_boundaries(tmp_path):
         pts = np.array([[160, 150 - th // 2], [160 - side // 2, 150 + th // 2], [160 + side // 2, 150 + th // 2]], np.int32)
         cv2.fillPoly(tri, [pts], (10, 10, 250))
         assert tactics.detect_dots(tri) == [], f"unexpected FP on equilateral triangle side={side}"
-    rtri = np.full((304, 320, 3), 120, np.uint8)
-    cv2.fillPoly(rtri, [np.array([[151, 141], [151, 159], [169, 159]], np.int32)], (10, 10, 250))
-    assert tactics.detect_dots(rtri) == []
-    c_line = np.full((304, 320, 3), 120, np.uint8)
-    cv2.circle(c_line, (160, 150), 8, (10, 10, 250), -1)
-    cv2.line(c_line, (160, 150), (195, 150), (10, 10, 250), 2)
-    assert len(tactics.detect_dots(c_line)) == 1
+    for sz in (14, 18, 22, 24, 26):
+        rtri = np.full((304, 320, 3), 120, np.uint8)
+        pts = np.array([[160 - sz // 2, 150 - sz // 2], [160 - sz // 2, 150 + sz // 2], [160 + sz // 2, 150 + sz // 2]], np.int32)
+        cv2.fillPoly(rtri, [pts], (10, 10, 250))
+        assert tactics.detect_dots(rtri) == [], f"unexpected FP on right triangle sz={sz}"
+    for rx, ry in ((12, 9), (14, 10)):
+        dia = np.full((304, 320, 3), 120, np.uint8)
+        pts = np.array([[160, 150 - ry], [160 + rx, 150], [160, 150 + ry], [160 - rx, 150]], np.int32)
+        cv2.fillPoly(dia, [pts], (10, 10, 250))
+        assert tactics.detect_dots(dia) == [], f"unexpected FP on diamond {rx}x{ry}"
+    for line_len in (20, 35):
+        c_line = np.full((304, 320, 3), 120, np.uint8)
+        cv2.circle(c_line, (160, 150), 8, (10, 10, 250), -1)
+        cv2.line(c_line, (160, 150), (160 + line_len, 150), (10, 10, 250), 2)
+        assert len(tactics.detect_dots(c_line)) == 1, f"missed circle+sightline len={line_len}"
+
+    # 3b) assign_teams_and_cap のデフォルトは soft_nms_r=0.0（近接ペアを抑制しないこと）
+    pair_cands = [
+        {"color": "warm", "x": 0.50, "y": 0.50, "area": 100, "k": 1, "w": 14, "h": 14,
+         "_score": 0.90, "_margin": 0.5, "_ambig": False},
+        {"color": "warm", "x": 0.53, "y": 0.50, "area": 100, "k": 1, "w": 14, "h": 14,
+         "_score": 0.70, "_margin": 0.5, "_ambig": False},
+    ]
+    assert len(AD.assign_teams_and_cap(pair_cands, per_color=5, thresh=0.55)) == 2
 
     # 4) 極小ノイズ画像（32x32, 8x8）は誤検知ゼロで即座に [] を返すこと
     rng = np.random.default_rng(42)

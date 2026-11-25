@@ -125,54 +125,6 @@ def _load_dataset(train_dir: Path) -> list[dict[str, Any]]:
     return raw_items
 
 
-_PASTE_MASK: np.ndarray | None = None
-
-
-def _get_paste_mask() -> np.ndarray:
-    global _PASTE_MASK
-    if _PASTE_MASK is None:
-        n = AD.PATCH_SIZE
-        half = (n - 1) / 2.0
-        yy, xx = np.mgrid[0:n, 0:n].astype(np.float32) - half
-        rr = np.hypot(xx, yy)
-        _PASTE_MASK = np.clip((7.0 - rr) / 1.4, 0.0, 1.0)[:, :, None].astype(np.float32)
-    return _PASTE_MASK
-
-
-def _paste_crowded_neighbor(
-    base_patch: np.ndarray,
-    neighbor_patch: np.ndarray,
-    rng: np.random.Generator,
-) -> np.ndarray:
-    """Paste a real neighbor agent icon at 0.68-1.15 D to simulate crowded/occluded pairs."""
-    D_c = AD.CANON_D_FRAC * AD.H_CANON
-    ang = float(rng.uniform(0.0, 2.0 * math.pi))
-    dist = float(rng.uniform(0.68 * D_c, 1.15 * D_c))
-    dx = int(round(dist * math.cos(ang)))
-    dy = int(round(dist * math.sin(ang)))
-    n = AD.PATCH_SIZE
-    mask = _get_paste_mask()
-    out = base_patch.astype(np.float32)
-    nb = neighbor_patch.astype(np.float32)
-
-    x0_dst = max(0, dx)
-    y0_dst = max(0, dy)
-    x1_dst = min(n, n + dx)
-    y1_dst = min(n, n + dy)
-    if x1_dst <= x0_dst or y1_dst <= y0_dst:
-        return base_patch.copy()
-    x0_src = x0_dst - dx
-    y0_src = y0_dst - dy
-    x1_src = x1_dst - dx
-    y1_src = y1_dst - dy
-
-    m = mask[y0_src:y1_src, x0_src:x1_src]
-    out[y0_dst:y1_dst, x0_dst:x1_dst] = (
-        (1.0 - m) * out[y0_dst:y1_dst, x0_dst:x1_dst] + m * nb[y0_src:y1_src, x0_src:x1_src]
-    )
-    return np.clip(out, 0, 255).astype(np.uint8)
-
-
 def _augment_patch_upright(patch: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     out = patch[:, ::-1].copy() if rng.random() < 0.5 else patch.copy()
     if rng.random() < 0.30:
@@ -201,14 +153,6 @@ def _build_base_samples(
     neg_weights: list[float] = []
 
     D_c = AD.CANON_D_FRAC * AD.H_CANON
-
-    # Pre-collect clean GT positive patches from this training fold for crowded-pair pasting
-    clean_pos_pool: list[np.ndarray] = []
-    for it in items:
-        imc = it["imc"]
-        Hc, Wc = it["Hc"], it["Wc"]
-        for gx, gy, _, _ in it["boxes"].get(0, []):
-            clean_pos_pool.append(AD.extract_patch_bgr(imc, gx * Wc, gy * Hc, D_c))
 
     for it in items:
         imc = it["imc"]
@@ -658,7 +602,7 @@ def _mine_pipeline_hard_negatives(
     model: dict[str, Any],
     prob_thr: float = 0.25,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Run full dense + +/-2px/+/-1px refinement pipeline on training images & median bgs and mine FPs."""
+    """Run full dense + +/-2px refinement pipeline on training images & median bgs and mine FPs."""
     P_hn: list[np.ndarray] = []
     w_hn: list[float] = []
     D_c = AD.CANON_D_FRAC * AD.H_CANON
@@ -753,7 +697,7 @@ def _train_ensemble(
         y_c = y[keep_cnn]
         sw_c = sw[keep_cnn]
 
-        # Round-2 pipeline HNM: train 1 bootstrap CNN, mine full-pipeline +/-2px/+/-1px FPs on train
+        # Round-2 pipeline HNM: train 1 bootstrap CNN, mine full-pipeline +/-2px FPs on train
         if boot_epochs > 0:
             tc0 = time.time()
             c0 = _train_single_cnn(AD.patches_to_cnn_tensor(P_c), y_c, sw_c, epochs=boot_epochs, seed=seed + 999)
@@ -988,7 +932,7 @@ def main() -> None:
 
         print(
             f"\nSelected OOF config: thr={best_thr:.3f}, soft_nms={best_soft} "
-            f"(F1={best_key[0]:.4f}, min(P,R)={best_key[1]:.4f})",
+            f"(min(P,R)={best_key[0]:.4f}, F1={best_key[1]:.4f})",
             flush=True,
         )
         if args.cv_only:
