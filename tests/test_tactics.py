@@ -535,3 +535,50 @@ def test_analyze_video_cutaway_streams_all_majority_and_mark_fallback(tmp_path, 
     assert all(p[1] > 20.0 for p in tac4["positions"])
 
 
+def test_detect_dots_separates_crowded_agents_and_rejects_flat_ability_blobs():
+    from vreplay import agent_dots as AD
+
+    # 1) 密集した 2 人の選手（~1.0 D 間隔）を 1 塊に潰さず 2 点として分離できること
+    img = _synthetic_minimap(304, 320)
+    # 顔テクスチャ付きの 2 つの暖色リングアイコンを ~14px (1.0 D) 間隔で配置
+    rng = np.random.default_rng(7)
+    for cx, cy in ((int(0.50 * 320), int(0.49 * 304)), (int(0.50 * 320) + 14, int(0.49 * 304))):
+        cv2.circle(img, (cx, cy), 6, (40, 50, 210), -1)
+        # 内部に高コントラストの顔風テクスチャを描画
+        patch = rng.integers(30, 230, (9, 9, 3), dtype=np.uint8)
+        yy, xx = np.ogrid[-4:5, -4:5]
+        m = xx * xx + yy * yy <= 16
+        roi = img[cy - 4:cy + 5, cx - 4:cx + 5]
+        roi[m] = patch[m]
+        cv2.circle(img, (cx, cy), 6, (40, 50, 220), 2)
+
+    # 2) 平坦な薄紫アビリティ風円（内部テクスチャなし）を誤検知しないこと
+    cv2.circle(img, (int(0.26 * 320), int(0.70 * 304)), 8, (180, 90, 175), -1)
+
+    dots = tactics.detect_dots(img, require_minimap=True)
+    # モデルがロードされていること & 戻り値スキーマ検証
+    assert AD.load_model() is not None
+    for d in dots:
+        assert d["color"] in ("warm", "cool")
+        assert 0.0 <= d["x"] <= 1.0 and 0.0 <= d["y"] <= 1.0
+        assert d["k"] >= 1 and d["area"] > 0 and d["w"] > 0 and d["h"] > 0
+    # 平坦な紫アビリティ位置 (0.26, 0.70) に誤検知しないこと
+    assert not any(math.hypot(d["x"] - 0.26, d["y"] - 0.70) < 0.05 for d in dots)
+
+    # 3) 黄色観戦枠 / 曖昧色のチーム再配分で per_color=5 のあふれによる取りこぼしを防ぐこと
+    cands = [
+        {"color": "warm", "x": 0.1 * i, "y": 0.5, "area": 120, "k": 1, "w": 14, "h": 14,
+         "_score": 0.95 - 0.01 * i, "_margin": 0.50, "_ambig": False}
+        for i in range(1, 6)
+    ] + [
+        {"color": "warm", "x": 0.6, "y": 0.5, "area": 120, "k": 1, "w": 14, "h": 14,
+         "_score": 0.89, "_margin": 0.02, "_ambig": True},  # 黄色/曖昧
+    ] + [
+        {"color": "cool", "x": 0.1 * i, "y": 0.8, "area": 120, "k": 1, "w": 14, "h": 14,
+         "_score": 0.94 - 0.01 * i, "_margin": 0.50, "_ambig": False}
+        for i in range(1, 5)
+    ]
+    balanced = AD.assign_teams_and_cap(cands, per_color=5)
+    assert len(balanced) == 10
+    assert sum(1 for d in balanced if d["color"] == "warm") == 5
+    assert sum(1 for d in balanced if d["color"] == "cool") == 5

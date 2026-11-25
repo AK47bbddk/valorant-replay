@@ -202,6 +202,18 @@ def detect_dots(img, min_area: int = 4, max_area: int = 450, per_color: int = 5,
         if dot_mask is None:
             return []
 
+    from . import agent_dots as AD
+    learned = AD.detect_agent_dots(
+        img,
+        min_area=min_area,
+        max_area=max_area,
+        per_color=per_color,
+        icon_frac=icon_frac,
+        dot_mask=dot_mask,
+    )
+    if learned is not None:
+        return learned
+
     D = (icon_frac or ICON_FRAC) * h
     hsv = cv2.cvtColor(img[:, :, :3], cv2.COLOR_BGR2HSV)
     ko = max(3, int(round(D * 0.25))) | 1

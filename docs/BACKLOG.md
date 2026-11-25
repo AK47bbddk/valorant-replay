@@ -19,7 +19,7 @@
 
 | ID | 状態 | タイトル | 指示書 | 主な対象ファイル | 完了条件 / 確認方法 |
 |---|---|---|---|---|---|
-| `smoke-detection` | `TODO` | ミニマップからのスモーク位置検知と初動分類への連携 | [smoke-detection.md](tasks/smoke-detection.md) | `vreplay/smokes.py`, `vreplay/tactics.py`, `tests/test_smokes.py` | `pytest tests/test_smokes.py tests/test_opening_playbook.py tests/test_tactics.py` が通り、PR 作成済み |
+| `agent-dot-accuracy` | `PR_OPEN` | ミニマップ・エージェント点検知の高精度化（2段階 MLP+2D CNN ＆ `dot_mask` カバー率改善） | [agent-dot-accuracy.md](tasks/agent-dot-accuracy.md) | `vreplay/agent_dots.py`, `vreplay/minimap.py`, `vreplay/tactics.py`, `vreplay/data/agent_dot_model.npz`, `tools/train_agent_dot.py` | `/tmp/blind_val --tol 0.06` で Precision=0.921, Recall=0.933, F1=0.927（両方 > 0.90）を達成し、オフライン `pytest` が通ること |
 
 ---
 
@@ -27,7 +27,6 @@
 
 | ID | 状態 | タイトル | 指示書 | 主な対象ファイル | 完了条件 / 確認方法 |
 |---|---|---|---|---|---|
-| `eval-all` | `TODO` | 統合ベンチマーク `tools/eval_all.py` の整備（ネットワーク不要の定量 Eval） | 未作成（着手時に作成） | `tools/eval_all.py`, `tests/test_eval_all.py` | `agents_eval` / `openings_eval` / `track_measure` 等を 1 コマンドで実行し、スコア表（JSON/Markdown）を出力できる |
 | `pr-preview-artifacts` | `TODO` | PR レビュー用のサンプル出力（HTML/ミニマップ画像要約）自動生成スクリプト | 未作成（着手時に作成） | `tools/pr_preview.py`, `tests/test_pr_preview.py` | コード diff を読まなくても変更の見た目を PR 上で確認できるサマリーを生成できる |
 
 ---
@@ -45,4 +44,7 @@
 
 | ID | 状態 | タイトル | PR / コミット |
 |---|---|---|---|
-| `backlog-pr-ci` | `IN_PROGRESS` | バックログ・PR 運用・CI 基盤の整備 | `task/backlog-pr-ci` |
+| `backlog-pr-ci` | `DONE` | バックログ・PR 運用・CI 基盤の整備 | PR #2 (`bd2d887`) |
+| `smoke-detection` | `DONE` | ミニマップからのスモーク位置検知と初動分類への連携 | PR #3 (`f00cd1f`) |
+| `eval-all` | `DONE` | ブラインドデータセット統合評価ツール `tools/eval_all.py` の整備 | PR #4 (`960192e`) |
+| `playable-minimap-region` | `DONE` | ミニマップ存在判定・プレイ可能床マスク導入による誤検知抑止とブラインド評価改善 | PR #5 (`2217e61`) |

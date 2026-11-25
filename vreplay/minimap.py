@@ -543,7 +543,7 @@ def playable_region(
             ):
                 floor_mask[comp] = True
 
-    tol = int(tol_px) if tol_px is not None else max(2, int(round(0.015 * H)))
+    tol = int(tol_px) if tol_px is not None else max(3, int(round(0.025 * H)))
     if tol <= 0:
         dot_mask = floor_mask.copy()
     else:
@@ -551,7 +551,7 @@ def playable_region(
         dot_mask = dist <= float(tol)
         if tol_px is None and line is not None:
             dist_l = cv2.distanceTransform((~line).astype(np.uint8), cv2.DIST_L2, 3)
-            dot_mask = dot_mask | ((dist <= max(3.0, 0.045 * H)) & (dist_l <= 3.0))
+            dot_mask = dot_mask | ((dist <= max(3.0, 0.048 * H)) & (dist_l <= max(3.0, 0.018 * H)))
 
     return floor_mask, dot_mask
 
