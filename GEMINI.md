@@ -10,14 +10,14 @@
 
 | 役割 | 担当 | 主な責務 | してはいけないこと |
 |---|---|---|---|
-| **司令塔 (Orchestrator)** | **Antigravity (`Gemini 4 Neon`)** | 仕様確認（`PROMPT.md` は必要な節だけ読む）、指示書 `docs/tasks/<名前>.md` の作成、Swarm / サブエージェントへの割り振り、完了レポートの提示 | ユーザー確認なしの `main` マージ・`git push` |
+| **司令塔 (Orchestrator)** | **Antigravity (`Gemini 4 Neon`)** | `docs/BACKLOG.md` からのタスク選定、仕様確認（`PROMPT.md` は必要な節だけ読む）、指示書作成、Swarm 割り振り、`task/<名前>` の PR 作成 | ユーザー確認なしの `main` マージ・`main` への直接 `git push` |
 | **実装担当 (Implementer)** | **Swarm ワーカー**（軽量・高速モデル）または **OpenCode**（OpenRouter 枠） | `workspace: "share"`（独立 worktree）と `task/<名前>` ブランチで指示書の「触ってよいファイル」のみ実装し、`python -m pytest -x -q <対象テスト>` を通してコミット | `main` の変更、`push`、指示書外の編集 |
 | **レビュー担当 (Reviewer)** | **Swarm の別モデルワーカー**（例：Claude Sonnet 等、実装と異なるモデル）または **Claude Code** | `git diff main...HEAD` と指示書のみを読み、`.agents/skills/vreplay-review` の基準（`## 判定` / `## 必ず直すこと` / `## できれば直すこと` / `## 確認したこと`）で厳格判定 | ファイル編集、コミット |
 | **上位相談役 (Escalation)** | **Claude（Opus / Claude Code）** / **上位モデル** / **Muse** | 3 周ループで解決しない難題・仕様判断の「相談票」にテキストで回答 | リポジトリファイルの直接編集 |
 
 ### 自動改善ループと停止条件
 1. 実装 → テスト → **実装と別モデルのレビュー** を **最大 3 周** まで回す。
-2. 「マージしてよい」が出たら完了レポートを出してユーザー確認を待つ。
+2. 「マージしてよい」かつ `pytest` が通ったら、`task/<名前>` を push して **GitHub Pull Request を自動作成** し、ユーザーにチェックを依頼する（`main` へのマージはユーザーが GitHub 上で行う）。
 3. **3 周しても「必ず直すこと」が消えない／同じ問題で詰まる／仕様判断が必要／触ってよいファイル外の変更が必要** になった時点で即停止し、指示書末尾に「相談票」を書いて上位モデルへエスカレーションする。
 
 ## 2. コーディング・安全ルール（`AGENTS.md` 準拠）
@@ -29,7 +29,7 @@
 - **ドキュメント同期**: 仕様が変わったら `PROMPT.md` の該当の節と `README.md` も合わせて更新する。
 - **コミットとマージ**:
   - コミットコマンド: `git -c user.name="AK47bbddk" -c user.email="aokki123@gmail.com" commit -m "<日本語で何を変えたか>"`
-  - レビューで「マージしてよい」が出るまで `main` へのマージおよび `git push` は行わない。
+  - レビューで「マージしてよい」が出るまで `task/<名前>` の PR 作成は行わない。また、ユーザー確認なしで `main` へのマージおよび `main` への直接 `git push` は行わない。
 
 ## 3. ドメイン固有の不変条件（`vreplay` ピットフォール）
 
