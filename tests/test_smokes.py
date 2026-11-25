@@ -254,3 +254,65 @@ def test_detect_smokes_colored_rimmed_domes_mild_darkening_and_max_radius_overri
     assert len(smokes.detect_smokes(fr_small, bg_small, max_radius_px=20, require_minimap=True)) == 1
 
 
+def test_smoke_detector_load_model_resilience(tmp_path):
+    from vreplay import smoke_detector as SD
+
+    assert SD.load_model(tmp_path / "does_not_exist.npz") is None
+
+    corrupt = tmp_path / "corrupt.npz"
+    corrupt.write_bytes(b"not-a-valid-npz-archive")
+    assert SD.load_model(corrupt) is None
+
+    incomplete = tmp_path / "incomplete.npz"
+    np.savez(str(incomplete), foo=np.array([1, 2, 3], dtype=np.float32))
+    assert SD.load_model(incomplete) is None
+
+    mdl = SD.load_model()
+    assert mdl is not None
+    for key in ("mlp_sf", "mlp_bg", "cnn_sf", "cnn_bg", "thr_sf", "thr_bg"):
+        assert key in mdl
+
+
+def test_smoke_detector_determinism_and_schema():
+    bg = _make_realistic_minimap(304, 320)
+    fr = bg.copy()
+    _draw_dome_smoke(fr, int(0.50 * 320), int(0.50 * 304), 9, (74, 76, 78), alpha=0.75)
+
+    r1 = smokes.detect_smokes(fr, bg, require_minimap=True)
+    r2 = smokes.detect_smokes(fr, bg, require_minimap=True)
+    assert r1 == r2
+    assert len(r1) == 1
+    expected_keys = {"kind", "subkind", "x", "y", "r", "zone", "area", "team", "conf"}
+    for item in r1:
+        assert set(item.keys()) == expected_keys
+        assert item["kind"] == "smoke"
+        assert item["subkind"] == "dome"
+        assert item["team"] is None
+        assert 0.0 <= item["x"] <= 1.0
+        assert 0.0 <= item["y"] <= 1.0
+        assert 0.0 < item["r"] < 0.2
+        assert 0.0 <= item["conf"] <= 1.0
+
+
+def test_smoke_detector_rejects_synthetic_non_smoke_shapes():
+    bg = _make_realistic_minimap(304, 320)
+    fr = bg.copy()
+    # Small saturated ability icon (r=5) + thin 3px dark line + bright square
+    cv2.circle(fr, (int(0.50 * 320), int(0.50 * 304)), 5, (30, 180, 230), -1)
+    cv2.line(fr, (int(0.22 * 320), int(0.49 * 304)), (int(0.32 * 320), int(0.49 * 304)), (70, 70, 70), 3)
+    cv2.rectangle(fr, (int(0.70 * 320), int(0.46 * 304)), (int(0.76 * 320), int(0.52 * 304)), (220, 220, 220), -1)
+    assert smokes.detect_smokes(fr, bg, require_minimap=True) == []
+
+
+def test_detect_smokes_fallback_when_model_unavailable(monkeypatch):
+    from vreplay import smoke_detector as SD
+
+    monkeypatch.setattr(SD, "load_model", lambda path=None: None)
+    bg = _make_realistic_minimap(304, 320)
+    fr = bg.copy()
+    _draw_dome_smoke(fr, int(0.50 * 320), int(0.50 * 304), 9, (74, 76, 78), alpha=0.75)
+
+    res_bg = smokes.detect_smokes(fr, bg, require_minimap=True)
+    res_static = smokes.detect_smokes(fr, fr.copy(), require_minimap=True)
+    assert len(res_bg) == 1
+    assert len(res_static) == 1

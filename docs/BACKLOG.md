@@ -20,6 +20,7 @@
 | ID | 状態 | タイトル | 指示書 | 主な対象ファイル | 完了条件 / 確認方法 |
 |---|---|---|---|---|---|
 | `smoke-detection` | `TODO` | ミニマップからのスモーク位置検知と初動分類への連携 | [smoke-detection.md](tasks/smoke-detection.md) | `vreplay/smokes.py`, `vreplay/tactics.py`, `tests/test_smokes.py` | `pytest tests/test_smokes.py tests/test_opening_playbook.py tests/test_tactics.py` が通り、PR 作成済み |
+| `smoke-detection-accuracy` | `IN_PROGRESS` | 定半径（`R≈9.0px@H=304`）ドームスモーク検知器とクリーンミニマップ構造事前知識による高精度化 | [smoke-detection-accuracy.md](tasks/smoke-detection-accuracy.md) | `vreplay/smoke_detector.py`, `vreplay/data/smoke_model.npz`, `tools/train_smoke_detector.py`, `vreplay/smokes.py`, `tests/test_smokes.py` | 7-fold LOMO-CV・ブラインド評価・オフライン `pytest` を満たすこと |
 
 ---
 
