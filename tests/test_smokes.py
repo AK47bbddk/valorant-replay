@@ -316,3 +316,55 @@ def test_detect_smokes_fallback_when_model_unavailable(monkeypatch):
     res_static = smokes.detect_smokes(fr, fr.copy(), require_minimap=True)
     assert len(res_bg) == 1
     assert len(res_static) == 1
+
+
+def test_detect_smokes_rejects_non_finite_radius_overrides():
+    fr = np.full((304, 320, 3), 128, dtype=np.uint8)
+    for bad in (float("nan"), float("inf"), float("-inf"), True):
+        assert smokes.detect_smokes(fr, fr, min_radius_px=bad) == []
+        assert smokes.detect_smokes(fr, fr, max_radius_px=bad) == []
+
+
+def test_detect_smokes_rejects_degenerate_aspect_ratio_fast():
+    import time
+    from vreplay import smoke_detector as SD
+
+    flat = np.full((2, 304, 3), 128, dtype=np.uint8)
+    mask = np.ones((2, 304), dtype=bool)
+
+    t0 = time.perf_counter()
+    assert SD.detect_smokes_learned(flat, None, mask) == []
+    assert smokes.detect_smokes(flat, None, mask=mask) == []
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    assert elapsed_ms < 50.0
+
+
+def test_detect_smokes_rejects_r6_colored_ability_dots():
+    bg = _make_realistic_minimap(304, 320)
+    for col in ((30, 40, 220), (170, 95, 120), (80, 165, 65), (40, 140, 220), (60, 60, 80)):
+        fr = bg.copy()
+        cv2.circle(fr, (160, 152), 6, col, -1, cv2.LINE_AA)
+        assert smokes.detect_smokes(fr, bg, require_minimap=True) == [], col
+
+
+def test_detect_smokes_rejects_rectangular_dark_boxes():
+    bg = _make_realistic_minimap(304, 320)
+    for rw, rh, g in ((18, 18, 90), (30, 18, 75)):
+        fr = bg.copy()
+        x0, y0 = 160 - rw // 2, 152 - rh // 2
+        cv2.rectangle(fr, (x0, y0), (x0 + rw, y0 + rh), (g, g, g), -1)
+        assert smokes.detect_smokes(fr, bg, require_minimap=True) == []
+        assert smokes.detect_smokes(fr, None, require_minimap=True) == []
+        assert smokes.detect_smokes(fr, fr.copy(), require_minimap=True) == []
+
+
+def test_detect_smokes_rejects_non_uint8_inputs():
+    from vreplay import smoke_detector as SD
+
+    bg = _make_realistic_minimap(304, 320)
+    fr_f32 = bg.astype(np.float32)
+    mask = np.ones((304, 320), dtype=bool)
+    assert smokes.detect_smokes(fr_f32, bg, require_minimap=True) == []
+    assert smokes.detect_smokes(bg, fr_f32, require_minimap=True) == []
+    assert SD.detect_smokes_learned(fr_f32, None, mask) == []
+

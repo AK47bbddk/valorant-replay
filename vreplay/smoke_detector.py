@@ -30,7 +30,6 @@ MAX_STAGE1_CANDS: int = 350
 TOP_REFINE_PEAKS: int = 25
 TOP_CNN_CANDS: int = 20
 NMS_MIN_SEP_PX: float = 11.5
-BG_DIFF_VALID_MEAN: float = 1.0
 
 MODEL_PATH: Path = Path(__file__).resolve().parent / "data" / "smoke_model.npz"
 
@@ -146,11 +145,31 @@ def _prep_canonical(
     frame_bgr: np.ndarray,
     bg_bgr: np.ndarray | None,
     floor_mask: np.ndarray,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     """Resize inputs to canonical H=304 and precompute padded feature maps."""
+    if (
+        frame_bgr is None
+        or not isinstance(frame_bgr, np.ndarray)
+        or frame_bgr.size == 0
+        or frame_bgr.ndim != 3
+        or frame_bgr.shape[2] < 3
+        or frame_bgr.dtype != np.uint8
+    ):
+        return None
     h, w = frame_bgr.shape[:2]
+    if h < 16 or w < 16 or max(w / float(h), h / float(w)) > 4.0:
+        return None
+    if (
+        floor_mask is None
+        or not isinstance(floor_mask, np.ndarray)
+        or floor_mask.ndim != 2
+        or floor_mask.shape != (h, w)
+    ):
+        return None
     scale = H_CANON / float(max(1, h))
     w_c = max(1, int(round(w * scale)))
+    if w_c > 1024:
+        return None
     interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
 
     fr_c = cv2.resize(frame_bgr[:, :, :3], (w_c, H_CANON), interpolation=interp)
@@ -158,7 +177,14 @@ def _prep_canonical(
 
     has_bg = False
     bg_c: np.ndarray | None = None
-    if bg_bgr is not None and bg_bgr.shape[:2] == (h, w) and bg_bgr.shape[2] >= 3:
+    if (
+        bg_bgr is not None
+        and isinstance(bg_bgr, np.ndarray)
+        and bg_bgr.ndim == 3
+        and bg_bgr.dtype == np.uint8
+        and bg_bgr.shape[:2] == (h, w)
+        and bg_bgr.shape[2] >= 3
+    ):
         bg_tmp = cv2.resize(bg_bgr[:, :, :3], (w_c, H_CANON), interpolation=interp)
         diff_tmp = cv2.absdiff(fr_c, bg_tmp)
         if int(np.count_nonzero(np.max(diff_tmp, axis=2) >= 12)) >= 40:
@@ -568,41 +594,74 @@ def load_model(path: str | Path | None = None) -> dict[str, Any] | None:
         return None
     try:
         with np.load(str(p), allow_pickle=False) as z:
-            def _load_mlp(prefix: str) -> dict[str, Any]:
+            def _load_mlp(prefix: str, expected_in_dim: int) -> dict[str, Any]:
                 n_m = int(z[f"{prefix}_n"])
                 mean = z[f"{prefix}_mean"].astype(np.float32)
                 std = np.maximum(1e-5, z[f"{prefix}_std"].astype(np.float32))
+                if mean.ndim != 1 or mean.shape[0] != expected_in_dim or std.shape != (expected_in_dim,):
+                    raise ValueError(f"Invalid {prefix} scaler shape")
                 w1s, b1s, w2s, b2s = [], [], [], []
                 for i in range(n_m):
-                    w1s.append(z[f"{prefix}_w1_{i}"].astype(np.float32))
-                    b1s.append(z[f"{prefix}_b1_{i}"].astype(np.float32))
-                    w2s.append(z[f"{prefix}_w2_{i}"].astype(np.float32))
-                    b2s.append(z[f"{prefix}_b2_{i}"].astype(np.float32))
+                    w1 = z[f"{prefix}_w1_{i}"].astype(np.float32)
+                    b1 = z[f"{prefix}_b1_{i}"].astype(np.float32)
+                    w2 = z[f"{prefix}_w2_{i}"].astype(np.float32)
+                    b2 = z[f"{prefix}_b2_{i}"].astype(np.float32)
+                    if (
+                        w1.ndim != 2
+                        or w1.shape[0] != expected_in_dim
+                        or b1.shape != (w1.shape[1],)
+                        or w2.shape != (w1.shape[1], 1)
+                        or b2.shape != (1,)
+                    ):
+                        raise ValueError(f"Invalid {prefix} MLP weight shape")
+                    w1s.append(w1)
+                    b1s.append(b1)
+                    w2s.append(w2)
+                    b2s.append(b2)
                 return {"mean": mean, "std": std, "w1s": w1s, "b1s": b1s, "w2s": w2s, "b2s": b2s}
 
-            def _load_cnn(prefix: str) -> list[dict[str, np.ndarray]]:
+            def _load_cnn(prefix: str, expected_in_ch: int) -> list[dict[str, np.ndarray]]:
                 n_m = int(z[f"{prefix}_n"])
                 out = []
                 for i in range(n_m):
+                    c1w = z[f"{prefix}_c1w_{i}"].astype(np.float32)
+                    c1b = z[f"{prefix}_c1b_{i}"].astype(np.float32)
+                    c2w = z[f"{prefix}_c2w_{i}"].astype(np.float32)
+                    c2b = z[f"{prefix}_c2b_{i}"].astype(np.float32)
+                    c3w = z[f"{prefix}_c3w_{i}"].astype(np.float32)
+                    c3b = z[f"{prefix}_c3b_{i}"].astype(np.float32)
+                    fcw = z[f"{prefix}_fcw_{i}"].astype(np.float32)
+                    fcb = z[f"{prefix}_fcb_{i}"].astype(np.float32)
+                    if (
+                        c1w.ndim != 4
+                        or c1w.shape[1] != expected_in_ch
+                        or c2w.ndim != 4
+                        or c2w.shape[1] != c1w.shape[0]
+                        or c3w.ndim != 4
+                        or c3w.shape[1] != c2w.shape[0]
+                        or fcw.shape != (2 * c3w.shape[0], 1)
+                        or fcb.shape != (1,)
+                    ):
+                        raise ValueError(f"Invalid {prefix} CNN weight shape")
                     out.append(
                         {
-                            "c1w": z[f"{prefix}_c1w_{i}"].astype(np.float32),
-                            "c1b": z[f"{prefix}_c1b_{i}"].astype(np.float32),
-                            "c2w": z[f"{prefix}_c2w_{i}"].astype(np.float32),
-                            "c2b": z[f"{prefix}_c2b_{i}"].astype(np.float32),
-                            "c3w": z[f"{prefix}_c3w_{i}"].astype(np.float32),
-                            "c3b": z[f"{prefix}_c3b_{i}"].astype(np.float32),
-                            "fcw": z[f"{prefix}_fcw_{i}"].astype(np.float32),
-                            "fcb": z[f"{prefix}_fcb_{i}"].astype(np.float32),
+                            "c1w": c1w,
+                            "c1b": c1b,
+                            "c2w": c2w,
+                            "c2b": c2b,
+                            "c3w": c3w,
+                            "c3b": c3b,
+                            "fcw": fcw,
+                            "fcb": fcb,
                         }
                     )
                 return out
 
             model = {
-                "mlp_sf": _load_mlp("mlp_sf"),
-                "mlp_bg": _load_mlp("mlp_bg"),
-                "cnn_sf": _load_cnn("cnn_sf"),
-                "cnn_bg": _load_cnn("cnn_bg"),
+                "mlp_sf": _load_mlp("mlp_sf", 74),
+                "mlp_bg": _load_mlp("mlp_bg", 88),
+                "cnn_sf": _load_cnn("cnn_sf", 6),
+                "cnn_bg": _load_cnn("cnn_bg", 8),
                 "w_cnn_sf": float(z["w_cnn_sf"]),
                 "thr_sf": float(z["thr_sf"]),
                 "w_2a_bg": float(z["w_2a_bg"]),
@@ -681,6 +740,66 @@ def _interior_gray_std_canon(gray_c: np.ndarray, cx: float, cy: float, rad: floa
     return float(gray_c[y0:y1, x0:x1][disc].std())
 
 
+def _is_rectangular_dark_blob_canon(maps: dict[str, Any], cx: float, cy: float) -> bool:
+    """Reject solid rectangular dark boxes/rooms via local bounding-box fill ratio.
+
+    A circular dome has area / (w*h) ≈ pi/4 ≈ 0.785 (real smokes and overlapping
+    double domes stay <= 0.85), whereas an axis-aligned or rotated dark rectangle
+    fills >= 0.90 of its minimum-area enclosing rectangle.
+    """
+    gray = maps["gray"]
+    bg_dgray = maps["bg_dgray"]
+    has_bg = bool(maps["has_bg"])
+    floor_med = float(maps["floor_med"])
+    h, w = gray.shape
+    ix, iy = int(round(cx)), int(round(cy))
+    rad_box = 15
+    x0, x1 = max(0, ix - rad_box), min(w, ix + rad_box + 1)
+    y0, y1 = max(0, iy - rad_box), min(h, iy + rad_box + 1)
+    patch = gray[y0:y1, x0:x1]
+    ph, pw = patch.shape
+    if ph < 5 or pw < 5:
+        return False
+    pcx, pcy = cx - x0, cy - y0
+
+    yy, xx = np.mgrid[0:ph, 0:pw].astype(np.float32)
+    rr = np.hypot(xx - pcx, yy - pcy)
+    in_mask = rr <= 6.0
+    out_mask = (rr >= 12.0) & (rr <= 15.0)
+    if has_bg and bg_dgray is not None:
+        dp = bg_dgray[y0:y1, x0:x1]
+        in_d = float(dp[in_mask].mean()) if in_mask.any() else 0.0
+        blob = (dp >= max(10.0, 0.45 * in_d)).astype(np.uint8)
+    else:
+        in_m = float(patch[in_mask].mean()) if in_mask.any() else floor_med
+        out_m = float(patch[out_mask].mean()) if out_mask.any() else floor_med
+        mid_thr = 0.5 * (in_m + max(out_m, floor_med))
+        blob = (patch <= mid_thr).astype(np.uint8)
+
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(blob, connectivity=8)
+    ciy, cix = int(round(pcy)), int(round(pcx))
+    if not (0 <= ciy < ph and 0 <= cix < pw and labels[ciy, cix] > 0):
+        return False
+    lbl = int(labels[ciy, cix])
+    area = float(stats[lbl, cv2.CC_STAT_AREA])
+    if area < 120.0:
+        return False
+    bw = float(stats[lbl, cv2.CC_STAT_WIDTH])
+    bh = float(stats[lbl, cv2.CC_STAT_HEIGHT])
+    rfill = area / max(1.0, bw * bh)
+    if rfill >= 0.90:
+        return True
+    comp = (labels == lbl).astype(np.uint8)
+    cnts, _ = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if cnts:
+        cnt = max(cnts, key=cv2.contourArea)
+        _, (rw, rh), _ = cv2.minAreaRect(cnt)
+        mrfill = area / max(1.0, (rw + 1.0) * (rh + 1.0))
+        if mrfill >= 0.90:
+            return True
+    return False
+
+
 def detect_smokes_learned(
     frame_bgr: np.ndarray,
     bg_bgr: np.ndarray | None,
@@ -694,11 +813,33 @@ def detect_smokes_learned(
     Returns list of ``(cx_orig, cy_orig, rad_orig, conf)`` tuples in original
     image pixel coordinates.
     """
+    if (
+        frame_bgr is None
+        or not isinstance(frame_bgr, np.ndarray)
+        or frame_bgr.size == 0
+        or frame_bgr.ndim != 3
+        or frame_bgr.shape[2] < 3
+        or frame_bgr.dtype != np.uint8
+    ):
+        return []
+    h_in, w_in = frame_bgr.shape[:2]
+    if h_in < 16 or w_in < 16 or max(w_in / float(h_in), h_in / float(w_in)) > 4.0:
+        return []
+    if (
+        floor_mask is None
+        or not isinstance(floor_mask, np.ndarray)
+        or floor_mask.ndim != 2
+        or floor_mask.shape != (h_in, w_in)
+    ):
+        return []
+
     mdl = model if model is not None else load_model()
     if mdl is None:
         return []
 
     maps = _prep_canonical(frame_bgr, bg_bgr, floor_mask)
+    if maps is None:
+        return []
     has_bg = bool(maps["has_bg"])
     h_c, w_c = maps["h_c"], maps["w_c"]
     h_orig, w_orig = maps["h_orig"], maps["w_orig"]
@@ -822,7 +963,13 @@ def detect_smokes_learned(
     agents_c = [
         (float(a["x"]) * w_c, float(a["y"]) * h_c)
         for a in (found_agents or [])
-        if isinstance(a, dict) and "x" in a and "y" in a
+        if isinstance(a, dict)
+        and isinstance(a.get("x"), (int, float, np.integer, np.floating))
+        and isinstance(a.get("y"), (int, float, np.integer, np.floating))
+        and not isinstance(a.get("x"), bool)
+        and not isinstance(a.get("y"), bool)
+        and math.isfinite(float(a["x"]))
+        and math.isfinite(float(a["y"]))
     ]
 
     scale_inv_x = float(w_orig) / float(max(1, w_c))
@@ -834,6 +981,9 @@ def detect_smokes_learned(
         cx_c = float(pass_coords[idx, 0])
         cy_c = float(pass_coords[idx, 1])
         prob = float(pass_probs[idx])
+
+        if _is_rectangular_dark_blob_canon(maps, cx_c, cy_c):
+            continue
 
         if agents_c and prob < 0.85:
             min_d = min(math.hypot(cx_c - ax, cy_c - ay) for ax, ay in agents_c)

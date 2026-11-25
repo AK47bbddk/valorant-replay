@@ -138,22 +138,40 @@ def detect_smokes(
     """
     if frame_bgr is None or not isinstance(frame_bgr, np.ndarray) or frame_bgr.size == 0:
         return []
-    if frame_bgr.ndim != 3 or frame_bgr.shape[2] < 3:
+    if frame_bgr.ndim != 3 or frame_bgr.shape[2] < 3 or frame_bgr.dtype != np.uint8:
         return []
     if bg_bgr is None and mask is None and not require_minimap:
         return []
     if bg_bgr is not None:
-        if not isinstance(bg_bgr, np.ndarray) or bg_bgr.size == 0 or bg_bgr.ndim != 3:
+        if (
+            not isinstance(bg_bgr, np.ndarray)
+            or bg_bgr.size == 0
+            or bg_bgr.ndim != 3
+            or bg_bgr.dtype != np.uint8
+        ):
             return []
         if bg_bgr.shape[:2] != frame_bgr.shape[:2] or bg_bgr.shape[2] < 3:
             return []
 
     h, w = frame_bgr.shape[:2]
+    if h < 16 or w < 16 or max(w / float(h), h / float(w)) > 4.0:
+        return []
     if mask is not None and (not isinstance(mask, np.ndarray) or mask.ndim != 2 or mask.shape != (h, w)):
         return []
-    eff_min_r = int(min_radius_px) if min_radius_px is not None else max(4, int(round(0.018 * h)))
-    eff_max_r = int(max_radius_px) if max_radius_px is not None else max(12, int(round(0.13 * h)))
-    if eff_min_r <= 0 or eff_max_r < eff_min_r:
+
+    def _parse_radius(val: Any, default: int) -> int | None:
+        if val is None:
+            return default
+        if isinstance(val, bool) or not isinstance(val, (int, float, np.integer, np.floating)):
+            return None
+        fval = float(val)
+        if not math.isfinite(fval):
+            return None
+        return int(fval)
+
+    eff_min_r = _parse_radius(min_radius_px, max(4, int(round(0.018 * h))))
+    eff_max_r = _parse_radius(max_radius_px, max(12, int(round(0.13 * h))))
+    if eff_min_r is None or eff_max_r is None or eff_min_r <= 0 or eff_max_r < eff_min_r:
         return []
 
     floor_mask: np.ndarray | None = None
@@ -203,7 +221,13 @@ def detect_smokes(
     agents_px = [
         (float(a["x"]) * w, float(a["y"]) * h)
         for a in (found_agents or [])
-        if isinstance(a, dict) and "x" in a and "y" in a
+        if isinstance(a, dict)
+        and isinstance(a.get("x"), (int, float, np.integer, np.floating))
+        and isinstance(a.get("y"), (int, float, np.integer, np.floating))
+        and not isinstance(a.get("x"), bool)
+        and not isinstance(a.get("y"), bool)
+        and math.isfinite(float(a["x"]))
+        and math.isfinite(float(a["y"]))
     ]
 
     def _near_agent(px: float, py: float, rad: float | None = None, g_std: float | None = None) -> bool:
@@ -263,7 +287,7 @@ def detect_smokes(
                 diff_bin = cv2.morphologyEx(diff_bin, cv2.MORPH_OPEN, k_open)
                 diff_bin = cv2.morphologyEx(diff_bin, cv2.MORPH_CLOSE, k_close)
                 contours, _ = cv2.findContours(diff_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                c_min_r = max(4.0, 0.022 * h)
+                c_min_r = max(6.0, 0.026 * h)
                 c_max_r = max(10.0, 0.042 * h)
                 for cnt in contours:
                     area = float(cv2.contourArea(cnt))
