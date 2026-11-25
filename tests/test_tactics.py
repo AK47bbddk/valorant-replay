@@ -339,3 +339,199 @@ def test_color_by_round_uses_positions_even_if_alive_votes_mislead():
     alive = lambda t: (5, 2)                     # 生存人数はいつも「暖色＝チーム1」を指す（誤った手がかり）
     w, mode, msg = tactics.color_by_round(sm, placed, starts, alive, side1)
     assert mode == "side" and w[1] and not w[13] and "スポーン寄り" in msg
+
+
+def _synthetic_minimap(h: int = 304, w: int = 320, bg_col=(20, 90, 180), wall_col=(40, 120, 210)):
+    img = np.full((h, w, 3), 5, dtype=np.uint8)
+    img[:int(0.2 * h), :int(0.2 * w)] = bg_col
+    img[int(0.8 * h):, int(0.8 * w):] = bg_col
+    fl = np.zeros((h, w), np.uint8)
+    cv2.rectangle(fl, (int(0.18 * w), int(0.16 * h)), (int(0.34 * w), int(0.84 * h)), 1, -1)
+    cv2.rectangle(fl, (int(0.66 * w), int(0.16 * h)), (int(0.82 * w), int(0.84 * h)), 1, -1)
+    cv2.rectangle(fl, (int(0.18 * w), int(0.44 * h)), (int(0.82 * w), int(0.56 * h)), 1, -1)
+    cv2.rectangle(fl, (int(0.30 * w), int(0.24 * h)), (int(0.70 * w), int(0.34 * h)), 1, -1)
+    cv2.rectangle(fl, (int(0.44 * w), int(0.14 * h)), (int(0.56 * w), int(0.86 * h)), 1, -1)
+    wall_hole = np.zeros((h, w), np.uint8)
+    cv2.rectangle(wall_hole, (int(0.36 * w), int(0.36 * h)), (int(0.43 * w), int(0.43 * h)), 1, -1)
+    cv2.rectangle(wall_hole, (int(0.57 * w), int(0.36 * h)), (int(0.64 * w), int(0.43 * h)), 1, -1)
+    cv2.rectangle(wall_hole, (int(0.36 * w), int(0.58 * h)), (int(0.43 * w), int(0.76 * h)), 1, -1)
+    cv2.rectangle(wall_hole, (int(0.57 * w), int(0.58 * h)), (int(0.64 * w), int(0.76 * h)), 1, -1)
+    fl[wall_hole > 0] = 0
+    img[wall_hole > 0] = wall_col
+    img[fl > 0] = (128, 128, 128)
+    cv2.rectangle(img, (int(0.19 * w), int(0.24 * h)), (int(0.29 * w), int(0.36 * h)), (95, 145, 150), -1)
+    cv2.rectangle(img, (int(0.71 * w), int(0.24 * h)), (int(0.81 * w), int(0.36 * h)), (95, 145, 150), -1)
+    edge = (fl - cv2.erode(fl, np.ones((3, 3), np.uint8))) > 0
+    img[edge] = (235, 235, 235)
+    return img
+
+
+def test_detect_dots_filters_outside_map_before_truncation_and_rejects_sightlines():
+    img = _synthetic_minimap(304, 320, bg_col=(20, 40, 120), wall_col=(40, 80, 140))
+    # マップ外（左上）と壁穴内部に、真の選手より巨大な赤・水色ブロックを置く
+    cv2.circle(img, (25, 25), 14, (0, 0, 255), -1)
+    cv2.circle(img, (int(0.39 * 320), int(0.66 * 304)), 10, (230, 200, 0), -1)
+    # 床上に細長い観戦視線・バリア線（赤・水色）を引く
+    cv2.line(img, (int(0.22 * 320), int(0.50 * 304)), (int(0.48 * 320), int(0.50 * 304)), (0, 0, 255), 2)
+    cv2.line(img, (int(0.52 * 320), int(0.29 * 304)), (int(0.68 * 320), int(0.29 * 304)), (230, 200, 0), 2)
+    # 左上 HUD 隅のテキスト
+    cv2.putText(img, "R2 1:29", (4, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+    # 真の床上アイコン（各色 1 つずつ、面積はマップ外より小さい）
+    cv2.circle(img, (int(0.74 * 320), int(0.50 * 304)), 6, (0, 0, 255), -1)
+    cv2.circle(img, (int(0.26 * 320), int(0.70 * 304)), 6, (230, 200, 0), -1)
+
+    dots = tactics.detect_dots(img, per_color=1, require_minimap=True)
+    assert len(dots) == 2
+    warm = [d for d in dots if d["color"] == "warm"]
+    cool = [d for d in dots if d["color"] == "cool"]
+    assert len(warm) == 1 and abs(warm[0]["x"] - 0.74) < 0.04 and abs(warm[0]["y"] - 0.50) < 0.04
+    assert len(cool) == 1 and abs(cool[0]["x"] - 0.26) < 0.04 and abs(cool[0]["y"] - 0.70) < 0.04
+
+
+def test_detect_dots_rejects_no_minimap_frame():
+    blank = np.zeros((240, 240, 3), np.uint8)
+    cv2.circle(blank, (60, 60), 6, (0, 0, 255), -1)
+    assert tactics.detect_dots(blank, require_minimap=True) == []
+    # 従来の合成テスト（require_minimap=False, mask=None）はそのまま動く
+    assert len(tactics.detect_dots(blank)) == 1
+
+
+def test_analyze_video_skips_non_minimap_cutaway_and_passes_mask_to_smokes(tmp_path, monkeypatch):
+    from pathlib import Path
+    from vreplay import smokes as SM
+
+    monkeypatch.setattr(tactics, "load_map", lambda name, cfg, log=None: _meta())
+    monkeypatch.setattr(tactics, "map_art", lambda cfg, name: None)
+
+    base = _synthetic_minimap(304, 320)
+    frames = []
+    ts = []
+    # t=1 (1:40 mark) にはミニマップ＋床上スモーク、t=10 (1:30) には非ミニマップのカットアウェイ画面（偽の赤い点）
+    for i, t in enumerate((1.0, 5.0, 10.0, 15.0, 20.0)):
+        if t == 10.0:
+            im = np.full((304, 320, 3), 20, np.uint8)
+            cv2.circle(im, (40, 40), 7, (0, 0, 255), -1)  # 非ミニマップ画面の偽点
+        else:
+            im = base.copy()
+            cv2.circle(im, (int(0.50 * 320), int(0.50 * 304)), 6, (0, 0, 255), -1)
+            if t == 1.0:
+                overlay = im.copy()
+                cv2.circle(overlay, (int(0.74 * 320), int(0.50 * 304)), 9, (70, 72, 74), -1)
+                cv2.addWeighted(overlay, 0.7, im, 0.3, 0.0, dst=im)
+        frames.append(im)
+        ts.append(t)
+
+    seen_kwargs = []
+    orig_detect_smokes = SM.detect_smokes
+
+    def spy_detect_smokes(*args, **kwargs):
+        seen_kwargs.append(kwargs)
+        return orig_detect_smokes(*args, **kwargs)
+
+    monkeypatch.setattr(SM, "detect_smokes", spy_detect_smokes)
+
+    class Store:
+        def get(self, idx, name):
+            return frames[idx]
+
+    cfg = _cfg(tmp_path)
+    cfg["tactics"]["icon_frac"] = 0.048
+    obs = {"t": ts, "idx": list(range(len(ts)))}
+    rounds = [{"n": 1, "start": 0.0, "end": 30.0, "side1": "攻撃"}]
+    tac = tactics.analyze_video(cfg, Path(tmp_path / "v.mp4"), "Test", rounds, log=lambda *a: None, store=Store(), obs=obs)
+    assert tac is not None
+    # 非ミニマップフレーム (t=10.0) の偽点は除外されていること
+    assert all(abs(p[1] - 10.0) > 0.1 for p in tac["positions"])
+    # SM.detect_smokes に mask と icon_frac が渡されていること
+    assert seen_kwargs and all(kw.get("mask") is not None and kw.get("icon_frac") == 0.048 for kw in seen_kwargs)
+    assert tac["rounds"]["1"]["smokes"].get("1:40")
+    assert tac["rounds"]["1"]["smokes"].get("1:30") == []
+
+
+def test_detect_dots_rejects_bad_masks_purple_bleed_and_handles_diagonal_and_attached_sightlines():
+    # 1) 3D・サイズ不一致マスクは require_minimap の有無に関わらず []
+    img = _synthetic_minimap(304, 320)
+    cv2.circle(img, (int(0.50 * 320), int(0.50 * 304)), 6, (0, 0, 255), -1)
+    assert tactics.detect_dots(img, mask=np.ones((304, 320, 3), bool)) == []
+    assert tactics.detect_dots(img, mask=np.ones((120, 120), bool)) == []
+    assert tactics.detect_dots(img, mask=np.ones((304, 320, 3), bool), require_minimap=True) == []
+    assert tactics.detect_dots(img, mask=np.ones((120, 120), bool), require_minimap=True) == []
+
+    # 2) 320x304 紫背景＋左上巨大赤ブロックでもマップ外を拾わず床上ドットを返す
+    im_p = _synthetic_minimap(304, 320, bg_col=(180, 50, 160), wall_col=(180, 50, 160))
+    cv2.putText(im_p, "R2 1:29", (4, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (230, 230, 230), 2)
+    cv2.circle(im_p, (int(0.08 * 320), int(0.08 * 304)), 14, (0, 0, 255), -1)
+    cv2.circle(im_p, (int(0.17 * 320), int(0.50 * 304)), 5, (0, 0, 255), -1)
+    cv2.circle(im_p, (int(0.16 * 320), int(0.70 * 304)), 5, (230, 200, 0), -1)
+    dots_p = tactics.detect_dots(im_p, per_color=1, require_minimap=True)
+    assert len(dots_p) == 2 and all(d["x"] > 0.12 for d in dots_p)
+
+    # 3) 45°斜め視線（外接矩形は正方形寄り）を除外しつつ真のアイコンを残す
+    im_diag = _synthetic_minimap(170, 180, bg_col=(30, 110, 225), wall_col=(30, 110, 225))
+    cv2.line(im_diag, (int(0.50 * 180), int(0.25 * 170)), (int(0.72 * 180), int(0.47 * 170)), (0, 0, 255), 2)
+    cv2.circle(im_diag, (int(0.26 * 180), int(0.50 * 170)), 5, (0, 0, 255), -1)
+    dots_diag = tactics.detect_dots(im_diag, per_color=1, require_minimap=True)
+    assert len(dots_diag) == 1 and abs(dots_diag[0]["x"] - 0.26) < 0.05
+
+    # 4) 長い視線がくっついた真の選手アイコンを選択的 MORPH_OPEN で救済
+    im_att = _synthetic_minimap(304, 320)
+    cv2.circle(im_att, (int(0.74 * 320), int(0.50 * 304)), 6, (0, 0, 255), -1)
+    cv2.line(im_att, (int(0.74 * 320), int(0.50 * 304)), (int(0.74 * 320) - 45, int(0.50 * 304)), (0, 0, 255), 2)
+    dots_att = tactics.detect_dots(im_att, per_color=1, require_minimap=True)
+    assert len(dots_att) == 1 and abs(dots_att[0]["x"] - 0.74) < 0.05
+
+
+def test_analyze_video_cutaway_streams_all_majority_and_mark_fallback(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.setattr(tactics, "load_map", lambda name, cfg, log=None: _meta())
+    monkeypatch.setattr(tactics, "map_art", lambda cfg, name: None)
+
+    fx = Path(__file__).parent / "fixtures"
+    cut = cv2.resize(cv2.imread(str(fx / "panels_cn.jpg")), (320, 304))
+    cv2.circle(cut, (40, 40), 7, (0, 0, 255), -1)
+
+    base = _synthetic_minimap(304, 320)
+    mm_dot = base.copy()
+    cv2.circle(mm_dot, (int(0.50 * 320), int(0.50 * 304)), 6, (0, 0, 255), -1)
+    mm_sm = mm_dot.copy()
+    ov = mm_sm.copy()
+    cv2.circle(ov, (int(0.74 * 320), int(0.50 * 304)), 9, (70, 72, 74), -1)
+    cv2.addWeighted(ov, 0.75, mm_sm, 0.25, 0.0, dst=mm_sm)
+
+    cfg = _cfg(tmp_path)
+    cfg["tactics"]["icon_frac"] = 0.048
+    ts = [float(i) for i in range(1, 30)]
+    rounds = [{"n": 1, "start": 0.0, "end": 32.0, "side1": "攻撃"}]
+
+    # Case 2: 節目ドンピシャ (t=10, 25) がカットアウェイでも、前後バッファからスモークを検出
+    fr2 = [cut.copy() if t in (10.0, 25.0) else mm_sm.copy() for t in ts]
+    tac2 = tactics.analyze_video(
+        cfg, Path(tmp_path / "v2.mp4"), "Test", rounds, log=lambda *a: None,
+        store=type("S2", (), {"get": lambda self, i, _n: fr2[i]})(),
+        obs={"t": ts, "idx": list(range(len(ts)))},
+    )
+    assert tac2 is not None
+    assert tac2["rounds"]["1"]["smokes"].get("1:30")
+    assert tac2["rounds"]["1"]["smokes"].get("1:15")
+
+    # Case 3: 全フレームがカットアウェイなら None を返す
+    fr3 = [cut.copy() for _ in ts]
+    tac3 = tactics.analyze_video(
+        cfg, Path(tmp_path / "v3.mp4"), "Test", rounds, log=lambda *a: None,
+        store=type("S3", (), {"get": lambda self, i, _n: fr3[i]})(),
+        obs={"t": ts, "idx": list(range(len(ts)))},
+    )
+    assert tac3 is None
+
+    # Case 4: カットアウェイ優勢 (20/29) でも有効ミニマップから背景再構築し、カットアウェイの偽点を除外
+    fr4 = [cut.copy() if i < 20 else mm_dot.copy() for i in range(len(ts))]
+    tac4 = tactics.analyze_video(
+        cfg, Path(tmp_path / "v4.mp4"), "Test", rounds, log=lambda *a: None,
+        store=type("S4", (), {"get": lambda self, i, _n: fr4[i]})(),
+        obs={"t": ts, "idx": list(range(len(ts)))},
+    )
+    assert tac4 is not None and tac4["positions"]
+    assert all(p[1] > 20.0 for p in tac4["positions"])
+
+

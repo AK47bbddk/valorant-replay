@@ -107,3 +107,150 @@ def test_detect_smokes_resolves_zone_and_opening_playbook_compat():
     assert len(rec["smokes"]) == 1
     assert rec["smokes"][0]["mark"] == "1:30"
     assert rec["smokes"][0]["area"] == "A Main"
+
+
+def _make_realistic_minimap(h: int = 304, w: int = 320, bg_col=(20, 90, 180), wall_col=(40, 120, 210), hud: bool = False) -> np.ndarray:
+    img = np.full((h, w, 3), 5, dtype=np.uint8)
+    img[:int(0.2 * h), :int(0.2 * w)] = bg_col
+    img[int(0.8 * h):, int(0.8 * w):] = bg_col
+    fl = np.zeros((h, w), np.uint8)
+    cv2.rectangle(fl, (int(0.18 * w), int(0.16 * h)), (int(0.34 * w), int(0.84 * h)), 1, -1)
+    cv2.rectangle(fl, (int(0.66 * w), int(0.16 * h)), (int(0.82 * w), int(0.84 * h)), 1, -1)
+    cv2.rectangle(fl, (int(0.18 * w), int(0.44 * h)), (int(0.82 * w), int(0.56 * h)), 1, -1)
+    cv2.rectangle(fl, (int(0.30 * w), int(0.24 * h)), (int(0.70 * w), int(0.34 * h)), 1, -1)
+    cv2.rectangle(fl, (int(0.44 * w), int(0.14 * h)), (int(0.56 * w), int(0.86 * h)), 1, -1)
+    wall_hole = np.zeros((h, w), np.uint8)
+    cv2.rectangle(wall_hole, (int(0.36 * w), int(0.36 * h)), (int(0.43 * w), int(0.43 * h)), 1, -1)
+    cv2.rectangle(wall_hole, (int(0.57 * w), int(0.36 * h)), (int(0.64 * w), int(0.43 * h)), 1, -1)
+    cv2.rectangle(wall_hole, (int(0.36 * w), int(0.58 * h)), (int(0.43 * w), int(0.76 * h)), 1, -1)
+    cv2.rectangle(wall_hole, (int(0.57 * w), int(0.58 * h)), (int(0.64 * w), int(0.76 * h)), 1, -1)
+    fl[wall_hole > 0] = 0
+    img[wall_hole > 0] = wall_col
+    img[fl > 0] = (128, 128, 128)
+    cv2.rectangle(img, (int(0.19 * w), int(0.24 * h)), (int(0.29 * w), int(0.36 * h)), (95, 145, 150), -1)
+    cv2.rectangle(img, (int(0.71 * w), int(0.24 * h)), (int(0.81 * w), int(0.36 * h)), (95, 145, 150), -1)
+    edge = (fl - cv2.erode(fl, np.ones((3, 3), np.uint8))) > 0
+    img[edge] = (235, 235, 235)
+    if hud:
+        cv2.putText(img, "R2 1:29", (4, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (230, 230, 230), 2)
+    return img
+
+
+def test_detect_smokes_rejects_changing_wall_voids_and_3d_bleed():
+    # 3 フレームで壁穴・外縁の 3D 背景が大きく変化しても、床上スモークだけを検知する
+    f0 = _make_realistic_minimap(304, 320, bg_col=(20, 90, 190), wall_col=(30, 100, 200))
+    f1 = _make_realistic_minimap(304, 320, bg_col=(180, 120, 30), wall_col=(170, 110, 40))
+    f2 = _make_realistic_minimap(304, 320, bg_col=(120, 40, 160), wall_col=(90, 30, 140))
+    bg = np.median(np.stack([f0, f1, f2]), axis=0).astype(np.uint8)
+
+    frame = f1.copy()
+    # 壁穴内に円形の 3D 変化を仕込む（誤検知されないこと）
+    cv2.circle(frame, (int(0.39 * 320), int(0.66 * 304)), 9, (90, 90, 90), -1)
+    # 外縁にも偽円を置く
+    cv2.circle(frame, (28, 28), 10, (90, 90, 90), -1)
+    # 真の床上ドームスモーク（半透明ダーク）
+    sx, sy = int(0.50 * 320), int(0.50 * 304)
+    _draw_dome_smoke(frame, sx, sy, 8, (72, 74, 76), alpha=0.75)
+
+    res = smokes.detect_smokes(frame, bg, require_minimap=True)
+    assert len(res) == 1
+    assert abs(res[0]["x"] - 0.50) < 0.04 and abs(res[0]["y"] - 0.50) < 0.04
+
+
+def test_detect_smokes_multi_resolution_scale_invariance_and_hud_rejection():
+    for h, w in ((197, 208), (243, 256), (304, 320)):
+        bg = _make_realistic_minimap(h, w, hud=True)
+        frame = bg.copy()
+        # 左上 HUD 隅の変化は除外
+        cv2.putText(frame, "R3 1:15", (4, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (140, 140, 140), 2)
+        rad = max(5, int(round(0.028 * h)))  # 197px で ~6px（従来の min_radius_px=10 未満）
+        sx, sy = int(0.74 * w), int(0.50 * h)
+        _draw_dome_smoke(frame, sx, sy, rad, (70, 72, 74), alpha=0.75)
+
+        res = smokes.detect_smokes(frame, bg, require_minimap=True)
+        assert len(res) == 1, (h, w, res)
+        assert abs(res[0]["x"] - 0.74) < 0.04 and abs(res[0]["y"] - 0.50) < 0.04
+
+
+def test_detect_smokes_single_frame_and_static_median_dome():
+    bg_clean = _make_realistic_minimap(304, 320)
+    frame = bg_clean.copy()
+    _draw_dome_smoke(frame, int(0.50 * 320), int(0.50 * 304), 8, (74, 76, 78), alpha=0.75)
+
+    # 1) bg_bgr=None の単一フレームでも require_minimap=True なら検知できる
+    res_single = smokes.detect_smokes(frame, None, require_minimap=True)
+    assert len(res_single) == 1
+    assert abs(res_single[0]["x"] - 0.50) < 0.04 and abs(res_single[0]["y"] - 0.50) < 0.04
+
+    # 2) 5s クリップのようにスモークが bg_bgr に焼き込まれても検知できる
+    res_static = smokes.detect_smokes(frame, frame.copy(), require_minimap=True)
+    assert len(res_static) == 1
+    assert abs(res_static[0]["x"] - 0.50) < 0.04 and abs(res_static[0]["y"] - 0.50) < 0.04
+
+
+def test_detect_smokes_rejects_non_minimap_when_required():
+    from pathlib import Path
+    fx = Path(__file__).parent / "fixtures"
+    for bad_name in ("panels_cn.jpg", "killfeed_strip_ads.jpg"):
+        im = cv2.imread(str(fx / bad_name))
+        assert smokes.detect_smokes(im, im.copy(), require_minimap=True) == []
+    blank = np.zeros((240, 240, 3), dtype=np.uint8)
+    frame = blank.copy()
+    _draw_dome_smoke(frame, 120, 120, 14, (180, 120, 220), alpha=0.7)
+    assert smokes.detect_smokes(frame, blank, require_minimap=True) == []
+
+
+def test_detect_smokes_rejects_bad_masks_and_non_minimap_frame_with_valid_bg():
+    from pathlib import Path
+    fx = Path(__file__).parent / "fixtures"
+
+    bg = _make_realistic_minimap(304, 320)
+    fr = bg.copy()
+    _draw_dome_smoke(fr, 160, 152, 9, (74, 76, 78), alpha=0.75)
+
+    # 3D・サイズ不一致マスクは require_minimap の有無に関わらず []
+    assert smokes.detect_smokes(fr, bg, mask=np.ones((304, 320, 3), bool)) == []
+    assert smokes.detect_smokes(fr, bg, mask=np.ones((120, 120), bool)) == []
+    assert smokes.detect_smokes(fr, bg, mask=np.ones((304, 320, 3), bool), require_minimap=True) == []
+    assert smokes.detect_smokes(fr, bg, mask=np.ones((120, 120), bool), require_minimap=True) == []
+
+    # bg_bgr が有効なミニマップでも、frame_bgr が黒画面・UIパネル・高密度文字なら []
+    assert smokes.detect_smokes(np.zeros_like(bg), bg, require_minimap=True) == []
+    for bad_name in ("panels_cn.jpg", "killfeed_strip_mastercard.jpg"):
+        bad = cv2.resize(cv2.imread(str(fx / bad_name)), (320, 304))
+        assert smokes.detect_smokes(bad, bg, require_minimap=True) == [], bad_name
+    cut = np.full_like(bg, 20)
+    for y in range(20, 294, 18):
+        cv2.putText(cut, "VICTORY ROUND 12 VALORANT", (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (240, 240, 240), 1)
+    assert smokes.detect_smokes(cut, bg, require_minimap=True) == []
+
+
+def test_detect_smokes_colored_rimmed_domes_mild_darkening_and_max_radius_override():
+    bg = _make_realistic_minimap(304, 320)
+
+    # 1) Omen / Viper / Clove / Harbor cyan の 1px 明縁付きドームを検知し、テクスチャ付きアイコンは拒否
+    for col in ((170, 95, 120), (80, 165, 65), (165, 95, 195), (190, 155, 60)):
+        fr = bg.copy()
+        _draw_dome_smoke(fr, 160, 152, 10, col, alpha=0.80)
+        res = smokes.detect_smokes(fr, bg, require_minimap=True)
+        assert len(res) == 1, col
+
+    fr_icon = bg.copy()
+    _draw_player_dot(fr_icon, 160, 152, radius=9)
+    cv2.circle(fr_icon, (157, 150), 2, (20, 20, 20), -1)
+    assert smokes.detect_smokes(fr_icon, bg, require_minimap=True) == []
+
+    # 2) floor_med=128 上で diff=16 の半透明暗化スモークを 3 モードとも検知
+    fr16 = bg.copy()
+    cv2.circle(fr16, (160, 152), 9, (112, 112, 112), -1)
+    assert len(smokes.detect_smokes(fr16, bg, require_minimap=True)) == 1
+    assert len(smokes.detect_smokes(fr16, None, require_minimap=True)) == 1
+    assert len(smokes.detect_smokes(fr16, fr16.copy(), require_minimap=True)) == 1
+
+    # 3) 197x208 で max_radius_px=20 指定時に r=12 が上限クランプされないこと
+    bg_small = _make_realistic_minimap(197, 208)
+    fr_small = bg_small.copy()
+    cv2.circle(fr_small, (104, 98), 12, (76, 76, 76), -1)
+    assert len(smokes.detect_smokes(fr_small, bg_small, max_radius_px=20, require_minimap=True)) == 1
+
+

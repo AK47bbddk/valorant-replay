@@ -1,3 +1,4 @@
+import base64
 import json
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import numpy as np
 from vreplay import agents as AG
 from vreplay import tactival_barriers as BR
 from vreplay import minimap as MM
+from vreplay import tactics
 from vreplay import tactival as TV
 
 FX = Path(__file__).parent / "fixtures"
@@ -28,20 +30,24 @@ def test_opening_masks_sunset_fixture():
     bg = cv2.imread(str(FX / "minimap_sunset_riot.jpg"))
     mask = MM.map_mask(bg)
     m = json.loads((FX / "sunset_callouts.json").read_text("utf-8"))
-    calls = [
-        {
-            "name": n,
-            "super": s,
-            "x": m["xMultiplier"] * y + m["xScalarToAdd"],
-            "y": m["yMultiplier"] * x + m["yScalarToAdd"],
-        }
-        for n, s, x, y in m["callouts"]
-    ]
+    fix = tactics.CALLOUT_FIX["sunset"]
+    ov = tactics.CALLOUT_OVERRIDE["sunset"]
+    calls = []
+    for n, s, x, y in m["callouts"]:
+        nx = m["xMultiplier"] * y + m["xScalarToAdd"]
+        ny = m["yMultiplier"] * x + m["yScalarToAdd"]
+        nx, ny = (fix[0] * nx + fix[1] * ny + fix[2], fix[3] * nx + fix[4] * ny + fix[5])
+        label = f"{s} {n}" if s in tactics.SITE_SUPERS else n
+        if label in ov:
+            nx, ny = ov[label]
+        calls.append({"name": n, "super": s, "x": nx, "y": ny})
     spawns = {
         "攻撃": next((c["x"], c["y"]) for c in calls if c["name"].lower() == "spawn" and "attacker" in c["super"].lower()),
         "防衛": next((c["x"], c["y"]) for c in calls if c["name"].lower() == "spawn" and "defender" in c["super"].lower()),
     }
-    T = MM.fit_mask(mask, {"callouts": calls, "spawns": spawns}, bg=bg)
+    art_b64 = (FX / "sunset_displayicon.png.b64").read_text("ascii").strip()
+    art = cv2.imdecode(np.frombuffer(base64.b64decode(art_b64), np.uint8), cv2.IMREAD_UNCHANGED)
+    T = MM.register_art(bg, art[:, :, 3])
     assert T["ok"]
 
     dmaps = BR.opening_dist_maps(mask, T, {"spawns": spawns}, "Sunset")

@@ -161,36 +161,111 @@ def _mask(hsv, ranges):
 ICON_FRAC = 0.058          # ミニマップのアイコンの直径（切り抜きの高さに対する比）。1080p の放送で約 24px
 
 
+def _rot_metrics(comp_patch: np.ndarray, area: int) -> tuple[float, float]:
+    ys, xs = np.nonzero(comp_patch)
+    if len(xs) <= 1:
+        return 1.0, 1.0
+    pts = np.column_stack([xs, ys]).astype(np.float32)
+    _, (rw, rh), _ = cv2.minAreaRect(pts)
+    rw1, rh1 = float(rw) + 1.0, float(rh) + 1.0
+    r_asp = max(rw1, rh1) / max(1.0, min(rw1, rh1))
+    r_ext = float(area) / max(1.0, rw1 * rh1)
+    return r_asp, r_ext
+
+
 def detect_dots(img, min_area: int = 4, max_area: int = 450, per_color: int = 5,
-                icon_frac: float | None = None) -> list[dict]:
+                icon_frac: float | None = None, *, mask: np.ndarray | None = None,
+                require_minimap: bool = False, edge_tol_px: int | None = None) -> list[dict]:
     """選手のアイコン（チーム色の縁のついた丸い顔アイコン）を検出する。
 
     縁の色は試合画面の明るさでくすむので色の範囲は広めに取り、アイコン 1 つが縁の切れ目で何個にも割れないよう、
     アイコンの大きさに合わせて塊をつなげてから数える。重なった 2〜3 人は 1 つの大きな塊になるので、大きさから
-    人数（k）も見積もる。床から離れた点（試合画面の色）は呼び出し側で床の 2 値画像を使って捨てる。"""
-    if img is None or img.size == 0:
+    人数（k）も見積もる。``mask`` または ``require_minimap=True`` が指定されたときは、プレイ可能領域
+    （``dot_mask``）外の候補を上位 ``per_color`` の切り捨て前に除外する。"""
+    if img is None or not isinstance(img, np.ndarray) or img.size == 0 or img.ndim != 3 or img.shape[2] < 3:
         return []
     h, w = img.shape[:2]
+    if mask is not None and (not isinstance(mask, np.ndarray) or mask.ndim != 2 or mask.shape != (h, w)):
+        return []
+    dot_mask = None
+    if require_minimap:
+        from . import minimap as MM
+        ok, auto_mask = MM.detect_minimap_region(img, mask=mask)
+        if not ok or auto_mask is None:
+            return []
+        _, dot_mask = MM.playable_region(img, mask=auto_mask, tol_px=edge_tol_px)
+        if dot_mask is None:
+            return []
+    elif mask is not None:
+        from . import minimap as MM
+        _, dot_mask = MM.playable_region(img, mask=mask, tol_px=edge_tol_px)
+        if dot_mask is None:
+            return []
+
     D = (icon_frac or ICON_FRAC) * h
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    hsv = cv2.cvtColor(img[:, :, :3], cv2.COLOR_BGR2HSV)
+    ko = max(3, int(round(D * 0.25))) | 1
+    k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ko, ko))
+    pad = ko // 2 + 1
     out = []
     for color, ranges in (("warm", WARM_RANGES), ("cool", COOL_RANGES)):
-        mask = _mask(hsv, ranges)
+        cmask = _mask(hsv, ranges)
         k = max(3, int(D * 0.4)) | 1
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
-        n, _, stats, cents = cv2.connectedComponentsWithStats(mask, 8)
+        cmask = cv2.morphologyEx(cmask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+        n, lab, stats, cents = cv2.connectedComponentsWithStats(cmask, 8)
         found = []
         for i in range(1, n):
             x, y, ww, hh, area = (int(v) for v in stats[i])
             side = max(ww, hh)
-            if area < min_area or side < 0.45 * D or side > 3.2 * D or area < 0.12 * D * D:
+            if area < min_area or side < 0.38 * D or area < 0.09 * D * D:
                 continue
-            if area > max(max_area, 12 * D * D):            # 大きな色面（UI・背景）
+            aspect_r = max(ww / max(1, hh), hh / max(1, ww))
+            extent = area / max(1, ww * hh)
+            patch = lab[y:y + hh, x:x + ww] == i
+            r_asp, r_ext = _rot_metrics(patch, area)
+            too_big = side > 3.2 * D or area > max(max_area, 12 * D * D)
+            elongated = aspect_r > 2.4 or r_asp > 2.4 or (side > 1.8 * D and min(extent, r_ext) < 0.25)
+            # 観戦視線・バリア線などの細長い形状や視線連結塊は選択的 MORPH_OPEN で分離を試みる
+            if elongated or (too_big and (r_asp > 1.8 or min(extent, r_ext) < 0.35)):
+                if side >= 0.8 * D:
+                    buf = np.zeros((hh + 2 * pad, ww + 2 * pad), np.uint8)
+                    buf[pad:pad + hh, pad:pad + ww] = patch.astype(np.uint8)
+                    opened = cv2.morphologyEx(buf, cv2.MORPH_OPEN, k_open)[pad:pad + hh, pad:pad + ww]
+                    sn, slab, sstats, sc = cv2.connectedComponentsWithStats(opened, 8)
+                    for si in range(1, sn):
+                        sx, sy, sww, shh, sarea = (int(v) for v in sstats[si])
+                        s_side = max(sww, shh)
+                        if sarea < max(min_area, int(0.18 * D * D)) or s_side < 0.50 * D:
+                            continue
+                        if s_side > 3.2 * D or sarea > max(max_area, 12 * D * D):
+                            continue
+                        spatch = slab[sy:sy + shh, sx:sx + sww] == si
+                        sr_asp, sr_ext = _rot_metrics(spatch, sarea)
+                        if sr_asp > 2.0 or sr_ext < 0.42:
+                            continue
+                        scx = float(x + sc[si][0])
+                        scy = float(y + sc[si][1])
+                        if dot_mask is not None:
+                            cx_px = min(w - 1, max(0, int(round(scx))))
+                            cy_px = min(h - 1, max(0, int(round(scy))))
+                            if not dot_mask[cy_px, cx_px]:
+                                continue
+                        kk = int(min(3, max(1, round(s_side / (D * 1.15)))))
+                        pen = (1.0 if sr_asp <= 1.8 else 0.5 / sr_asp) * (1.0 if sr_ext >= 0.40 else 0.6)
+                        found.append((float(sarea) * pen, sarea, scx / w, scy / h, kk, sww, shh))
                 continue
+            if too_big:
+                continue
+            if dot_mask is not None:
+                cx_px = min(w - 1, max(0, int(round(cents[i][0]))))
+                cy_px = min(h - 1, max(0, int(round(cents[i][1]))))
+                if not dot_mask[cy_px, cx_px]:
+                    continue
             kk = int(min(3, max(1, round(side / (D * 1.15)))))
-            found.append((area, float(cents[i][0] / w), float(cents[i][1] / h), kk, ww, hh))
-        found.sort(reverse=True)
-        for area, fx, fy, kk, ww, hh in found[:per_color]:
+            pen = (1.0 if r_asp <= 1.8 else 0.5 / r_asp) * (1.0 if r_ext >= 0.40 else 0.6)
+            found.append((float(area) * pen, area, float(cents[i][0] / w), float(cents[i][1] / h), kk, ww, hh))
+        found.sort(key=lambda item: item[0], reverse=True)
+        for _score, area, fx, fy, kk, ww, hh in found[:per_color]:
             out.append({"color": color, "x": fx, "y": fy, "area": area, "k": kk, "w": ww, "h": hh})
     return out
 
@@ -382,9 +457,10 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
 
     def flush():
         for t_, r_, mm_ in pending:
-            raw.append((t_, r_, detect_dots(mm_, min_area, max_area, per_color=15, icon_frac=icon_frac)))
+            raw.append((t_, r_, detect_dots(mm_, min_area, max_area, per_color=15, icon_frac=icon_frac), MM._outline(mm_)))
         pending.clear()
 
+    n_seen = 0
     for t, mm in scan_source():
         r = round_of(t)
         if r is None or mm is None or mm.size == 0:
@@ -418,10 +494,11 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
                 del lst[3:]
         h, w = mm.shape[:2]
         aspect = w / max(1, h)
-        if len(bgs) < 40 and (not bgs or len(samples) % 7 == 0) and (not bgs or bgs[0].shape == mm.shape):
+        if len(bgs) < 40 and (len(bgs) < 5 or n_seen % 7 == 0) and (not bgs or bgs[0].shape == mm.shape):
             bgs.append(mm.copy())
+        n_seen += 1
         if icon_frac is not None:
-            raw.append((t, r, detect_dots(mm, min_area, max_area, per_color=15, icon_frac=icon_frac)))
+            raw.append((t, r, detect_dots(mm, min_area, max_area, per_color=15, icon_frac=icon_frac), MM._outline(mm)))
     if pending:
         if icon_frac is None:
             icon_frac = AG.estimate_icon_frac([x[2] for x in pending[:8]], icons=icons or None,
@@ -431,10 +508,28 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         return None
     # 背景：点や UI の動く部分を消すため、何枚かの中央値
     background = np.median(np.stack(bgs), axis=0).astype(np.uint8) if len(bgs) >= 3 else bgs[0]
+    # 床（歩ける場所）の 2 値画像。カットアウェイ優勢なら有効ミニマップから再構築し、全滅なら終了する
+    is_black_canvas = bool((background == 0).all(axis=2).mean() > 0.90 and int(MM._outline(background).sum()) == 0)
+    mask = MM.map_mask(background)
+    if mask is None or not MM.detect_minimap_region(background, mask=mask)[0]:
+        valid_bgs: list[np.ndarray] = []
+        valid_masks: list[np.ndarray] = []
+        for bf in bgs:
+            ok_bf, m_bf = MM.detect_minimap_region(bf)
+            if ok_bf and m_bf is not None:
+                valid_bgs.append(bf)
+                valid_masks.append(m_bf)
+        if valid_bgs:
+            background = np.median(np.stack(valid_bgs), axis=0).astype(np.uint8) if len(valid_bgs) >= 3 else valid_bgs[0]
+            mask = MM.map_mask(background)
+            if mask is None or not MM.detect_minimap_region(background, mask=mask)[0]:
+                mask = valid_masks[0]
+        elif not is_black_canvas:
+            return None
+        else:
+            mask = None
     if bg_path is not None:
         cv2.imwrite(str(bg_path), background, [cv2.IMWRITE_JPEG_QUALITY, 92])
-    # 床（歩ける場所）の 2 値画像。床から離れた点（UI・背景のちらつき）は捨てる
-    mask = MM.map_mask(background)
     # 公式のマップ画像の床の縁を放送の白い縁の線に重ねる。重なれば、床・位置合わせはそれを使う
     # （放送の色から作る床は、半透明の床の後ろの試合画面の色で穴が開いたり、床の外に島ができたりする）
     T_art, art_crop = None, None
@@ -454,9 +549,13 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
                 log(f"    公式のマップ画像で合わせられませんでした（{e}）")
     near = None
     if mask is not None:
-        dist = cv2.distanceTransform((~mask).astype(np.uint8), cv2.DIST_L2, 3)
-        near = dist <= max(3.0, 0.02 * mask.shape[0])
-    for t, r, found in raw:
+        _, near = MM.playable_region(background, mask=mask)
+        if near is None:
+            dist = cv2.distanceTransform((~mask).astype(np.uint8), cv2.DIST_L2, 3)
+            near = dist <= max(3.0, 0.02 * mask.shape[0])
+    for t, r, found, line_mm in raw:
+        if mask is not None and not MM._frame_matches_mask(mask, line_mm, min_f=0.30, max_line_frac=0.048):
+            continue
         if near is not None:
             hh, ww = near.shape
             found = [d for d in found if near[min(hh - 1, int(d["y"] * hh)), min(ww - 1, int(d["x"] * ww))]]
@@ -681,7 +780,20 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
                     frames = keep.get((n, lbl))
                     if not frames:
                         continue
-                    mm_best = frames[0][2] if isinstance(frames, list) else frames[2]
+                    if isinstance(frames, tuple):
+                        frames = [frames]
+                    mm_best = None
+                    for _d, _t, cand_mm in frames:
+                        if mask is not None and cand_mm.shape[:2] == mask.shape[:2]:
+                            if not MM._frame_matches_mask(mask, MM._outline(cand_mm), min_f=0.30, max_line_frac=0.048):
+                                continue
+                        elif not is_black_canvas and not MM.detect_minimap_region(cand_mm)[0]:
+                            continue
+                        mm_best = cand_mm
+                        break
+                    if mm_best is None:
+                        smokes_by_mark[lbl] = []
+                        continue
                     smokes_by_mark[lbl] = SM.detect_smokes(
                         mm_best,
                         background,
@@ -690,6 +802,8 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
                         placed=placed,
                         reg=reg,
                         aspect=aspect,
+                        mask=mask,
+                        icon_frac=icon_frac,
                     )
             except Exception:
                 smokes_by_mark = {}
