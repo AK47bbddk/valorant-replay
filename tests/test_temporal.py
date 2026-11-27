@@ -342,3 +342,67 @@ class TestAnalyzeRoundFramesOffline:
         # Overlap at t=2s recovered!
         assert res["summary"]["recovered_agents"] >= 1
         assert len(res["frames"][1]["dots"]) == 2
+
+
+def test_alive_counts_total_and_color_caps():
+    frames = [
+        {
+            "t": 0.0,
+            "valid": True,
+            "dots": [
+                {"color": "warm", "x": 0.2, "y": 0.2, "score": 0.95},
+                {"color": "warm", "x": 0.3, "y": 0.2, "score": 0.88},
+                {"color": "warm", "x": 0.4, "y": 0.2, "score": 0.62},
+                {"color": "cool", "x": 0.7, "y": 0.7, "score": 0.91},
+                {"color": "cool", "x": 0.8, "y": 0.7, "score": 0.55},
+            ],
+        },
+        {"t": 2.0, "valid": True, "dots": []},
+    ]
+    out_total = TMP.correct_agent_dots_sequence(frames, alive_counts=[{"total": 3}, None])
+    assert len(out_total[0]) == 3
+    scores = sorted([d["score"] for d in out_total[0]], reverse=True)
+    assert scores == [0.95, 0.91, 0.88]
+
+    out_color = TMP.correct_agent_dots_sequence(frames, alive_counts=[{"warm": 1, "cool": 1}, None])
+    assert len([d for d in out_color[0] if d["color"] == "warm"]) == 1
+    assert len([d for d in out_color[0] if d["color"] == "cool"]) == 1
+
+
+def test_smokes_persistence_duration_and_comp_cap():
+    # Persistent smoke at (0.4, 0.4) for 6s (t=0,2,4,6), transient flash at (0.8, 0.8) for 2s (t=2,4)
+    frames = [
+        {"t": 0.0, "valid": True, "smokes": [{"x": 0.4, "y": 0.4, "r": 0.03, "conf": 0.75}]},
+        {
+            "t": 2.0,
+            "valid": True,
+            "smokes": [
+                {"x": 0.4, "y": 0.4, "r": 0.03, "conf": 0.75},
+                {"x": 0.8, "y": 0.8, "r": 0.03, "conf": 0.70},
+            ],
+        },
+        {
+            "t": 4.0,
+            "valid": True,
+            "smokes": [
+                {"x": 0.4, "y": 0.4, "r": 0.03, "conf": 0.75},
+                {"x": 0.8, "y": 0.8, "r": 0.03, "conf": 0.70},
+            ],
+        },
+        {"t": 6.0, "valid": True, "smokes": [{"x": 0.4, "y": 0.4, "r": 0.03, "conf": 0.75}]},
+    ]
+    out = TMP.correct_smokes_sequence(frames, min_duration_sec=3.5)
+    # 6s smoke kept on all 4 frames, 2s transient dropped on t=2 and t=4
+    assert all(len(f) == 1 and abs(f[0]["x"] - 0.4) < 1e-6 for f in out)
+
+    # Zero-controller comp suppresses non-ultra-high-conf smokes
+    assert TMP.max_dome_smokes_for_comp(["Sova", "Killjoy", "Raze", "Skye", "Cypher"]) == 0
+    assert TMP.max_dome_smokes_for_comp(["Omen", "Viper"]) == 3
+    assert TMP.max_dome_smokes_for_comp(None) is None
+
+    out_zero = TMP.correct_smokes_sequence(frames, controller_agents=["Sova", "Raze", "Cypher"])
+    assert all(len(f) == 0 for f in out_zero)
+
+    # Cap to 1 active smoke
+    out_cap1 = TMP.correct_smokes_sequence(frames, controller_agents=["Viper"])
+    assert len(out_cap1[1]) == 1 and out_cap1[1][0]["conf"] == 0.75
