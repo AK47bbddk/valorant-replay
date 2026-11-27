@@ -1385,6 +1385,13 @@ def assign_teams_and_cap(
 
     out: list[dict[str, Any]] = []
     for d in warm_list + cool_list:
+        raw_sc = d.get("_score", d.get("score", 1.0))
+        try:
+            sc_f = float(raw_sc)
+            if not math.isfinite(sc_f):
+                sc_f = 1.0
+        except (TypeError, ValueError):
+            sc_f = 1.0
         out.append({
             "color": str(d["color"]),
             "x": float(d["x"]),
@@ -1393,6 +1400,7 @@ def assign_teams_and_cap(
             "k": int(d["k"]),
             "w": int(d["w"]),
             "h": int(d["h"]),
+            "score": round(sc_f, 4),
         })
     return out
 
@@ -1451,3 +1459,103 @@ def detect_agent_dots(
         soft_nms_margin=float(model.get("soft_nms_margin", 0.12)),
         soft_nms_ratio=float(model.get("soft_nms_ratio", 0.80)),
     )
+
+
+def detect_agent_dots_with_low(
+    img: np.ndarray | None,
+    *,
+    per_color: int = 5,
+    icon_frac: float | None = None,
+    mask: np.ndarray | None = None,
+    edge_tol_px: int | None = None,
+    art_alpha: np.ndarray | None = None,
+    T_art: dict[str, Any] | None = None,
+    low_thresh: float = 0.25,
+    min_area: int = 4,
+    max_area: int = 450,
+    model_path: str | Path = MODEL_PATH,
+    thresh: float | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Run the 2-stage MLP+CNN detector once at ``min(thresh, low_thresh)`` and return
+    ``(primary_dots, low_dots)`` with zero extra inference cost.
+
+    Returns ``([], [])`` for invalid/empty inputs or when the model is unavailable.
+    """
+    if img is None or not isinstance(img, np.ndarray) or img.size == 0 or img.ndim != 3 or img.shape[2] < 3:
+        return [], []
+    if per_color <= 0:
+        return [], []
+    H, W = img.shape[:2]
+    if min(H, W) < MIN_INPUT_SIDE:
+        return [], []
+    if mask is not None and (not isinstance(mask, np.ndarray) or mask.ndim != 2 or mask.shape != (H, W)):
+        return [], []
+
+    has_art = bool(art_alpha is not None and isinstance(T_art, dict) and T_art.get("ok"))
+    dot_mask = None
+    if has_art or mask is not None:
+        from . import minimap as MM
+        _, dot_mask = MM.playable_region(
+            img, mask=mask, art_alpha=art_alpha, T_art=T_art, tol_px=edge_tol_px
+        )
+        if dot_mask is None:
+            return [], []
+
+    model = load_model(model_path)
+    if model is None:
+        return [], []
+
+    try:
+        low_t = float(low_thresh)
+        if not math.isfinite(low_t):
+            low_t = 0.25
+        low_t = max(0.0, min(1.0, low_t))
+    except (TypeError, ValueError):
+        low_t = 0.25
+
+    eff_if = _sanitize_icon_frac(icon_frac)
+    D_syn = (eff_if or 0.048) * H
+    syn_dots = _detect_synthetic_solid_dots(img, D_syn, min_area, max_area, dot_mask)
+    if syn_dots and float((img[:, :, :3].max(axis=2) > 10).mean()) < 0.08:
+        primary = assign_teams_and_cap(syn_dots, per_color=per_color, soft_nms_r=0.0)
+        return primary, [dict(d) for d in primary]
+
+    eff_thresh = float(model["thresh"] if thresh is None else thresh)
+    if not math.isfinite(eff_thresh):
+        eff_thresh = float(model["thresh"])
+    scan_thresh = min(eff_thresh, low_t)
+
+    accepted_all = score_image_dense(
+        img,
+        model,
+        dot_mask=dot_mask,
+        icon_frac=eff_if,
+        thresh=scan_thresh,
+    )
+
+    primary_accepted = [d for d in accepted_all if float(d.get("_score", 0.0)) >= eff_thresh]
+    low_accepted = list(accepted_all)
+
+    for sd in syn_dots:
+        sx, sy = sd["x"] * W, sd["y"] * H
+        if not any((sx - d["x"] * W) ** 2 + (sy - d["y"] * H) ** 2 < (0.62 * D_syn) ** 2 for d in primary_accepted):
+            primary_accepted.append(sd)
+        if not any((sx - d["x"] * W) ** 2 + (sy - d["y"] * H) ** 2 < (0.62 * D_syn) ** 2 for d in low_accepted):
+            low_accepted.append(sd)
+
+    primary_dots = assign_teams_and_cap(
+        primary_accepted,
+        per_color=per_color,
+        thresh=eff_thresh,
+        soft_nms_r=float(model.get("soft_nms_r", 0.0)),
+        soft_nms_margin=float(model.get("soft_nms_margin", 0.12)),
+        soft_nms_ratio=float(model.get("soft_nms_ratio", 0.80)),
+    )
+    low_dots = assign_teams_and_cap(
+        low_accepted,
+        per_color=max(per_color * 4, 20),
+        thresh=low_t,
+        soft_nms_r=0.0,
+    )
+    return primary_dots, low_dots
+

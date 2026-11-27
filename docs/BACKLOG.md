@@ -21,7 +21,8 @@
 |---|---|---|---|---|---|
 | `agent-dot-accuracy` | `DONE` | ミニマップ・エージェント点検知の高精度化（2段階 MLP+2D CNN ＆ `dot_mask` カバー率改善） | [agent-dot-accuracy.md](tasks/agent-dot-accuracy.md) | `vreplay/agent_dots.py`, `vreplay/minimap.py`, `vreplay/tactics.py`, `vreplay/data/agent_dot_model.npz`, `tools/train_agent_dot.py` | PR #6 マージ済み（P=0.929, R=0.933, F1=0.931） |
 | `smoke-detection-accuracy` | `DONE` | 定半径（`R≈9.0px@H=304`）ドームスモーク検知器とクリーンミニマップ構造事前知識による高精度化 | [smoke-detection-accuracy.md](tasks/smoke-detection-accuracy.md) | `vreplay/smoke_detector.py`, `vreplay/data/smoke_model.npz`, `tools/train_smoke_detector.py`, `vreplay/smokes.py`, `tests/test_smokes.py` | PR #7 マージ済み |
-| `non-playable-mask-hardening` | `PR_OPEN` | 透過＝非プレイ可能領域マスクの強化（全 13 マップ公式アルファ同梱・`register_art_auto`・`playable_region` 厳密パス） | [non-playable-mask-hardening.md](tasks/non-playable-mask-hardening.md) | `tools/build_map_alphas.py`, `vreplay/data/map_alphas.npz`, `vreplay/minimap.py`, `vreplay/tactics.py`, `vreplay/smokes.py`, `tools/eval_all.py` | `/tmp/blind_val` で 52/52 公式アルファ位置合わせ・`gt_in_mask_rate=1.0000`・透過壁穴保持・オフライン `pytest` 全件通過 |
+| `non-playable-mask-hardening` | `DONE` | 透過＝非プレイ可能領域マスクの強化（全 13 マップ公式アルファ同梱・`register_art_auto`・`playable_region` 厳密パス） | [non-playable-mask-hardening.md](tasks/non-playable-mask-hardening.md) | `tools/build_map_alphas.py`, `vreplay/data/map_alphas.npz`, `vreplay/minimap.py`, `vreplay/tactics.py`, `vreplay/smokes.py`, `tools/eval_all.py` | PR #8 マージ済み |
+| `temporal-dot-correction` | `DONE` | 1R @ 2秒間隔の ±2 秒時系列補正（ハンガリアン重なり補完・低閾値スナップ・スモーク単発 FP 抑止） | [temporal-dot-correction.md](tasks/temporal-dot-correction.md) | `vreplay/temporal.py`, `vreplay/agent_dots.py`, `vreplay/tactics.py`, `tools/eval_temporal_gif.py`, `tests/test_temporal.py` | PR #9 マージ済み |
 
 ---
 
