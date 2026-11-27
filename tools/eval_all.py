@@ -165,13 +165,16 @@ def _call_smokes(
     mask: np.ndarray | None = None,
     require_minimap: bool = False,
     found_agents: list[dict[str, Any]] | None = None,
+    art_alpha: np.ndarray | None = None,
+    T_art: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     fn = eff_smokes.detect_smokes
     accepts_mask = _accepts_kw(fn, "mask")
     accepts_req = _accepts_kw(fn, "require_minimap")
     accepts_agents = _accepts_kw(fn, "found_agents")
+    accepts_art = _accepts_kw(fn, "art_alpha") and _accepts_kw(fn, "T_art")
 
-    if accepts_mask or accepts_req or accepts_agents:
+    if accepts_mask or accepts_req or accepts_agents or accepts_art:
         kwargs: dict[str, Any] = {}
         if accepts_mask and mask is not None:
             kwargs["mask"] = mask
@@ -179,6 +182,9 @@ def _call_smokes(
             kwargs["require_minimap"] = require_minimap
         if accepts_agents and found_agents is not None:
             kwargs["found_agents"] = found_agents
+        if accepts_art and art_alpha is not None and isinstance(T_art, dict) and T_art.get("ok"):
+            kwargs["art_alpha"] = art_alpha
+            kwargs["T_art"] = T_art
         return list(fn(img, bg, **kwargs) or [])
 
     # レガシー 2 引数互換モック向け（medianBlur フォールバック）
@@ -391,9 +397,18 @@ def evaluate_blind_dir(
         if len(imgs) >= 3:
             bg_medians[k] = np.median(np.stack(imgs), axis=0).astype(np.uint8)
 
-    # 各フレームのミニマップ存在・プレイ可能床マスクを事前計算
-    frame_masks: list[tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None, np.ndarray | None]] = []
+    # 各フレームのミニマップ存在・プレイ可能床マスクを事前計算（公式アルファ自動位置合わせを優先）
+    frame_masks: list[tuple[
+        np.ndarray | None,
+        np.ndarray | None,
+        np.ndarray | None,
+        np.ndarray | None,
+        np.ndarray | None,
+        dict[str, Any] | None,
+    ]] = []
+    art_reg_cache: dict[int, tuple[np.ndarray | None, dict[str, Any] | None]] = {}
     mask_ok_frames = 0
+    art_reg_ok_frames = 0
     for _img_path, img, _labels in loaded:
         gkey = _group_key(_img_path.stem, img.shape[:2])
         bg = bg_medians.get(gkey)
@@ -404,14 +419,24 @@ def evaluate_blind_dir(
             ref = img
         if ok_m and raw_m is not None:
             if bg is not None and ref is bg and not MM._frame_matches_mask(raw_m, MM._outline(img), min_f=0.30, max_line_frac=0.048):
-                frame_masks.append((bg, None, None, None))
+                frame_masks.append((bg, None, None, None, None, None))
                 continue
-            floor_mask, dot_mask = MM.playable_region(ref, mask=raw_m)
+            ref_id = id(ref)
+            if ref_id not in art_reg_cache:
+                _, reg_alpha, reg_T = MM.register_art_auto(ref, mask_hint=raw_m)
+                if reg_alpha is not None and isinstance(reg_T, dict) and reg_T.get("ok"):
+                    art_reg_cache[ref_id] = (reg_alpha, reg_T)
+                else:
+                    art_reg_cache[ref_id] = (None, None)
+            art_alpha, T_art = art_reg_cache[ref_id]
+            floor_mask, dot_mask = MM.playable_region(ref, mask=raw_m, art_alpha=art_alpha, T_art=T_art)
             if floor_mask is not None and dot_mask is not None:
                 mask_ok_frames += 1
-                frame_masks.append((bg, raw_m, floor_mask, dot_mask))
+                if art_alpha is not None and T_art is not None:
+                    art_reg_ok_frames += 1
+                frame_masks.append((bg, raw_m, floor_mask, dot_mask, art_alpha, T_art))
                 continue
-        frame_masks.append((bg, None, None, None))
+        frame_masks.append((bg, None, None, None, None, None))
 
     enforce_minimap = (mask_ok_frames > 0) if require_minimap is None else bool(require_minimap)
 
@@ -432,7 +457,7 @@ def evaluate_blind_dir(
     cards: list[dict[str, Any]] = []
     want_cards = bool(preview_html)
 
-    for (img_path, img, labels), (bg, raw_m, floor_mask, dot_mask) in zip(loaded, frame_masks):
+    for (img_path, img, labels), (bg, raw_m, floor_mask, dot_mask, art_alpha, T_art) in zip(loaded, frame_masks):
         h, w = img.shape[:2]
         ag_boxes = labels.get(0, [])
         sm_boxes = labels.get(1, [])
@@ -465,7 +490,12 @@ def evaluate_blind_dir(
         frame_filtered_fp = 0
         if floor_mask is not None and dot_mask is not None:
             raw_dots = tactics.detect_dots(img)
-            dots = tactics.detect_dots(img, mask=raw_m if raw_m is not None else floor_mask)
+            dots = tactics.detect_dots(
+                img,
+                mask=raw_m if raw_m is not None else floor_mask,
+                art_alpha=art_alpha,
+                T_art=T_art,
+            )
             raw_preds = [(float(d["x"]), float(d["y"])) for d in raw_dots]
             _, raw_fp, _, _ = _match_points(ag_gt, raw_preds, tol)
             ag_pred = [(float(d["x"]), float(d["y"])) for d in dots]
@@ -507,6 +537,8 @@ def evaluate_blind_dir(
                     mask=eff_mask,
                     require_minimap=False,
                     found_agents=dots,
+                    art_alpha=art_alpha,
+                    T_art=T_art,
                 )
                 # マスク無しで出たであろうマップ外 FP 数も参考計測（bg がある時のみ、または非レガシー）
                 if _accepts_kw(eff_smokes.detect_smokes, "mask") and bg is not None:
@@ -565,6 +597,7 @@ def evaluate_blind_dir(
 
     mask_metrics = {
         "mask_ok_frames": mask_ok_frames,
+        "art_reg_ok_frames": art_reg_ok_frames,
         "gt_in_mask_rate": gt_in_mask_rate,
         "agent_gt_in_mask_rate": ag_gt_rate,
         "smoke_gt_in_mask_rate": sm_gt_rate,

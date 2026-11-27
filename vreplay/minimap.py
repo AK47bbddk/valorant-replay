@@ -429,6 +429,34 @@ def detect_minimap_region(
     return True, m
 
 
+def _normalize_alpha_u8(alpha: np.ndarray) -> np.ndarray:
+    """2D アルファ配列を OpenCV 処理用の uint8 (0..255) に安全変換する。"""
+    if alpha.dtype == np.uint8:
+        return alpha
+    if alpha.dtype == np.bool_:
+        return alpha.astype(np.uint8) * 255
+    return (alpha > 128).astype(np.uint8) * 255
+
+
+def _valid_art_inputs(art_alpha: np.ndarray | None, T_art: dict | None) -> bool:
+    """`art_alpha`（非空 2D 数値/bool ndarray）と `T_art`（ok=True・有限数値・scale>0）を検証する。"""
+    if not isinstance(art_alpha, np.ndarray) or art_alpha.ndim != 2 or art_alpha.size == 0:
+        return False
+    if not (art_alpha.dtype == np.bool_ or np.issubdtype(art_alpha.dtype, np.number)):
+        return False
+    if not isinstance(T_art, dict) or not bool(T_art.get("ok")):
+        return False
+    for k in ("theta", "scale", "tx", "ty"):
+        if k not in T_art:
+            return False
+        v = T_art[k]
+        if isinstance(v, (bool, np.bool_)) or not isinstance(v, (int, float, np.number)):
+            return False
+        if not math.isfinite(float(v)):
+            return False
+    return float(T_art["scale"]) > 0.0
+
+
 def playable_region(
     img_or_bg: np.ndarray | None,
     *,
@@ -443,8 +471,9 @@ def playable_region(
         return None, None
     H, W = img_or_bg.shape[:2]
 
-    if art_alpha is not None and isinstance(T_art, dict) and T_art.get("ok"):
-        floor_mask = warp_art(art_alpha, T_art, (H, W)) > 128
+    from_art = _valid_art_inputs(art_alpha, T_art)
+    if from_art:
+        floor_mask = warp_art(_normalize_alpha_u8(art_alpha), T_art, (H, W)) > 128
     elif mask is not None:
         if not isinstance(mask, np.ndarray) or mask.ndim != 2 or mask.shape != (H, W):
             return None, None
@@ -458,98 +487,105 @@ def playable_region(
     if not floor_mask.any():
         return None, None
 
-    # 左上隅（R2 1:29 等）の HUD テキスト漏れ断片を除外（主床 CC は除外しない）
-    n_cc, lab_cc, st_cc, _ = cv2.connectedComponentsWithStats(floor_mask.astype(np.uint8), 8)
-    if n_cc > 2:
-        big = int(np.argmax(st_cc[1:, 4])) + 1
-        big_area = int(st_cc[big, 4])
-        max_hud = max(40, int(0.035 * H * W))
-        for i in range(1, n_cc):
-            if i == big:
-                continue
-            x, y, ww, hh, a = (int(v) for v in st_cc[i])
-            if (
-                a < max_hud
-                and a <= 0.15 * big_area
-                and x <= int(0.18 * W)
-                and (x + ww) <= int(0.36 * W)
-                and (y + hh) <= int(0.16 * H)
-            ):
-                floor_mask[lab_cc == i] = False
-
-    if not floor_mask.any():
-        return None, None
-
-    # 通路内部の小さなスモーク・アイコン由来の穴と白縁で囲われた暗スモーク欠損のみ補完（大きな壁ブロックは埋めない）
     line = None
-    if img_or_bg.ndim == 3 and img_or_bg.shape[2] >= 3:
-        inv = (1 - floor_mask.astype(np.uint8))
-        n_h, lab_h, st_h, _ = cv2.connectedComponentsWithStats(inv, 4)
-        hsv = cv2.cvtColor(img_or_bg[:, :, :3], cv2.COLOR_BGR2HSV)
-        max_hole = max(40, int(0.004 * H * W))
-        max_side = max(8, int(0.09 * H))
-        max_dot_hole = max(35, int(0.0030 * H * W))
-        max_dot_side = max(8, int(0.075 * H))
-        for i in range(1, n_h):
-            x, y, ww, hh, a = (int(v) for v in st_h[i])
-            if x == 0 or y == 0 or x + ww >= W or y + hh >= H or a > max_hole or max(ww, hh) > max_side:
-                continue
-            comp = lab_h == i
-            v_mean = float(hsv[..., 2][comp].mean())
-            s_mean = float(hsv[..., 1][comp].mean())
-            if (v_mean >= 55.0 and s_mean <= 50.0) or (
-                a <= max_dot_hole and max(ww, hh) <= max_dot_side and v_mean >= 60.0
-            ):
-                floor_mask[comp] = True
+    if not from_art:
+        # 左上隅（R2 1:29 等）の HUD テキスト漏れ断片を除外（主床 CC は除外しない）
+        n_cc, lab_cc, st_cc, _ = cv2.connectedComponentsWithStats(floor_mask.astype(np.uint8), 8)
+        if n_cc > 2:
+            big = int(np.argmax(st_cc[1:, 4])) + 1
+            big_area = int(st_cc[big, 4])
+            max_hud = max(40, int(0.035 * H * W))
+            for i in range(1, n_cc):
+                if i == big:
+                    continue
+                x, y, ww, hh, a = (int(v) for v in st_cc[i])
+                if (
+                    a < max_hud
+                    and a <= 0.15 * big_area
+                    and x <= int(0.18 * W)
+                    and (x + ww) <= int(0.36 * W)
+                    and (y + hh) <= int(0.16 * H)
+                ):
+                    floor_mask[lab_cc == i] = False
 
-        # 4-連結（MORPH_CROSS）＋白縁制約の湾曲穴補完
-        line = _outline(img_or_bg[:, :, :3])
-        k_close = max(7, int(round(0.055 * H)) | 1)
-        closed = cv2.morphologyEx(
-            floor_mask.astype(np.uint8),
-            cv2.MORPH_CLOSE,
-            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_close, k_close)),
-        ) > 0
-        k4 = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
-        k3 = np.ones((3, 3), np.uint8)
-        cur = floor_mask.copy()
-        allowed = closed & (~line)
-        for _ in range(max(3, int(round(0.025 * H)))):
-            nxt = (cv2.dilate(cur.astype(np.uint8), k4) > 0) & allowed & (~cur)
-            if not nxt.any():
-                break
-            cur |= nxt
-        added_pts = cur & (~floor_mask)
-        n_a, lab_a, st_a, _ = cv2.connectedComponentsWithStats(added_pts.astype(np.uint8), 4)
-        fl_or_line = floor_mask | (cv2.dilate(line.astype(np.uint8), k3) > 0)
-        max_bay = max(40, int(0.006 * H * W))
-        max_bay_side = max(10, int(0.11 * H))
-        for i in range(1, n_a):
-            x, y, ww, hh, a = (int(v) for v in st_a[i])
-            if x == 0 or y == 0 or x + ww >= W or y + hh >= H:
-                continue
-            if a > max_bay or max(ww, hh) > max_bay_side:
-                continue
-            comp = lab_a == i
-            border = (cv2.dilate(comp.astype(np.uint8), k3) > 0) & (~comp)
-            b_tot = max(1, int(border.sum()))
-            enc_frac = float((border & fl_or_line).sum()) / b_tot
-            fl_frac = float((border & floor_mask).sum()) / b_tot
-            if (
-                enc_frac >= 0.65
-                and fl_frac >= 0.25
-                and float(hsv[..., 2][comp].mean()) >= 85.0
-                and float(hsv[..., 1][comp].mean()) <= 70.0
-            ):
-                floor_mask[comp] = True
+        if not floor_mask.any():
+            return None, None
 
-    tol = int(tol_px) if tol_px is not None else max(3, int(round(0.025 * H)))
+        # 通路内部の小さなスモーク・アイコン由来の穴と白縁で囲われた暗スモーク欠損のみ補完（大きな壁ブロックは埋めない）
+        if img_or_bg.ndim == 3 and img_or_bg.shape[2] >= 3:
+            inv = (1 - floor_mask.astype(np.uint8))
+            n_h, lab_h, st_h, _ = cv2.connectedComponentsWithStats(inv, 4)
+            hsv = cv2.cvtColor(img_or_bg[:, :, :3], cv2.COLOR_BGR2HSV)
+            max_hole = max(40, int(0.004 * H * W))
+            max_side = max(8, int(0.09 * H))
+            max_dot_hole = max(35, int(0.0030 * H * W))
+            max_dot_side = max(8, int(0.075 * H))
+            for i in range(1, n_h):
+                x, y, ww, hh, a = (int(v) for v in st_h[i])
+                if x == 0 or y == 0 or x + ww >= W or y + hh >= H or a > max_hole or max(ww, hh) > max_side:
+                    continue
+                comp = lab_h == i
+                v_mean = float(hsv[..., 2][comp].mean())
+                s_mean = float(hsv[..., 1][comp].mean())
+                if (v_mean >= 55.0 and s_mean <= 50.0) or (
+                    a <= max_dot_hole and max(ww, hh) <= max_dot_side and v_mean >= 60.0
+                ):
+                    floor_mask[comp] = True
+
+            # 4-連結（MORPH_CROSS）＋白縁制約の湾曲穴補完
+            line = _outline(img_or_bg[:, :, :3])
+            k_close = max(7, int(round(0.055 * H)) | 1)
+            closed = cv2.morphologyEx(
+                floor_mask.astype(np.uint8),
+                cv2.MORPH_CLOSE,
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_close, k_close)),
+            ) > 0
+            k4 = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+            k3 = np.ones((3, 3), np.uint8)
+            cur = floor_mask.copy()
+            allowed = closed & (~line)
+            for _ in range(max(3, int(round(0.025 * H)))):
+                nxt = (cv2.dilate(cur.astype(np.uint8), k4) > 0) & allowed & (~cur)
+                if not nxt.any():
+                    break
+                cur |= nxt
+            added_pts = cur & (~floor_mask)
+            n_a, lab_a, st_a, _ = cv2.connectedComponentsWithStats(added_pts.astype(np.uint8), 4)
+            fl_or_line = floor_mask | (cv2.dilate(line.astype(np.uint8), k3) > 0)
+            max_bay = max(40, int(0.006 * H * W))
+            max_bay_side = max(10, int(0.11 * H))
+            for i in range(1, n_a):
+                x, y, ww, hh, a = (int(v) for v in st_a[i])
+                if x == 0 or y == 0 or x + ww >= W or y + hh >= H:
+                    continue
+                if a > max_bay or max(ww, hh) > max_bay_side:
+                    continue
+                comp = lab_a == i
+                border = (cv2.dilate(comp.astype(np.uint8), k3) > 0) & (~comp)
+                b_tot = max(1, int(border.sum()))
+                enc_frac = float((border & fl_or_line).sum()) / b_tot
+                fl_frac = float((border & floor_mask).sum()) / b_tot
+                if (
+                    enc_frac >= 0.65
+                    and fl_frac >= 0.25
+                    and float(hsv[..., 2][comp].mean()) >= 85.0
+                    and float(hsv[..., 1][comp].mean()) <= 70.0
+                ):
+                    floor_mask[comp] = True
+
+    if tol_px is not None:
+        tol = int(tol_px)
+    elif from_art:
+        tol = max(2, int(round(0.015 * H)))
+    else:
+        tol = max(3, int(round(0.025 * H)))
+
     if tol <= 0:
         dot_mask = floor_mask.copy()
     else:
         dist = cv2.distanceTransform((~floor_mask).astype(np.uint8), cv2.DIST_L2, 3)
         dot_mask = dist <= float(tol)
-        if tol_px is None and line is not None:
+        if not from_art and tol_px is None and line is not None:
             dist_l = cv2.distanceTransform((~line).astype(np.uint8), cv2.DIST_L2, 3)
             dot_mask = dot_mask | ((dist <= max(3.0, 0.048 * H)) & (dist_l <= max(3.0, 0.018 * H)))
 
@@ -813,10 +849,41 @@ def region_of(reg: dict | None, placed: list[dict], x: float, y: float) -> dict 
 
 
 # ---------------------------------------------------------------- 公式のマップ画像（valorant-api）で合わせる
+_BUNDLED_ALPHAS_CACHE: dict[str, np.ndarray] | None = None
+_BUNDLED_EDGES_CACHE: dict[str, np.ndarray] = {}
+
+
+def load_all_bundled_alphas() -> dict[str, np.ndarray]:
+    """同梱の `vreplay/data/map_alphas.npz` から全 13 マップの 512×512 uint8 (0/255) アルファマスクを返す（100% オフライン・メモリキャッシュ）。"""
+    global _BUNDLED_ALPHAS_CACHE
+    if _BUNDLED_ALPHAS_CACHE is None:
+        from pathlib import Path
+        npz_path = Path(__file__).resolve().parent / "data" / "map_alphas.npz"
+        cache: dict[str, np.ndarray] = {}
+        if npz_path.is_file():
+            with np.load(str(npz_path)) as data:
+                for key in data.files:
+                    if key.startswith("_"):
+                        continue
+                    arr = np.unpackbits(data[key], axis=1).astype(np.uint8) * 255
+                    arr.setflags(write=False)
+                    cache[key.strip().lower()] = arr
+        _BUNDLED_ALPHAS_CACHE = cache
+    return dict(_BUNDLED_ALPHAS_CACHE)
+
+
+def load_bundled_alpha(map_name: str | None) -> np.ndarray | None:
+    """指定マップ名の同梱 512×512 uint8 (0/255) アルファマスクを返す。該当なしは None。"""
+    if not map_name or not isinstance(map_name, str):
+        return None
+    return load_all_bundled_alphas().get(map_name.strip().lower())
+
+
 def _art_edges(alpha: np.ndarray, n: int = 2000, seed: int = 0) -> np.ndarray:
     """公式のマップ画像の床の縁の点（0..1 の座標）。"""
     import cv2
-    a = cv2.resize(alpha, (512, 512), interpolation=cv2.INTER_AREA)
+    a_u8 = _normalize_alpha_u8(alpha)
+    a = cv2.resize(a_u8, (512, 512), interpolation=cv2.INTER_AREA) if a_u8.shape[:2] != (512, 512) else a_u8
     edge = cv2.Canny((a > 128).astype(np.uint8) * 255, 50, 150)
     ys, xs = np.nonzero(edge)
     if len(xs) < 50:
@@ -825,78 +892,322 @@ def _art_edges(alpha: np.ndarray, n: int = 2000, seed: int = 0) -> np.ndarray:
     return np.stack([xs[sel] / 512.0, ys[sel] / 512.0], axis=1)
 
 
-def register_art(bg: np.ndarray, alpha: np.ndarray, T0: dict | None = None) -> dict:
-    """公式のマップ画像（valorant-api の displayIcon。コールアウトと同じ 0..1 の座標）の床の縁を、
-    放送のミニマップの白い縁の線に重ねる相似変換。
+def _art_edges_cached(map_name: str, alpha: np.ndarray) -> np.ndarray:
+    uv = _BUNDLED_EDGES_CACHE.get(map_name)
+    if uv is None:
+        uv = _art_edges(alpha)
+        _BUNDLED_EDGES_CACHE[map_name] = uv
+    return uv
 
-    放送のミニマップは公式の画像を回転・拡大しただけなので、縁の線どうしの距離（chamfer）を最小にすると
-    ほぼ 1 画素の精度で重なる。重なれば、床の 2 値画像は公式の画像をそのまま写したものを使える
-    （放送の色から作る床は、半透明の床の後ろの試合画面の色で穴が開いたり、床の外に島ができたりする）。
-    T0（コールアウトと床で合わせた結果）があればそこから、無ければ 90 度ごとの向きから詰める。"""
-    import cv2
+
+def _art_inits_from_bounds(
+    a0: np.ndarray,
+    bounds_list: list[tuple[float, float, float, float]],
+    T0: dict | None = None,
+) -> list[tuple[float, float, float, float]]:
+    """複数の (x0, x1, y0, y1) バウンディングボックス（H 正規化単位）と 4 回転から初期変換候補を生成する。"""
+    inits: list[tuple[float, float, float, float]] = []
+    if (
+        isinstance(T0, dict)
+        and not T0.get("mirror")
+        and all(
+            k in T0
+            and not isinstance(T0[k], (bool, np.bool_))
+            and isinstance(T0[k], (int, float, np.number))
+            and math.isfinite(float(T0[k]))
+            for k in ("theta", "scale", "tx", "ty")
+        )
+        and float(T0["scale"]) > 0.0
+    ):
+        inits.append((float(T0["theta"]), float(T0["scale"]), float(T0["tx"]), float(T0["ty"])))
+    rot_stats: list[tuple[float, float, float, float, float]] = []
+    for k in range(4):
+        th = k * math.pi / 2
+        c, sn = math.cos(th), math.sin(th)
+        rx = c * a0[:, 0] - sn * a0[:, 1]
+        ry = sn * a0[:, 0] + c * a0[:, 1]
+        rx_min, rx_max = float(rx.min()), float(rx.max())
+        ry_min, ry_max = float(ry.min()), float(ry.max())
+        span_x = max(rx_max - rx_min, 1e-3)
+        span_y = max(ry_max - ry_min, 1e-3)
+        rot_stats.append((th, span_x, span_y, (rx_min + rx_max) * 0.5, (ry_min + ry_max) * 0.5))
+
+    for bx0, bx1, by0, by1 in bounds_list:
+        if (bx1 - bx0) <= 1e-3 or (by1 - by0) <= 1e-3:
+            continue
+        bcx, bcy = (bx0 + bx1) * 0.5, (by0 + by1) * 0.5
+        for th, span_x, span_y, rcx, rcy in rot_stats:
+            s = (by1 - by0) / span_y
+            tx = bcx - rcx * s
+            ty = bcy - rcy * s
+            # ほぼ同じ回転・倍率・位置の重複初期値は省く
+            dup = False
+            for o_th, o_s, o_tx, o_ty in inits:
+                if (
+                    abs((th - o_th + math.pi) % (2 * math.pi) - math.pi) < 0.05
+                    and abs(s - o_s) <= 0.025 * max(s, o_s, 1e-3)
+                    and abs(tx - o_tx) <= 0.02
+                    and abs(ty - o_ty) <= 0.02
+                ):
+                    dup = True
+                    break
+            if not dup:
+                inits.append((th, s, tx, ty))
+    return inits
+
+
+def _collect_art_bounds(
+    bg: np.ndarray,
+    line: np.ndarray,
+    mask_hint: np.ndarray | None = None,
+) -> list[tuple[float, float, float, float]]:
+    """`_outline` パーセンタイル範囲と `mask_hint`（未指定時は `map_mask(bg)`）外接矩形の両方を返す。"""
     H, W = bg.shape[:2]
-    uv = _art_edges(alpha)
-    line = _outline(bg)
-    if len(uv) < 50 or line.sum() < 200:
-        return {"ok": False, "msg": "ミニマップ合わせ（公式の画像）：縁の線が見つかりません"}
-    dt = cv2.distanceTransform((~line).astype(np.uint8), cv2.DIST_L2, 3)
+    bounds: list[tuple[float, float, float, float]] = []
+    ys, xs = np.nonzero(line)
+    if len(xs) >= 20:
+        lx0, lx1 = np.percentile(xs, [1, 99]) / H
+        ly0, ly1 = np.percentile(ys, [1, 99]) / H
+        bounds.append((float(lx0), float(lx1), float(ly0), float(ly1)))
+
+    m = mask_hint
+    if m is None:
+        m = map_mask(bg)
+    if isinstance(m, np.ndarray) and m.ndim == 2 and m.shape == (H, W) and m.any():
+        mys, mxs = np.nonzero(m)
+        if len(mxs) >= 20:
+            mx0, mx1 = float(mxs.min()) / H, float(mxs.max()) / H
+            my0, my1 = float(mys.min()) / H, float(mys.max()) / H
+            bounds.append((mx0, mx1, my0, my1))
+    return bounds
+
+
+def _register_art_with_precomputed(
+    H: int,
+    W: int,
+    dt: np.ndarray,
+    uv: np.ndarray,
+    bounds_list: list[tuple[float, float, float, float]],
+    T0: dict | None = None,
+    *,
+    alpha: np.ndarray | None = None,
+    line: np.ndarray | None = None,
+) -> dict:
+    """事前計算済みの距離変換 `dt`・輪郭点 `uv`・初期バウンディングボックスから相似変換を詰める。"""
     cap = 8.0
     a0 = uv - 0.5
+    a0_coarse = a0[::2] if len(a0) >= 400 else a0
 
-    def cost(th, s, tx, ty, inl=False):
+    def cost(th, s, tx, ty, inl=False, pts=a0):
         c, sn = math.cos(th), math.sin(th)
-        X = (s * (c * a0[:, 0] - sn * a0[:, 1]) + tx) * H
-        Y = (s * (sn * a0[:, 0] + c * a0[:, 1]) + ty) * H
+        X = (s * (c * pts[:, 0] - sn * pts[:, 1]) + tx) * H
+        Y = (s * (sn * pts[:, 0] + c * pts[:, 1]) + ty) * H
         ins = (X >= 0) & (X < W - 1) & (Y >= 0) & (Y < H - 1)
         d = np.full(len(X), cap)
         d[ins] = np.minimum(dt[Y[ins].astype(int), X[ins].astype(int)], cap)
         return float((d <= 2.0).mean()) if inl else float(d.mean())
 
     def refine(p):
-        cur = (cost(*p), *p)
-        for st, ss, sx in ((math.radians(2), 0.03, 0.02), (math.radians(1), 0.015, 0.008),
-                           (math.radians(0.4), 0.006, 0.003), (math.radians(0.15), 0.002, 0.001)):
-            improved = True
-            while improved:
+        th, s, tx, ty = p
+        schedules = (
+            (math.radians(2), 0.03, 0.02, a0_coarse),
+            (math.radians(1), 0.015, 0.008, a0_coarse),
+            (math.radians(0.4), 0.006, 0.003, a0),
+            (math.radians(0.15), 0.002, 0.001, a0),
+        )
+        cur_v = cost(th, s, tx, ty, pts=a0_coarse)
+        for idx, (st, ss, sx, pts) in enumerate(schedules):
+            if idx == 2:
+                cur_v = cost(th, s, tx, ty, pts=pts)
+            for _ in range(25):
                 improved = False
-                best = cur
-                for dth in (-st, 0, st):
-                    for ds in (1 - ss, 1, 1 + ss):
-                        for dx in (-sx, 0, sx):
-                            for dy in (-sx, 0, sx):
-                                q = (cur[1] + dth, cur[2] * ds, cur[3] + dx, cur[4] + dy)
-                                v = cost(*q)
-                                if v < best[0] - 1e-6:
-                                    best = (v, *q)
-                if best[0] < cur[0] - 1e-6:
-                    cur, improved = best, True
-        return cur
+                for cand in ((th - st, s, tx, ty), (th + st, s, tx, ty)):
+                    v = cost(*cand, pts=pts)
+                    if v < cur_v - 1e-6:
+                        cur_v, th, s, tx, ty, improved = v, *cand, True
+                for cand in ((th, s * (1.0 - ss), tx, ty), (th, s * (1.0 + ss), tx, ty)):
+                    v = cost(*cand, pts=pts)
+                    if v < cur_v - 1e-6:
+                        cur_v, th, s, tx, ty, improved = v, *cand, True
+                for cand in ((th, s, tx - sx, ty), (th, s, tx + sx, ty)):
+                    v = cost(*cand, pts=pts)
+                    if v < cur_v - 1e-6:
+                        cur_v, th, s, tx, ty, improved = v, *cand, True
+                for cand in ((th, s, tx, ty - sx), (th, s, tx, ty + sx)):
+                    v = cost(*cand, pts=pts)
+                    if v < cur_v - 1e-6:
+                        cur_v, th, s, tx, ty, improved = v, *cand, True
+                if not improved:
+                    break
+        return (cost(th, s, tx, ty, pts=a0), th, s, tx, ty)
 
-    inits = []
-    if T0 and not T0.get("mirror") and T0.get("scale"):
-        inits.append((T0["theta"], T0["scale"], T0["tx"], T0["ty"]))
-    # 縁の線の広がりと、公式の画像の床の広がりから、向きごとの倍率・位置の初期値
-    ys, xs = np.nonzero(line)
-    lx0, lx1 = np.percentile(xs, [1, 99]) / H
-    ly0, ly1 = np.percentile(ys, [1, 99]) / H
-    for k in range(4):
-        th = k * math.pi / 2
-        c, sn = math.cos(th), math.sin(th)
-        R = np.stack([c * a0[:, 0] - sn * a0[:, 1], sn * a0[:, 0] + c * a0[:, 1]], axis=1)
-        span = max(R[:, 1].max() - R[:, 1].min(), 1e-3)
-        s = (ly1 - ly0) / span
-        cx, cy = (R[:, 0].max() + R[:, 0].min()) / 2 * s, (R[:, 1].max() + R[:, 1].min()) / 2 * s
-        inits.append((th, s, (lx0 + lx1) / 2 - cx, (ly0 + ly1) / 2 - cy))
+    inits = _art_inits_from_bounds(a0, bounds_list, T0=T0)
+    if not inits:
+        return {"ok": False, "msg": "ミニマップ合わせ（公式の画像）：初期位置を推定できません"}
     best = min((refine(p) for p in inits), key=lambda r: r[0])
     _, th, s, tx, ty = best
-    inl = cost(th, s, tx, ty, inl=True)
+    inl = cost(th, s, tx, ty, inl=True, pts=a0)
     T = {"mirror": False, "theta": th, "scale": s, "tx": tx, "ty": ty, "aspect": W / H,
          "method": "art", "inlier": round(inl, 2), "chamfer": round(best[0], 2),
          "confidence": round(max(0.0, min(1.0, (inl - 0.35) / 0.35)), 2)}
     T["ok"] = inl >= 0.5 and best[0] <= 3.5
+    if T["ok"] and alpha is not None and line is not None:
+        import cv2
+        warped = warp_art(_normalize_alpha_u8(alpha), T, (H, W)) > 128
+        cov = float(warped.mean())
+        mm_u8 = warped.astype(np.uint8)
+        edge = (mm_u8 - cv2.erode(mm_u8, np.ones((3, 3), np.uint8))).astype(bool)
+        near_edge = cv2.dilate(edge.astype(np.uint8), np.ones((7, 7), np.uint8)).astype(bool)
+        rev_recall = float((line & near_edge).sum() / max(1, int(line.sum())))
+        lift = rev_recall / max(1e-6, float(near_edge.mean()))
+        ef = _edge_f(warped, line)
+        T["edge_f"] = round(ef, 3)
+        if not (0.05 <= cov <= 0.70) or ef < 0.45 or rev_recall < 0.35 or lift < 1.5:
+            T["ok"] = False
     T["msg"] = (f"ミニマップ合わせ（公式のマップ画像）：回転 {math.degrees(th) % 360:.0f}°・倍率 {s:.2f}"
                 f"（縁の一致 {inl:.0%}・平均のずれ {best[0]:.1f}px）" + ("" if T["ok"] else "（合わず）"))
     return T
+
+
+def register_art(
+    bg: np.ndarray,
+    alpha: np.ndarray,
+    T0: dict | None = None,
+    mask_hint: np.ndarray | None = None,
+) -> dict:
+    """公式のマップ画像（valorant-api の displayIcon。コールアウトと同じ 0..1 の座標）の床の縁を、
+    放送のミニマップの白い縁の線に重ねる相似変換。
+
+    放送のミニマップは公式の画像を回転・拡大しただけなので、縁の線どうしの距離（chamfer）を最小にすると
+    ほぼ 1 画素の精度で重なる。重なれば、床の 2 値画像は公式の画像をそのまま写したものを使える
+    （放送の色から作る床は、半透明の床の後ろの試合画面の色で穴が開いたり、床の外に島ができたりする）。
+    T0（コールアウトと床で合わせた結果）があればそこから、無ければ `_outline` 範囲および
+    `mask_hint`（未指定時は `map_mask(bg)`）外接矩形の 90 度ごとの向きから詰める。"""
+    import cv2
+    if bg is None or not isinstance(bg, np.ndarray) or bg.size == 0 or bg.ndim != 3 or bg.shape[2] < 3:
+        return {"ok": False, "msg": "ミニマップ合わせ（公式の画像）：入力画像が空または不正です"}
+    if (
+        alpha is None
+        or not isinstance(alpha, np.ndarray)
+        or alpha.size == 0
+        or alpha.ndim != 2
+        or not (alpha.dtype == np.bool_ or np.issubdtype(alpha.dtype, np.number))
+    ):
+        return {"ok": False, "msg": "ミニマップ合わせ（公式の画像）：アルファ画像が空または不正です"}
+    bg_bgr = bg[:, :, :3]
+    alpha_u8 = _normalize_alpha_u8(alpha)
+    H, W = bg_bgr.shape[:2]
+    uv = _art_edges(alpha_u8)
+    line = _outline(bg_bgr)
+    if len(uv) < 50 or line.sum() < 200 or float(line.mean()) > 0.06:
+        return {"ok": False, "msg": "ミニマップ合わせ（公式の画像）：縁の線が見つかりません"}
+    dt = cv2.distanceTransform((~line).astype(np.uint8), cv2.DIST_L2, 3)
+    bounds_list = _collect_art_bounds(bg_bgr, line, mask_hint=mask_hint)
+    return _register_art_with_precomputed(H, W, dt, uv, bounds_list, T0=T0, alpha=alpha_u8, line=line)
+
+
+def register_art_auto(
+    bg: np.ndarray,
+    map_name: str | None = None,
+    mask_hint: np.ndarray | None = None,
+    *,
+    top_k: int = 3,
+) -> tuple[str | None, np.ndarray | None, dict]:
+    """同梱の 13 マップ公式アルファを用いて放送ミニマップの位置合わせを自動実行する。
+
+    - `map_name` が指定され同梱パックに存在する場合: そのマップに対して直接 `register_art` を実行する。
+    - `map_name` が未指定/未知の場合: 全 13 マップを 2 段階（第 1 段階: 粗い 4 回転初期値スコアを
+      `refine()` 無しで高速評価 → 第 2 段階: 上位 `top_k` 候補のみ精密 `register_art`）で探索し、
+      最も良い `ok=True` の `(map_name, alpha, T_art)` を返す。
+    """
+    import cv2
+    if bg is None or not isinstance(bg, np.ndarray) or bg.size == 0 or bg.ndim != 3 or bg.shape[2] < 3:
+        return None, None, {"ok": False, "msg": "ミニマップ合わせ（自動）：入力画像が空または不正です"}
+
+    if map_name:
+        alpha = load_bundled_alpha(map_name)
+        if alpha is not None:
+            norm_name = map_name.strip().lower()
+            T = register_art(bg, alpha, mask_hint=mask_hint)
+            if T.get("ok"):
+                T["map_name"] = norm_name
+            return norm_name, alpha, T
+
+    all_alphas = load_all_bundled_alphas()
+    if not all_alphas:
+        return None, None, {"ok": False, "msg": "ミニマップ合わせ（自動）：同梱アルファパックが見つかりません"}
+
+    bg_bgr = bg[:, :, :3]
+    H, W = bg_bgr.shape[:2]
+    line = _outline(bg_bgr)
+    if line.sum() < 200 or float(line.mean()) > 0.06:
+        return None, None, {"ok": False, "msg": "ミニマップ合わせ（自動）：縁の線が見つかりません"}
+    dt = cv2.distanceTransform((~line).astype(np.uint8), cv2.DIST_L2, 3)
+    bounds_list = _collect_art_bounds(bg_bgr, line, mask_hint=mask_hint)
+    if not bounds_list:
+        return None, None, {"ok": False, "msg": "ミニマップ合わせ（自動）：初期位置を推定できません"}
+
+    cap = 8.0
+
+    def _coarse_cost(a0_sub: np.ndarray, th: float, s: float, tx: float, ty: float) -> float:
+        c, sn = math.cos(th), math.sin(th)
+        X = (s * (c * a0_sub[:, 0] - sn * a0_sub[:, 1]) + tx) * H
+        Y = (s * (sn * a0_sub[:, 0] + c * a0_sub[:, 1]) + ty) * H
+        ins = (X >= 0) & (X < W - 1) & (Y >= 0) & (Y < H - 1)
+        d = np.full(len(X), cap)
+        d[ins] = np.minimum(dt[Y[ins].astype(int), X[ins].astype(int)], cap)
+        return float(d.mean())
+
+    # 第 1 段階: 全 13 マップを粗い初期値のみ（refine 無し）で高速スコアリング
+    stage1: list[tuple[float, str, np.ndarray, np.ndarray]] = []
+    for name, alpha in all_alphas.items():
+        uv = _art_edges_cached(name, alpha)
+        if len(uv) < 50:
+            continue
+        a0 = uv - 0.5
+        a0_sub = a0[::4]
+        inits = _art_inits_from_bounds(a0, bounds_list)
+        if not inits:
+            continue
+        best_c = min(_coarse_cost(a0_sub, *p) for p in inits)
+        stage1.append((best_c, name, alpha, uv))
+
+    if not stage1:
+        return None, None, {"ok": False, "msg": "ミニマップ合わせ（自動）：有効な候補マップがありません"}
+
+    stage1.sort(key=lambda r: r[0])
+    k_eff = max(1, min(int(top_k), len(stage1)))
+
+    # 第 2 段階: 上位 top_k 候補を精密 register_art で評価（ok 無し時のみ残りをフォールバック）
+    best_ok: tuple[float, float, str, np.ndarray, dict] | None = None
+    best_any: dict = {"ok": False, "msg": "ミニマップ合わせ（自動）：一致するマップが見つかりません"}
+    best_any_ch = float("inf")
+
+    def _eval_candidates(cands: list[tuple[float, str, np.ndarray, np.ndarray]], stop_on_ok: bool = False) -> None:
+        nonlocal best_ok, best_any, best_any_ch
+        for _, name, alpha, uv in cands:
+            T = _register_art_with_precomputed(H, W, dt, uv, bounds_list, alpha=alpha, line=line)
+            ch = float(T.get("chamfer", 99.0))
+            inl = float(T.get("inlier", 0.0))
+            if ch < best_any_ch:
+                best_any_ch = ch
+                best_any = T
+            if T.get("ok"):
+                key = (ch, -inl)
+                if best_ok is None or key < (best_ok[0], best_ok[1]):
+                    best_ok = (ch, -inl, name, alpha, T)
+                if stop_on_ok:
+                    return
+
+    _eval_candidates(stage1[:k_eff], stop_on_ok=False)
+    if best_ok is None and k_eff < len(stage1):
+        _eval_candidates(stage1[k_eff:], stop_on_ok=True)
+
+    if best_ok is not None:
+        _, _, name, alpha, T = best_ok
+        T["map_name"] = name
+        return name, alpha, T
+    return None, None, best_any
 
 
 def warp_art(img: np.ndarray, T: dict, shape: tuple) -> np.ndarray:

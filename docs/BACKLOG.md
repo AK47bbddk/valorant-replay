@@ -20,7 +20,8 @@
 | ID | 状態 | タイトル | 指示書 | 主な対象ファイル | 完了条件 / 確認方法 |
 |---|---|---|---|---|---|
 | `agent-dot-accuracy` | `DONE` | ミニマップ・エージェント点検知の高精度化（2段階 MLP+2D CNN ＆ `dot_mask` カバー率改善） | [agent-dot-accuracy.md](tasks/agent-dot-accuracy.md) | `vreplay/agent_dots.py`, `vreplay/minimap.py`, `vreplay/tactics.py`, `vreplay/data/agent_dot_model.npz`, `tools/train_agent_dot.py` | PR #6 マージ済み（P=0.929, R=0.933, F1=0.931） |
-| `smoke-detection-accuracy` | `PR_OPEN` | 定半径（`R≈9.0px@H=304`）ドームスモーク検知器とクリーンミニマップ構造事前知識による高精度化 | [smoke-detection-accuracy.md](tasks/smoke-detection-accuracy.md) | `vreplay/smoke_detector.py`, `vreplay/data/smoke_model.npz`, `tools/train_smoke_detector.py`, `vreplay/smokes.py`, `tests/test_smokes.py` | 7-fold LOMO-CV・ブラインド評価・オフライン `pytest` を満たすこと |
+| `smoke-detection-accuracy` | `DONE` | 定半径（`R≈9.0px@H=304`）ドームスモーク検知器とクリーンミニマップ構造事前知識による高精度化 | [smoke-detection-accuracy.md](tasks/smoke-detection-accuracy.md) | `vreplay/smoke_detector.py`, `vreplay/data/smoke_model.npz`, `tools/train_smoke_detector.py`, `vreplay/smokes.py`, `tests/test_smokes.py` | PR #7 マージ済み |
+| `non-playable-mask-hardening` | `PR_OPEN` | 透過＝非プレイ可能領域マスクの強化（全 13 マップ公式アルファ同梱・`register_art_auto`・`playable_region` 厳密パス） | [non-playable-mask-hardening.md](tasks/non-playable-mask-hardening.md) | `tools/build_map_alphas.py`, `vreplay/data/map_alphas.npz`, `vreplay/minimap.py`, `vreplay/tactics.py`, `vreplay/smokes.py`, `tools/eval_all.py` | `/tmp/blind_val` で 52/52 公式アルファ位置合わせ・`gt_in_mask_rate=1.0000`・透過壁穴保持・オフライン `pytest` 全件通過 |
 
 ---
 

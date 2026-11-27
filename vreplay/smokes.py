@@ -129,10 +129,12 @@ def detect_smokes(
     icon_frac: float | None = None,
     require_minimap: bool = False,
     found_agents: list[dict[str, Any]] | None = None,
+    art_alpha: np.ndarray | None = None,
+    T_art: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """現在フレーム（および背景中央値画像）からドームスモークを検知する。
 
-    ``mask`` または ``require_minimap=True`` が与えられた場合、ミニマップ存在確認と
+    ``mask``・``art_alpha``/``T_art`` または ``require_minimap=True`` が与えられた場合、ミニマップ存在確認と
     プレイ可能床 ``floor_inner`` への限定を行い、マップ外・壁内部・HUD 隅からの誤検知を防ぐ。
     空画像・None・サイズ不一致時は例外を投げず空リスト ``[]`` を返す。
     """
@@ -140,7 +142,8 @@ def detect_smokes(
         return []
     if frame_bgr.ndim != 3 or frame_bgr.shape[2] < 3 or frame_bgr.dtype != np.uint8:
         return []
-    if bg_bgr is None and mask is None and not require_minimap:
+    has_art = bool(art_alpha is not None and isinstance(T_art, dict) and T_art.get("ok"))
+    if bg_bgr is None and mask is None and not has_art and not require_minimap:
         return []
     if bg_bgr is not None:
         if (
@@ -188,17 +191,17 @@ def detect_smokes(
             fr_line = MM._outline(frame_bgr[:, :, :3])
             if not MM._frame_matches_mask(auto_mask, fr_line, min_f=0.30, max_line_frac=0.048):
                 return []
-        floor_mask, _ = MM.playable_region(ref_img, mask=auto_mask)
+        floor_mask, _ = MM.playable_region(ref_img, mask=auto_mask, art_alpha=art_alpha, T_art=T_art)
         if floor_mask is None or not floor_mask.any():
             return []
-    elif mask is not None:
+    elif has_art or mask is not None:
         from . import minimap as MM
         ref_img = bg_bgr if bg_bgr is not None else frame_bgr
-        mask_bool = mask.astype(bool)
-        floor_mask, _ = MM.playable_region(ref_img, mask=mask)
+        mask_bool = mask.astype(bool) if mask is not None else None
+        floor_mask, _ = MM.playable_region(ref_img, mask=mask, art_alpha=art_alpha, T_art=T_art)
         if floor_mask is None or not floor_mask.any():
             return []
-        if bg_bgr is not None:
+        if not has_art and mask_bool is not None and bg_bgr is not None:
             diff_bg_m = cv2.absdiff(frame_bgr[:, :, :3], bg_bgr[:, :, :3])
             if int(np.count_nonzero(np.max(diff_bg_m, axis=2) >= 12)) >= 40:
                 ref_gray = cv2.cvtColor(ref_img[:, :, :3], cv2.COLOR_BGR2GRAY)
