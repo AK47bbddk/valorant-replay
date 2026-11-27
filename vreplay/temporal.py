@@ -490,7 +490,66 @@ def correct_agent_dots_sequence(
                 all_accepted_at_i.append(new_dot)
                 added += 1
 
+    # Pass 3: Enforce alive_counts upper bounds (per-color and/or total)
+    if alive_counts is not None:
+        def _dot_priority(d: dict[str, Any]) -> tuple[int, float]:
+            is_obs = 0 if str(d.get("temporal") or "") in ("interp", "overlap_interp") else 1
+            sc = _finite_float(d.get("score"), 0.5)
+            return (is_obs, sc if sc is not None else 0.5)
+
+        for i in range(n):
+            if i >= len(alive_counts) or not isinstance(alive_counts[i], dict):
+                continue
+            ac = alive_counts[i]
+            cur = result[i]
+            for c_key in ("warm", "cool"):
+                if c_key in ac and ac[c_key] is not None:
+                    try:
+                        lim = max(0, int(ac[c_key]))
+                    except (TypeError, ValueError):
+                        continue
+                    c_dots = [d for d in cur if d.get("color") == c_key]
+                    if len(c_dots) > lim:
+                        c_dots.sort(key=_dot_priority, reverse=True)
+                        keep_ids = {id(d) for d in c_dots[:lim]}
+                        cur = [d for d in cur if d.get("color") != c_key or id(d) in keep_ids]
+            if "total" in ac and ac["total"] is not None:
+                try:
+                    t_lim = max(0, int(ac["total"]))
+                except (TypeError, ValueError):
+                    t_lim = None
+                if t_lim is not None and len(cur) > t_lim:
+                    cur.sort(key=_dot_priority, reverse=True)
+                    cur = cur[:t_lim]
+            result[i] = cur
+
     return result
+
+
+# 同時展開しうるドームスモーク数の上限（コントローラー＋クラウドバースト）
+DOME_SMOKE_CAPS: dict[str, int] = {
+    "omen": 2,
+    "astra": 2,
+    "brimstone": 3,
+    "clove": 2,
+    "viper": 1,
+    "harbor": 1,
+    "miks": 2,
+    "jett": 2,
+}
+
+
+def max_dome_smokes_for_comp(agents: list[str] | None) -> int | None:
+    """両チームの出場エージェント構成から同時展開しうるドームスモーク上限を返す。
+
+    構成情報が空/未指定の場合は制約なし（``None``）を返す。
+    """
+    if not agents:
+        return None
+    cleaned = [str(a).strip().lower() for a in agents if a and str(a).strip()]
+    if not cleaned:
+        return None
+    return sum(DOME_SMOKE_CAPS.get(a, 0) for a in cleaned)
 
 
 def correct_smokes_sequence(
@@ -501,8 +560,11 @@ def correct_smokes_sequence(
     suppress_lone_conf: float = 0.90,
     bridge_min_conf: float = 0.55,
     aspect: float = 1.0,
+    min_duration_sec: float = 0.0,
+    controller_agents: list[str] | None = None,
+    max_active_smokes: int | None = None,
 ) -> list[list[dict[str, Any]]]:
-    """Apply ±2s temporal consistency (1-frame FP suppression + 1-frame dropout bridging) to smokes.
+    """Apply ±2s temporal consistency, stationary duration filtering, and comp caps to smokes.
 
     Never mutates ``frames`` or any input smoke dict.
     """
@@ -521,6 +583,7 @@ def correct_smokes_sequence(
     bridge_c = _finite_float(bridge_min_conf, 0.55)
     if bridge_c is None:
         bridge_c = 0.55
+    min_dur = max(0.0, _finite_float(min_duration_sec, 0.0) or 0.0)
 
     ts: list[float] = []
     valid: list[bool] = []
@@ -612,6 +675,72 @@ def correct_smokes_sequence(
             })
             result[i].append(bridged)
         result[i].sort(key=lambda s: float(_finite_float(s.get("conf"), 0.0) or 0.0), reverse=True)
+
+    # Pass 3: Stationary persistence duration filter (dome smokes persist 13.5-19.25s)
+    if min_dur > 0.0 and n >= 2:
+        tracks: list[list[tuple[int, int]]] = []
+        active_tid: dict[tuple[int, int], int] = {}
+        for i in range(n):
+            if not valid[i] or not result[i]:
+                continue
+            prev_i = i - 1
+            can_link = (
+                prev_i >= 0
+                and valid[prev_i]
+                and bool(result[prev_i])
+                and 0.0 < (ts[i] - ts[prev_i]) <= mdt
+            )
+            matched_cur: set[int] = set()
+            if can_link:
+                pts_p = [(s["x"], s["y"]) for s in result[prev_i]]
+                pts_c = [(s["x"], s["y"]) for s in result[i]]
+                m_pairs, _, _ = min_cost_match(pts_p, pts_c, mdist, aspect=asp)
+                for pi, ci, _ in m_pairs:
+                    tid = active_tid.get((prev_i, pi))
+                    if tid is None:
+                        tid = len(tracks)
+                        tracks.append([(prev_i, pi)])
+                        active_tid[(prev_i, pi)] = tid
+                    tracks[tid].append((i, ci))
+                    active_tid[(i, ci)] = tid
+                    matched_cur.add(ci)
+            for ci in range(len(result[i])):
+                if ci not in matched_cur:
+                    tid = len(tracks)
+                    tracks.append([(i, ci)])
+                    active_tid[(i, ci)] = tid
+
+        drop_nodes: set[tuple[int, int]] = set()
+        for tr in tracks:
+            t_span = ts[tr[-1][0]] - ts[tr[0][0]]
+            peak_c = max(float(_finite_float(result[fi][si].get("conf"), 0.0) or 0.0) for fi, si in tr)
+            if t_span + 1e-6 < min_dur and peak_c < supp_c:
+                drop_nodes.update(tr)
+        if drop_nodes:
+            for i in range(n):
+                result[i] = [s for si, s in enumerate(result[i]) if (i, si) not in drop_nodes]
+
+    # Pass 4: Controller composition / simultaneous smoke upper bound
+    smoke_cap = max_active_smokes if max_active_smokes is not None else max_dome_smokes_for_comp(controller_agents)
+    if smoke_cap is not None:
+        smoke_cap = max(0, int(smoke_cap))
+        for i in range(n):
+            if not result[i]:
+                continue
+            if smoke_cap == 0:
+                result[i] = [
+                    s for s in result[i]
+                    if (float(_finite_float(s.get("conf"), 0.0) or 0.0)) >= 0.96
+                ]
+            elif len(result[i]) > smoke_cap:
+                result[i].sort(
+                    key=lambda s: (
+                        0 if str(s.get("temporal") or "") == "interp" else 1,
+                        float(_finite_float(s.get("conf"), 0.0) or 0.0),
+                    ),
+                    reverse=True,
+                )
+                result[i] = result[i][:smoke_cap]
 
     return result
 

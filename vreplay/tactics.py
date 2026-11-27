@@ -598,7 +598,21 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         entries.sort(key=lambda e: e[0])
         if use_temporal_dots:
             seq = [{"t": e[0], "dots": e[2], "valid": e[3]} for e in entries]
-            corr_lists = TMP.correct_agent_dots_sequence(seq, per_color=5, aspect=aspect, dot_mask=near)
+            alive_seq = None
+            if alive_fn is not None:
+                alive_seq = []
+                for e in entries:
+                    try:
+                        a1, a2 = alive_fn(e[0])
+                        if a1 is not None and a2 is not None:
+                            alive_seq.append({"total": max(0, int(a1)) + max(0, int(a2))})
+                        else:
+                            alive_seq.append(None)
+                    except Exception:
+                        alive_seq.append(None)
+            corr_lists = TMP.correct_agent_dots_sequence(
+                seq, per_color=5, aspect=aspect, dot_mask=near, alive_counts=alive_seq,
+            )
         else:
             corr_lists = [e[2] for e in entries]
         for (t, r, _orig, is_valid), found in zip(entries, corr_lists):
@@ -818,39 +832,54 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         if keep and background is not None:
             try:
                 from . import smokes as SM
+                from . import temporal as TMP
                 eff_T = T if T.get("ok") else None
                 eff_map = (meta.get("name") if meta else None) or map_name
+                all_agents = (
+                    [a for ags in (agent_teams or {}).values() for a in (ags or []) if a]
+                    if agent_teams else None
+                )
                 for lbl in ("1:40", "1:30", "1:15", "1:00"):
                     frames = keep.get((n, lbl))
                     if not frames:
                         continue
                     if isinstance(frames, tuple):
                         frames = [frames]
-                    mm_best = None
-                    for _d, _t, cand_mm in frames:
+                    valid_frs: list[tuple[float, float, np.ndarray]] = []
+                    for d_, t_, cand_mm in frames:
                         if mask is not None and cand_mm.shape[:2] == mask.shape[:2]:
                             if not MM._frame_matches_mask(mask, MM._outline(cand_mm), min_f=0.30, max_line_frac=0.048):
                                 continue
                         elif not is_black_canvas and not MM.detect_minimap_region(cand_mm)[0]:
                             continue
-                        mm_best = cand_mm
-                        break
-                    if mm_best is None:
+                        valid_frs.append((float(d_), float(t_), cand_mm))
+                    if not valid_frs:
                         smokes_by_mark[lbl] = []
                         continue
-                    smokes_by_mark[lbl] = SM.detect_smokes(
-                        mm_best,
-                        background,
-                        transform=eff_T,
-                        map_name=eff_map,
-                        placed=placed,
-                        reg=reg,
+                    valid_frs.sort(key=lambda x: x[1])
+                    best_idx = min(range(len(valid_frs)), key=lambda idx: valid_frs[idx][0])
+                    seq_sm = []
+                    for _d, t_, cand_mm in valid_frs:
+                        det = SM.detect_smokes(
+                            cand_mm,
+                            background,
+                            transform=eff_T,
+                            map_name=eff_map,
+                            placed=placed,
+                            reg=reg,
+                            aspect=aspect,
+                            mask=mask,
+                            icon_frac=icon_frac,
+                            art_alpha=art_alpha,
+                            T_art=T_art,
+                        )
+                        seq_sm.append({"t": t_, "smokes": det, "valid": True})
+                    corr_sm = TMP.correct_smokes_sequence(
+                        seq_sm,
                         aspect=aspect,
-                        mask=mask,
-                        icon_frac=icon_frac,
-                        art_alpha=art_alpha,
-                        T_art=T_art,
+                        controller_agents=all_agents,
                     )
+                    smokes_by_mark[lbl] = corr_sm[best_idx] if best_idx < len(corr_sm) else []
             except Exception:
                 smokes_by_mark = {}
         rt["smokes"] = smokes_by_mark
