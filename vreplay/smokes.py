@@ -140,23 +140,41 @@ def detect_smokes(
     """
     if frame_bgr is None or not isinstance(frame_bgr, np.ndarray) or frame_bgr.size == 0:
         return []
-    if frame_bgr.ndim != 3 or frame_bgr.shape[2] < 3:
+    if frame_bgr.ndim != 3 or frame_bgr.shape[2] < 3 or frame_bgr.dtype != np.uint8:
         return []
     has_art = bool(art_alpha is not None and isinstance(T_art, dict) and T_art.get("ok"))
     if bg_bgr is None and mask is None and not has_art and not require_minimap:
         return []
     if bg_bgr is not None:
-        if not isinstance(bg_bgr, np.ndarray) or bg_bgr.size == 0 or bg_bgr.ndim != 3:
+        if (
+            not isinstance(bg_bgr, np.ndarray)
+            or bg_bgr.size == 0
+            or bg_bgr.ndim != 3
+            or bg_bgr.dtype != np.uint8
+        ):
             return []
         if bg_bgr.shape[:2] != frame_bgr.shape[:2] or bg_bgr.shape[2] < 3:
             return []
 
     h, w = frame_bgr.shape[:2]
+    if h < 16 or w < 16 or max(w / float(h), h / float(w)) > 4.0:
+        return []
     if mask is not None and (not isinstance(mask, np.ndarray) or mask.ndim != 2 or mask.shape != (h, w)):
         return []
-    eff_min_r = int(min_radius_px) if min_radius_px is not None else max(4, int(round(0.018 * h)))
-    eff_max_r = int(max_radius_px) if max_radius_px is not None else max(12, int(round(0.13 * h)))
-    if eff_min_r <= 0 or eff_max_r < eff_min_r:
+
+    def _parse_radius(val: Any, default: int) -> int | None:
+        if val is None:
+            return default
+        if isinstance(val, bool) or not isinstance(val, (int, float, np.integer, np.floating)):
+            return None
+        fval = float(val)
+        if not math.isfinite(fval):
+            return None
+        return int(fval)
+
+    eff_min_r = _parse_radius(min_radius_px, max(4, int(round(0.018 * h))))
+    eff_max_r = _parse_radius(max_radius_px, max(12, int(round(0.13 * h))))
+    if eff_min_r is None or eff_max_r is None or eff_min_r <= 0 or eff_max_r < eff_min_r:
         return []
 
     floor_mask: np.ndarray | None = None
@@ -179,9 +197,19 @@ def detect_smokes(
     elif has_art or mask is not None:
         from . import minimap as MM
         ref_img = bg_bgr if bg_bgr is not None else frame_bgr
+        mask_bool = mask.astype(bool) if mask is not None else None
         floor_mask, _ = MM.playable_region(ref_img, mask=mask, art_alpha=art_alpha, T_art=T_art)
         if floor_mask is None or not floor_mask.any():
             return []
+        if not has_art and mask_bool is not None and bg_bgr is not None:
+            diff_bg_m = cv2.absdiff(frame_bgr[:, :, :3], bg_bgr[:, :, :3])
+            if int(np.count_nonzero(np.max(diff_bg_m, axis=2) >= 12)) >= 40:
+                ref_gray = cv2.cvtColor(ref_img[:, :, :3], cv2.COLOR_BGR2GRAY)
+                added = floor_mask & (~mask_bool)
+                if added.any():
+                    floor_mask = floor_mask & (~(added & (ref_gray < 95)))
+                    if not floor_mask.any():
+                        return []
 
     if floor_mask is not None:
         floor_inner = cv2.erode(floor_mask.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
@@ -192,11 +220,25 @@ def detect_smokes(
 
     eff_aspect = float(aspect) if aspect is not None else (w / max(1.0, float(h)))
     norm_dim = float(max(1, min(w, h)))
-    D = max(8.0, float(icon_frac or 0.048) * h)
+    icon_f = (
+        float(icon_frac)
+        if isinstance(icon_frac, (int, float, np.integer, np.floating))
+        and not isinstance(icon_frac, bool)
+        and math.isfinite(float(icon_frac))
+        and float(icon_frac) > 0.0
+        else 0.048
+    )
+    D = max(8.0, icon_f * h)
     agents_px = [
         (float(a["x"]) * w, float(a["y"]) * h)
         for a in (found_agents or [])
-        if isinstance(a, dict) and "x" in a and "y" in a
+        if isinstance(a, dict)
+        and isinstance(a.get("x"), (int, float, np.integer, np.floating))
+        and isinstance(a.get("y"), (int, float, np.integer, np.floating))
+        and not isinstance(a.get("x"), bool)
+        and not isinstance(a.get("y"), bool)
+        and math.isfinite(float(a["x"]))
+        and math.isfinite(float(a["y"]))
     ]
 
     def _near_agent(px: float, py: float, rad: float | None = None, g_std: float | None = None) -> bool:
@@ -217,11 +259,92 @@ def detect_smokes(
 
     bg_gray = cv2.cvtColor(bg_bgr[:, :, :3], cv2.COLOR_BGR2GRAY) if bg_bgr is not None else None
     bg_hsv = cv2.cvtColor(bg_bgr[:, :, :3], cv2.COLOR_BGR2HSV) if bg_bgr is not None else None
+    bg_is_distinct = (
+        bg_bgr is not None
+        and int(np.count_nonzero(np.max(cv2.absdiff(frame_rgb, bg_bgr[:, :, :3]), axis=2) >= 12)) >= 40
+    )
 
     candidates: list[tuple[float, float, float, float]] = []  # (cx, cy, rad, conf)
 
-    # 1) 背景差分ベース（色付き・半透明・合成テストの両方に対応）
-    if bg_bgr is not None and bg_gray is not None and bg_hsv is not None:
+    # 0) 実ミニマップ＋デフォルト半径時は定半径学習検知器（smoke_detector）を優先使用
+    use_learned = (
+        floor_mask is not None
+        and floor_med >= 75.0
+        and min_radius_px is None
+        and max_radius_px is None
+    )
+    used_learned = False
+    if use_learned:
+        from . import smoke_detector as SD
+        if SD.load_model() is not None:
+            used_learned = True
+            candidates.extend(
+                SD.detect_smokes_learned(
+                    frame_bgr,
+                    bg_bgr,
+                    floor_mask,
+                    found_agents=found_agents,
+                )
+            )
+            # 明色の滑らかなカラー付きドーム（Omen/Viper/Clove/Harbor 等）のみ補完
+            if bg_is_distinct and bg_bgr is not None and bg_gray is not None and bg_hsv is not None:
+                diff = cv2.absdiff(frame_rgb, bg_bgr[:, :, :3])
+                diff_max = np.max(diff, axis=2)
+                diff_blur = cv2.GaussianBlur(diff_max, (3, 3), 0)
+                _, diff_bin = cv2.threshold(diff_blur, 22, 255, cv2.THRESH_BINARY)
+                diff_bin &= floor_inner.astype(np.uint8) * 255
+                k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                diff_bin = cv2.morphologyEx(diff_bin, cv2.MORPH_OPEN, k_open)
+                diff_bin = cv2.morphologyEx(diff_bin, cv2.MORPH_CLOSE, k_close)
+                contours, _ = cv2.findContours(diff_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                c_min_r = max(6.0, 0.026 * h)
+                c_max_r = max(10.0, 0.042 * h)
+                for cnt in contours:
+                    area = float(cv2.contourArea(cnt))
+                    if area < math.pi * (c_min_r ** 2) * 0.60 or area > math.pi * (c_max_r ** 2) * 1.20:
+                        continue
+                    (cx, cy), radius = cv2.minEnclosingCircle(cnt)
+                    if radius < c_min_r or radius > c_max_r:
+                        continue
+                    ix, iy = min(w - 1, max(0, int(round(cx)))), min(h - 1, max(0, int(round(cy))))
+                    if not floor_inner[iy, ix]:
+                        continue
+                    fill_ratio = area / max(1e-6, math.pi * (radius ** 2))
+                    perim = float(cv2.arcLength(cnt, True))
+                    if fill_ratio < 0.72 or perim <= 1e-6:
+                        continue
+                    circularity = (4.0 * math.pi * area) / (perim ** 2)
+                    if circularity < 0.72:
+                        continue
+                    cnt_mask = np.zeros((h, w), dtype=np.uint8)
+                    cv2.drawContours(cnt_mask, [cnt], -1, 255, thickness=-1)
+                    rim_k = max(2, min(int(radius // 2), int(round(0.35 * radius))))
+                    k_deep = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * rim_k + 1, 2 * rim_k + 1))
+                    deep_pixels = cv2.erode(cnt_mask, k_deep) > 0
+                    if int(np.count_nonzero(deep_pixels)) < 9:
+                        continue
+                    deep_edge = float(np.mean(lap_frame[deep_pixels]))
+                    deep_diff_std = float(np.std(diff_blur[deep_pixels]))
+                    deep_g_std = float(np.std(gray_frame[deep_pixels]))
+                    fr_deep_g = float(np.mean(gray_frame[deep_pixels]))
+                    fr_deep_s = float(np.mean(hsv_frame[..., 1][deep_pixels]))
+                    bg_core_s = float(np.mean(bg_hsv[..., 1][deep_pixels]))
+                    bg_core_g = float(np.mean(bg_gray[deep_pixels]))
+                    if (
+                        fr_deep_s >= 55.0
+                        and deep_edge <= 12.0
+                        and deep_diff_std <= 12.0
+                        and deep_g_std <= 12.0
+                        and bg_core_s <= 60.0
+                        and bg_core_g >= 85.0
+                        and fr_deep_g <= floor_med + 25.0
+                        and not _near_agent(cx, cy, radius, deep_g_std)
+                    ):
+                        candidates.append((float(cx), float(cy), float(radius), 0.78))
+
+    # 1) 背景差分ベース（色付き・半透明・合成テスト・モデル未ロード時のフォールバック）
+    if not used_learned and bg_bgr is not None and bg_gray is not None and bg_hsv is not None:
         diff = cv2.absdiff(frame_rgb, bg_bgr[:, :, :3])
         diff_max = np.max(diff, axis=2)
         diff_blur = cv2.GaussianBlur(diff_max, (3, 3), 0)
@@ -340,8 +463,8 @@ def detect_smokes(
             )
             candidates.append((float(cx), float(cy), float(radius), float(np.clip(conf, 0.0, 1.0))))
 
-    # 2) 床輝度低下ベースのドーム検出（単一フレームや 5s クリップで中央値に焼き込まれたスモークを補完）
-    if floor_mask is not None and floor_med >= 75.0:
+    # 2) 床輝度低下ベースのドーム検出（モデル未ロード時・カスタム半径時のフォールバック）
+    if not used_learned and floor_mask is not None and floor_med >= 75.0:
         if bg_gray is not None and bg_hsv is not None:
             drop_bg = bg_gray.astype(np.float32) - gray_frame.astype(np.float32)
             drop_fl = floor_med - gray_frame.astype(np.float32)
@@ -351,12 +474,15 @@ def detect_smokes(
                 & (bg_gray >= 85)
                 & (gray_frame <= int(round(floor_med - 12.0)))
             )
-            cand_static = (
-                (drop_fl >= 16.0)
-                & (bg_hsv[..., 1] <= 55)
-                & (gray_frame <= min(112, int(round(floor_med - 16.0))))
-            )
-            cand_drop = cand_bg | cand_static
+            if bg_is_distinct:
+                cand_drop = cand_bg
+            else:
+                cand_static = (
+                    (drop_fl >= 16.0)
+                    & (bg_hsv[..., 1] <= 55)
+                    & (gray_frame <= min(112, int(round(floor_med - 16.0))))
+                )
+                cand_drop = cand_bg | cand_static
         else:
             cand_drop = (
                 ((floor_med - gray_frame.astype(np.float32)) >= 16.0)
