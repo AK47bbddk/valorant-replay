@@ -20,7 +20,8 @@
 | ID | 状態 | タイトル | 指示書 | 主な対象ファイル | 完了条件 / 確認方法 |
 |---|---|---|---|---|---|
 | `agent-dot-accuracy` | `PR_OPEN` | ミニマップ・エージェント点検知の高精度化（2段階 MLP+2D CNN ＆ `dot_mask` カバー率改善） | [agent-dot-accuracy.md](tasks/agent-dot-accuracy.md) | `vreplay/agent_dots.py`, `vreplay/minimap.py`, `vreplay/tactics.py`, `vreplay/data/agent_dot_model.npz`, `tools/train_agent_dot.py` | `/tmp/blind_val --tol 0.06` で Precision=0.921, Recall=0.933, F1=0.927（両方 > 0.90）を達成し、オフライン `pytest` が通ること |
-| `non-playable-mask-hardening` | `IN_PROGRESS` | 透過＝非プレイ可能領域マスクの強化（全 13 マップ公式アルファ同梱・`register_art_auto`・`playable_region` 厳密パス） | [non-playable-mask-hardening.md](tasks/non-playable-mask-hardening.md) | `tools/build_map_alphas.py`, `vreplay/data/map_alphas.npz`, `vreplay/minimap.py`, `vreplay/tactics.py`, `vreplay/smokes.py`, `tools/eval_all.py` | `/tmp/blind_val` で 52/52 公式アルファ位置合わせ・`gt_in_mask_rate=1.0000`・透過壁穴保持・オフライン `pytest` 全件通過 |
+| `non-playable-mask-hardening` | `PR_OPEN` | 透過＝非プレイ可能領域マスクの強化（全 13 マップ公式アルファ同梱・`register_art_auto`・`playable_region` 厳密パス） | [non-playable-mask-hardening.md](tasks/non-playable-mask-hardening.md) | `tools/build_map_alphas.py`, `vreplay/data/map_alphas.npz`, `vreplay/minimap.py`, `vreplay/tactics.py`, `vreplay/smokes.py`, `tools/eval_all.py` | `/tmp/blind_val` で 52/52 公式アルファ位置合わせ・`gt_in_mask_rate=1.0000`・透過壁穴保持・オフライン `pytest` 全件通過 |
+| `temporal-dot-correction` | `IN_PROGRESS` | 1R @ 2秒間隔の ±2 秒時系列補正（ハンガリアン重なり補完・低閾値スナップ・スモーク単発 FP 抑止） | [temporal-dot-correction.md](tasks/temporal-dot-correction.md) | `vreplay/temporal.py`, `vreplay/agent_dots.py`, `vreplay/tactics.py`, `tools/eval_temporal_gif.py`, `tests/test_temporal.py` | オフライン `pytest` 全件通過、`/tmp/blind_val` 回帰ゼロ、Drive 1R GIF 3本 @ 2秒での補完・HTML プレビュー確認 |
 
 ---
 

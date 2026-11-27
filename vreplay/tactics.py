@@ -580,22 +580,39 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         if near is None:
             dist = cv2.distanceTransform((~mask).astype(np.uint8), cv2.DIST_L2, 3)
             near = dist <= max(3.0, 0.02 * mask.shape[0])
+    by_round: dict[int, list[tuple[float, dict, list[dict], bool]]] = {}
     for t, r, found, line_mm in raw:
-        if mask is not None and not MM._frame_matches_mask(mask, line_mm, min_f=0.30, max_line_frac=0.048):
-            continue
-        if near is not None:
-            hh, ww = near.shape
-            found = [d for d in found if near[min(hh - 1, int(d["y"] * hh)), min(ww - 1, int(d["x"] * ww))]]
-        found = ([d for d in found if d["color"] == "warm"][:5] + [d for d in found if d["color"] == "cool"][:5])
-        warm = [d for d in found if d["color"] == "warm"]
-        cool = [d for d in found if d["color"] == "cool"]
-        samples.append({"t": t, "n": int(r["n"]), "side1": _canon(r.get("side1")),
-                        "warm": _centroid(warm), "cool": _centroid(cool), "n_dots": len(found),
-                        "n_warm": len(warm), "n_cool": len(cool)})
-        for d in found:
-            dots.append({"t": t, "n": int(r["n"]), "side1": _canon(r.get("side1")),
-                         "color": d["color"], "x": d["x"], "y": d["y"], "area": d.get("area", 0),
-                         "k": int(d.get("k") or 1)})
+        is_valid = not (mask is not None and not MM._frame_matches_mask(mask, line_mm, min_f=0.30, max_line_frac=0.048))
+        if is_valid:
+            if near is not None:
+                hh, ww = near.shape
+                found = [d for d in found if near[min(hh - 1, max(0, int(d["y"] * hh))), min(ww - 1, max(0, int(d["x"] * ww)))]]
+            found = ([d for d in found if d["color"] == "warm"][:5] + [d for d in found if d["color"] == "cool"][:5])
+        else:
+            found = []
+        by_round.setdefault(int(r["n"]), []).append((t, r, found, is_valid))
+    use_temporal_dots = bool(tcfg.get("temporal_dots", True))
+    if use_temporal_dots:
+        from . import temporal as TMP
+    for rn, entries in by_round.items():
+        entries.sort(key=lambda e: e[0])
+        if use_temporal_dots:
+            seq = [{"t": e[0], "dots": e[2], "valid": e[3]} for e in entries]
+            corr_lists = TMP.correct_agent_dots_sequence(seq, per_color=5, aspect=aspect, dot_mask=near)
+        else:
+            corr_lists = [e[2] for e in entries]
+        for (t, r, _orig, is_valid), found in zip(entries, corr_lists):
+            if not is_valid:
+                continue
+            warm = [d for d in found if d["color"] == "warm"]
+            cool = [d for d in found if d["color"] == "cool"]
+            samples.append({"t": t, "n": rn, "side1": _canon(r.get("side1")),
+                            "warm": _centroid(warm), "cool": _centroid(cool), "n_dots": len(found),
+                            "n_warm": len(warm), "n_cool": len(cool)})
+            for d in found:
+                dots.append({"t": t, "n": rn, "side1": _canon(r.get("side1")),
+                             "color": d["color"], "x": d["x"], "y": d["y"], "area": d.get("area", 0),
+                             "k": int(d.get("k") or 1)})
     if not samples:
         return None
     # 重なったアイコン（同じ場所に 2〜3 人）は 1 つの塊になる。検出時に塊の大きさから見積もった人数（k）を使う
