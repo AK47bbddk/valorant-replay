@@ -355,12 +355,103 @@ def test_register_art_bbox_init_and_register_art_auto_on_fixtures():
         # 2) map_name 指定の register_art_auto
         name_k, a_k, T_k = M.register_art_auto(img, map_name=expected_map, mask_hint=raw_m)
         assert name_k == expected_map and a_k is not None and T_k["ok"]
+        assert T_k.get("map_name") == expected_map
 
         # 3) map_name=None の 2 段階自動識別が正しいマップを特定すること
         name_a, a_a, T_a = M.register_art_auto(img, map_name=None, mask_hint=raw_m)
         assert name_a == expected_map and a_a is not None and T_a["ok"], (fname, name_a, T_a)
+        assert T_a.get("map_name") == expected_map
 
     # 非ミニマップ・空画像は安全に失敗を返す
     n_bad, a_bad, T_bad = M.register_art_auto(np.zeros((240, 240, 3), dtype=np.uint8))
     assert n_bad is None and a_bad is None and not T_bad["ok"]
+
+
+def test_art_input_validation_and_malformed_inputs_never_crash():
+    from pathlib import Path
+    import cv2
+    from vreplay import smokes as SM, tactics as TA
+
+    a_abyss = M.load_bundled_alpha("abyss")
+    assert a_abyss is not None
+    bg_zero = np.zeros((304, 304, 3), dtype=np.uint8)
+    bg_gray_3ch = np.full((304, 320, 3), 120, dtype=np.uint8)
+    good_T = {"ok": True, "mirror": False, "theta": 0.0, "scale": 0.85, "tx": 0.5, "ty": 0.5, "aspect": 1.0}
+
+    # 1) 不正な art_alpha / T_art は playable_region / detect_dots / detect_smokes で例外を出さない
+    invalid_pairs = [
+        (a_abyss, {"ok": True}),
+        (a_abyss, {"ok": True, "theta": True, "scale": 1.0, "tx": 0.5, "ty": 0.5}),
+        (a_abyss, {"ok": True, "theta": 0.0, "scale": 0.0, "tx": 0.5, "ty": 0.5}),
+        (a_abyss, {"ok": True, "theta": float("nan"), "scale": 1.0, "tx": 0.5, "ty": 0.5}),
+        (np.full((64, 64, 3), 255, dtype=np.uint8), good_T),
+        (np.zeros((0, 0), dtype=np.uint8), good_T),
+        ("not_an_array", good_T),
+    ]
+    for bad_a, bad_t in invalid_pairs:
+        assert M.playable_region(bg_gray_3ch, art_alpha=bad_a, T_art=bad_t) == (None, None)
+        assert TA.detect_dots(bg_gray_3ch, art_alpha=bad_a, T_art=bad_t) == []
+        assert SM.detect_smokes(bg_gray_3ch, bg_gray_3ch, art_alpha=bad_a, T_art=bad_t) == []
+
+    # bool / int64 の 2D art_alpha も uint8 へ安全変換され例外を出さない
+    for alt_a in (np.ones((64, 64), dtype=bool), np.full((64, 64), 255, dtype=np.int64)):
+        fl, dm = M.playable_region(bg_zero, art_alpha=alt_a, T_art=good_T)
+        assert fl is not None and dm is not None
+        assert TA.detect_dots(bg_zero, art_alpha=alt_a, T_art=good_T) == []
+        assert SM.detect_smokes(bg_zero, bg_zero, art_alpha=alt_a, T_art=good_T) == []
+
+    # 2) 2D グレースケール bg・bool/int64 alpha・不完全 T0 は register_art / register_art_auto で落ちない
+    gray_2d = np.full((304, 304), 128, dtype=np.uint8)
+    assert not M.register_art(gray_2d, a_abyss)["ok"]
+    assert not M.register_art_auto(gray_2d)[2]["ok"]
+    assert not M.register_art(bg_zero, np.ones((64, 64), dtype=bool))["ok"]
+    assert not M.register_art(bg_zero, np.full((64, 64), 255, dtype=np.int64))["ok"]
+    assert not M.register_art(bg_zero, np.full((64, 64, 3), 255, dtype=np.uint8))["ok"]
+
+    fx = Path(__file__).parent / "fixtures"
+    spl = cv2.imread(str(fx / "minimap_split_riot.jpg"))
+    a_split = M.load_bundled_alpha("split")
+    assert a_split is not None
+    # bool / int64 alpha と不完全 T0 でも実ミニマップ上で安全に動作する
+    T_bool = M.register_art(spl, a_split > 128, T0={"scale": 1.0})
+    assert T_bool["ok"], T_bool
+    T_i64 = M.register_art(spl, a_split.astype(np.int64))
+    assert T_i64["ok"], T_i64
+
+
+def test_register_art_auto_rejects_non_minimap_hud_killfeed_and_noise():
+    from pathlib import Path
+    import cv2
+
+    rng = np.random.default_rng(42)
+    rand_rgb = rng.integers(0, 256, (304, 304, 3), dtype=np.uint8)
+    rand_gray = np.repeat(rng.integers(0, 256, (304, 304, 1), dtype=np.uint8), 3, axis=2)
+
+    white_dots = np.zeros((304, 304, 3), dtype=np.uint8)
+    white_dots[rng.random((304, 304)) < 0.08] = (245, 245, 245)
+
+    hud = np.zeros((304, 304, 3), dtype=np.uint8)
+    for y in range(20, 290, 30):
+        cv2.rectangle(hud, (15, y), (285, y + 18), (240, 240, 240), 1)
+    cv2.putText(hud, "SCORE 12 - 10", (40, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+
+    fx = Path(__file__).parent / "fixtures"
+    cases = [
+        ("random_rgb", rand_rgb),
+        ("random_gray", rand_gray),
+        ("white_dots_8pct", white_dots),
+        ("synthetic_hud_bars", hud),
+        ("killfeed_strip_ads", cv2.imread(str(fx / "killfeed_strip_ads.jpg"))),
+        ("killfeed_strip_mastercard", cv2.imread(str(fx / "killfeed_strip_mastercard.jpg"))),
+    ]
+    a_abyss = M.load_bundled_alpha("abyss")
+    assert a_abyss is not None
+    assert not M.register_art(white_dots, a_abyss)["ok"]
+    assert not M.register_art(rand_rgb, a_abyss)["ok"]
+
+    for name, im in cases:
+        m, al, T = M.register_art_auto(im, map_name=None)
+        assert not T.get("ok"), f"false registration on {name}: {m} {T}"
+        assert m is None and al is None
+
 

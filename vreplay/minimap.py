@@ -429,6 +429,34 @@ def detect_minimap_region(
     return True, m
 
 
+def _normalize_alpha_u8(alpha: np.ndarray) -> np.ndarray:
+    """2D アルファ配列を OpenCV 処理用の uint8 (0..255) に安全変換する。"""
+    if alpha.dtype == np.uint8:
+        return alpha
+    if alpha.dtype == np.bool_:
+        return alpha.astype(np.uint8) * 255
+    return (alpha > 128).astype(np.uint8) * 255
+
+
+def _valid_art_inputs(art_alpha: np.ndarray | None, T_art: dict | None) -> bool:
+    """`art_alpha`（非空 2D 数値/bool ndarray）と `T_art`（ok=True・有限数値・scale>0）を検証する。"""
+    if not isinstance(art_alpha, np.ndarray) or art_alpha.ndim != 2 or art_alpha.size == 0:
+        return False
+    if not (art_alpha.dtype == np.bool_ or np.issubdtype(art_alpha.dtype, np.number)):
+        return False
+    if not isinstance(T_art, dict) or not bool(T_art.get("ok")):
+        return False
+    for k in ("theta", "scale", "tx", "ty"):
+        if k not in T_art:
+            return False
+        v = T_art[k]
+        if isinstance(v, (bool, np.bool_)) or not isinstance(v, (int, float, np.number)):
+            return False
+        if not math.isfinite(float(v)):
+            return False
+    return float(T_art["scale"]) > 0.0
+
+
 def playable_region(
     img_or_bg: np.ndarray | None,
     *,
@@ -443,9 +471,9 @@ def playable_region(
         return None, None
     H, W = img_or_bg.shape[:2]
 
-    from_art = bool(art_alpha is not None and isinstance(T_art, dict) and T_art.get("ok"))
+    from_art = _valid_art_inputs(art_alpha, T_art)
     if from_art:
-        floor_mask = warp_art(art_alpha, T_art, (H, W)) > 128
+        floor_mask = warp_art(_normalize_alpha_u8(art_alpha), T_art, (H, W)) > 128
     elif mask is not None:
         if not isinstance(mask, np.ndarray) or mask.ndim != 2 or mask.shape != (H, W):
             return None, None
@@ -854,7 +882,8 @@ def load_bundled_alpha(map_name: str | None) -> np.ndarray | None:
 def _art_edges(alpha: np.ndarray, n: int = 2000, seed: int = 0) -> np.ndarray:
     """公式のマップ画像の床の縁の点（0..1 の座標）。"""
     import cv2
-    a = cv2.resize(alpha, (512, 512), interpolation=cv2.INTER_AREA) if alpha.shape[:2] != (512, 512) else alpha
+    a_u8 = _normalize_alpha_u8(alpha)
+    a = cv2.resize(a_u8, (512, 512), interpolation=cv2.INTER_AREA) if a_u8.shape[:2] != (512, 512) else a_u8
     edge = cv2.Canny((a > 128).astype(np.uint8) * 255, 50, 150)
     ys, xs = np.nonzero(edge)
     if len(xs) < 50:
@@ -878,7 +907,18 @@ def _art_inits_from_bounds(
 ) -> list[tuple[float, float, float, float]]:
     """複数の (x0, x1, y0, y1) バウンディングボックス（H 正規化単位）と 4 回転から初期変換候補を生成する。"""
     inits: list[tuple[float, float, float, float]] = []
-    if T0 and not T0.get("mirror") and T0.get("scale"):
+    if (
+        isinstance(T0, dict)
+        and not T0.get("mirror")
+        and all(
+            k in T0
+            and not isinstance(T0[k], (bool, np.bool_))
+            and isinstance(T0[k], (int, float, np.number))
+            and math.isfinite(float(T0[k]))
+            for k in ("theta", "scale", "tx", "ty")
+        )
+        and float(T0["scale"]) > 0.0
+    ):
         inits.append((float(T0["theta"]), float(T0["scale"]), float(T0["tx"]), float(T0["ty"])))
     rot_stats: list[tuple[float, float, float, float, float]] = []
     for k in range(4):
@@ -949,6 +989,9 @@ def _register_art_with_precomputed(
     uv: np.ndarray,
     bounds_list: list[tuple[float, float, float, float]],
     T0: dict | None = None,
+    *,
+    alpha: np.ndarray | None = None,
+    line: np.ndarray | None = None,
 ) -> dict:
     """事前計算済みの距離変換 `dt`・輪郭点 `uv`・初期バウンディングボックスから相似変換を詰める。"""
     cap = 8.0
@@ -1008,6 +1051,19 @@ def _register_art_with_precomputed(
          "method": "art", "inlier": round(inl, 2), "chamfer": round(best[0], 2),
          "confidence": round(max(0.0, min(1.0, (inl - 0.35) / 0.35)), 2)}
     T["ok"] = inl >= 0.5 and best[0] <= 3.5
+    if T["ok"] and alpha is not None and line is not None:
+        import cv2
+        warped = warp_art(_normalize_alpha_u8(alpha), T, (H, W)) > 128
+        cov = float(warped.mean())
+        mm_u8 = warped.astype(np.uint8)
+        edge = (mm_u8 - cv2.erode(mm_u8, np.ones((3, 3), np.uint8))).astype(bool)
+        near_edge = cv2.dilate(edge.astype(np.uint8), np.ones((7, 7), np.uint8)).astype(bool)
+        rev_recall = float((line & near_edge).sum() / max(1, int(line.sum())))
+        lift = rev_recall / max(1e-6, float(near_edge.mean()))
+        ef = _edge_f(warped, line)
+        T["edge_f"] = round(ef, 3)
+        if not (0.05 <= cov <= 0.70) or ef < 0.45 or rev_recall < 0.35 or lift < 1.5:
+            T["ok"] = False
     T["msg"] = (f"ミニマップ合わせ（公式のマップ画像）：回転 {math.degrees(th) % 360:.0f}°・倍率 {s:.2f}"
                 f"（縁の一致 {inl:.0%}・平均のずれ {best[0]:.1f}px）" + ("" if T["ok"] else "（合わず）"))
     return T
@@ -1028,18 +1084,26 @@ def register_art(
     T0（コールアウトと床で合わせた結果）があればそこから、無ければ `_outline` 範囲および
     `mask_hint`（未指定時は `map_mask(bg)`）外接矩形の 90 度ごとの向きから詰める。"""
     import cv2
-    if bg is None or not isinstance(bg, np.ndarray) or bg.size == 0 or bg.ndim < 2:
-        return {"ok": False, "msg": "ミニマップ合わせ（公式の画像）：入力画像が空です"}
-    if alpha is None or not isinstance(alpha, np.ndarray) or alpha.size == 0 or alpha.ndim < 2:
-        return {"ok": False, "msg": "ミニマップ合わせ（公式の画像）：アルファ画像が空です"}
-    H, W = bg.shape[:2]
-    uv = _art_edges(alpha)
-    line = _outline(bg)
-    if len(uv) < 50 or line.sum() < 200:
+    if bg is None or not isinstance(bg, np.ndarray) or bg.size == 0 or bg.ndim != 3 or bg.shape[2] < 3:
+        return {"ok": False, "msg": "ミニマップ合わせ（公式の画像）：入力画像が空または不正です"}
+    if (
+        alpha is None
+        or not isinstance(alpha, np.ndarray)
+        or alpha.size == 0
+        or alpha.ndim != 2
+        or not (alpha.dtype == np.bool_ or np.issubdtype(alpha.dtype, np.number))
+    ):
+        return {"ok": False, "msg": "ミニマップ合わせ（公式の画像）：アルファ画像が空または不正です"}
+    bg_bgr = bg[:, :, :3]
+    alpha_u8 = _normalize_alpha_u8(alpha)
+    H, W = bg_bgr.shape[:2]
+    uv = _art_edges(alpha_u8)
+    line = _outline(bg_bgr)
+    if len(uv) < 50 or line.sum() < 200 or float(line.mean()) > 0.06:
         return {"ok": False, "msg": "ミニマップ合わせ（公式の画像）：縁の線が見つかりません"}
     dt = cv2.distanceTransform((~line).astype(np.uint8), cv2.DIST_L2, 3)
-    bounds_list = _collect_art_bounds(bg, line, mask_hint=mask_hint)
-    return _register_art_with_precomputed(H, W, dt, uv, bounds_list, T0=T0)
+    bounds_list = _collect_art_bounds(bg_bgr, line, mask_hint=mask_hint)
+    return _register_art_with_precomputed(H, W, dt, uv, bounds_list, T0=T0, alpha=alpha_u8, line=line)
 
 
 def register_art_auto(
@@ -1057,25 +1121,29 @@ def register_art_auto(
       最も良い `ok=True` の `(map_name, alpha, T_art)` を返す。
     """
     import cv2
-    if bg is None or not isinstance(bg, np.ndarray) or bg.size == 0 or bg.ndim < 2:
-        return None, None, {"ok": False, "msg": "ミニマップ合わせ（自動）：入力画像が空です"}
+    if bg is None or not isinstance(bg, np.ndarray) or bg.size == 0 or bg.ndim != 3 or bg.shape[2] < 3:
+        return None, None, {"ok": False, "msg": "ミニマップ合わせ（自動）：入力画像が空または不正です"}
 
     if map_name:
         alpha = load_bundled_alpha(map_name)
         if alpha is not None:
+            norm_name = map_name.strip().lower()
             T = register_art(bg, alpha, mask_hint=mask_hint)
-            return map_name.strip().lower(), alpha, T
+            if T.get("ok"):
+                T["map_name"] = norm_name
+            return norm_name, alpha, T
 
     all_alphas = load_all_bundled_alphas()
     if not all_alphas:
         return None, None, {"ok": False, "msg": "ミニマップ合わせ（自動）：同梱アルファパックが見つかりません"}
 
-    H, W = bg.shape[:2]
-    line = _outline(bg)
-    if line.sum() < 200:
+    bg_bgr = bg[:, :, :3]
+    H, W = bg_bgr.shape[:2]
+    line = _outline(bg_bgr)
+    if line.sum() < 200 or float(line.mean()) > 0.06:
         return None, None, {"ok": False, "msg": "ミニマップ合わせ（自動）：縁の線が見つかりません"}
     dt = cv2.distanceTransform((~line).astype(np.uint8), cv2.DIST_L2, 3)
-    bounds_list = _collect_art_bounds(bg, line, mask_hint=mask_hint)
+    bounds_list = _collect_art_bounds(bg_bgr, line, mask_hint=mask_hint)
     if not bounds_list:
         return None, None, {"ok": False, "msg": "ミニマップ合わせ（自動）：初期位置を推定できません"}
 
@@ -1118,7 +1186,7 @@ def register_art_auto(
     def _eval_candidates(cands: list[tuple[float, str, np.ndarray, np.ndarray]], stop_on_ok: bool = False) -> None:
         nonlocal best_ok, best_any, best_any_ch
         for _, name, alpha, uv in cands:
-            T = _register_art_with_precomputed(H, W, dt, uv, bounds_list)
+            T = _register_art_with_precomputed(H, W, dt, uv, bounds_list, alpha=alpha, line=line)
             ch = float(T.get("chamfer", 99.0))
             inl = float(T.get("inlier", 0.0))
             if ch < best_any_ch:
