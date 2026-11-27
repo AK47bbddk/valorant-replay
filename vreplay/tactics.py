@@ -175,13 +175,14 @@ def _rot_metrics(comp_patch: np.ndarray, area: int) -> tuple[float, float]:
 
 def detect_dots(img, min_area: int = 4, max_area: int = 450, per_color: int = 5,
                 icon_frac: float | None = None, *, mask: np.ndarray | None = None,
-                require_minimap: bool = False, edge_tol_px: int | None = None) -> list[dict]:
+                require_minimap: bool = False, edge_tol_px: int | None = None,
+                art_alpha: np.ndarray | None = None, T_art: dict | None = None) -> list[dict]:
     """選手のアイコン（チーム色の縁のついた丸い顔アイコン）を検出する。
 
     縁の色は試合画面の明るさでくすむので色の範囲は広めに取り、アイコン 1 つが縁の切れ目で何個にも割れないよう、
     アイコンの大きさに合わせて塊をつなげてから数える。重なった 2〜3 人は 1 つの大きな塊になるので、大きさから
-    人数（k）も見積もる。``mask`` または ``require_minimap=True`` が指定されたときは、プレイ可能領域
-    （``dot_mask``）外の候補を上位 ``per_color`` の切り捨て前に除外する。"""
+    人数（k）も見積もる。``mask``・``art_alpha``/``T_art`` または ``require_minimap=True`` が指定されたときは、
+    プレイ可能領域（``dot_mask``）外の候補を上位 ``per_color`` の切り捨て前に除外する。"""
     if img is None or not isinstance(img, np.ndarray) or img.size == 0 or img.ndim != 3 or img.shape[2] < 3:
         return []
     if per_color <= 0:
@@ -191,18 +192,23 @@ def detect_dots(img, min_area: int = 4, max_area: int = 450, per_color: int = 5,
         return []
     from . import agent_dots as AD
     eff_icon_frac = AD._sanitize_icon_frac(icon_frac)
+    has_art = bool(art_alpha is not None and isinstance(T_art, dict) and T_art.get("ok"))
     dot_mask = None
     if require_minimap:
         from . import minimap as MM
         ok, auto_mask = MM.detect_minimap_region(img, mask=mask)
         if not ok or auto_mask is None:
             return []
-        _, dot_mask = MM.playable_region(img, mask=auto_mask, tol_px=edge_tol_px)
+        _, dot_mask = MM.playable_region(
+            img, mask=auto_mask, art_alpha=art_alpha, T_art=T_art, tol_px=edge_tol_px
+        )
         if dot_mask is None:
             return []
-    elif mask is not None:
+    elif has_art or mask is not None:
         from . import minimap as MM
-        _, dot_mask = MM.playable_region(img, mask=mask, tol_px=edge_tol_px)
+        _, dot_mask = MM.playable_region(
+            img, mask=mask, art_alpha=art_alpha, T_art=T_art, tol_px=edge_tol_px
+        )
         if dot_mask is None:
             return []
 
@@ -547,15 +553,21 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
         cv2.imwrite(str(bg_path), background, [cv2.IMWRITE_JPEG_QUALITY, 92])
     # 公式のマップ画像の床の縁を放送の白い縁の線に重ねる。重なれば、床・位置合わせはそれを使う
     # （放送の色から作る床は、半透明の床の後ろの試合画面の色で穴が開いたり、床の外に島ができたりする）
-    T_art, art_crop = None, None
+    T_art, art_crop, art_alpha = None, None, None
     T_mask = MM.fit_mask(mask, meta, bg=background) if mask is not None else {"ok": False, "msg": "床が見つかりません"}
-    art = map_art(cfg, meta["name"] or map_name) if meta else None
+    eff_map_name = (meta.get("name") if meta else None) or map_name
+    art = map_art(cfg, eff_map_name) if eff_map_name else None
     if art is not None:
+        art_alpha = art[:, :, 3]
+    elif eff_map_name:
+        art_alpha = MM.load_bundled_alpha(eff_map_name)
+    if art_alpha is not None:
         try:
-            T_art = MM.register_art(background, art[:, :, 3], T_mask if T_mask.get("ok") else None)
+            T_art = MM.register_art(background, art_alpha, T_mask if T_mask.get("ok") else None, mask_hint=mask)
             if T_art.get("ok"):
-                mask = MM.warp_art(art[:, :, 3], T_art, background.shape) > 128
-                art_crop = MM.warp_art(art, T_art, background.shape)
+                mask = MM.warp_art(art_alpha, T_art, background.shape) > 128
+                if art is not None:
+                    art_crop = MM.warp_art(art, T_art, background.shape)
             elif log:
                 log(f"    {T_art['msg']}")
         except Exception as e:
@@ -564,7 +576,7 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
                 log(f"    公式のマップ画像で合わせられませんでした（{e}）")
     near = None
     if mask is not None:
-        _, near = MM.playable_region(background, mask=mask)
+        _, near = MM.playable_region(background, mask=mask, art_alpha=art_alpha, T_art=T_art)
         if near is None:
             dist = cv2.distanceTransform((~mask).astype(np.uint8), cv2.DIST_L2, 3)
             near = dist <= max(3.0, 0.02 * mask.shape[0])
@@ -819,6 +831,8 @@ def analyze_video(cfg: dict, path: Path, map_name: str, rounds: list[dict],
                         aspect=aspect,
                         mask=mask,
                         icon_frac=icon_frac,
+                        art_alpha=art_alpha,
+                        T_art=T_art,
                     )
             except Exception:
                 smokes_by_mark = {}

@@ -254,3 +254,26 @@ def test_detect_smokes_colored_rimmed_domes_mild_darkening_and_max_radius_overri
     assert len(smokes.detect_smokes(fr_small, bg_small, max_radius_px=20, require_minimap=True)) == 1
 
 
+def test_detect_smokes_with_art_alpha_rejects_transparent_void_and_keeps_floor_smoke():
+    H, W = 304, 320
+    art_alpha = np.zeros((512, 512), dtype=np.uint8)
+    art_alpha[64:448, 64:448] = 255
+    art_alpha[210:302, 210:302] = 0  # 中央に透過（非プレイ可能）の壁穴
+    T_art = {"ok": True, "mirror": False, "theta": 0.0, "scale": 1.0, "tx": 0.5 * W / H, "ty": 0.5}
+
+    bg = np.full((H, W, 3), 128, dtype=np.uint8)
+    fr = bg.copy()
+    # 1) プレイ可能床上に真のドームスモーク
+    sx, sy = 100, 100
+    _draw_dome_smoke(fr, sx, sy, 10, (70, 72, 74), alpha=0.75)
+    # 2) 中央の透過壁穴内に偽スモーク（除外されるべき）
+    _draw_dome_smoke(fr, W // 2, H // 2, 10, (70, 72, 74), alpha=0.75)
+    # 3) 外側透過ボイドに偽スモーク（除外されるべき）
+    _draw_dome_smoke(fr, 20, 20, 10, (70, 72, 74), alpha=0.75)
+
+    res = smokes.detect_smokes(fr, bg, art_alpha=art_alpha, T_art=T_art)
+    assert len(res) == 1, res
+    assert abs(res[0]["x"] - sx / W) < 0.04 and abs(res[0]["y"] - sy / H) < 0.04
+
+
+

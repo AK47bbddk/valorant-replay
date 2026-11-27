@@ -672,3 +672,28 @@ def test_detect_dots_edge_cases_and_synthetic_boundaries(tmp_path):
         assert AD.detect_agent_dots(blank, model_path=bad_npz) is None
     finally:
         AD.load_model.cache_clear()
+
+
+def test_detect_dots_with_art_alpha_rejects_dots_in_transparent_wall_hole():
+    H, W = 304, 320
+    art_alpha = np.zeros((512, 512), dtype=np.uint8)
+    art_alpha[64:448, 64:448] = 255
+    # 中央に透過（非プレイ可能）の壁穴を開ける
+    art_alpha[220:292, 220:292] = 0
+    T_art = {"ok": True, "mirror": False, "theta": 0.0, "scale": 1.0, "tx": 0.5 * W / H, "ty": 0.5}
+
+    img = np.full((H, W, 3), 120, dtype=np.uint8)
+    # 1) プレイ可能床の上（左上の通路上）に暖色ドット
+    floor_pt = (105, 100)
+    cv2.circle(img, floor_pt, 7, (10, 10, 250), -1)
+    # 2) 中央の透過壁穴の内部に寒色ドット（除外されるべき）
+    cv2.circle(img, (W // 2, H // 2), 7, (250, 140, 10), -1)
+    # 3) 外側の透過ボイドに暖色ドット（除外されるべき）
+    cv2.circle(img, (22, 22), 7, (10, 10, 250), -1)
+
+    dots = tactics.detect_dots(img, art_alpha=art_alpha, T_art=T_art)
+    assert len(dots) == 1, dots
+    assert dots[0]["color"] == "warm"
+    assert abs(dots[0]["x"] - floor_pt[0] / W) < 0.03
+    assert abs(dots[0]["y"] - floor_pt[1] / H) < 0.03
+

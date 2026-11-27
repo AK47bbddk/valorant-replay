@@ -284,3 +284,83 @@ def test_playable_region_dot_mask_covers_wall_hugging_icon_radius_without_leakin
     # 内部の壁穴中心とマップ外は引き続き除外される
     assert not dot_mask[int(0.66 * 304), int(0.39 * 320)]
     assert not dot_mask[int(0.08 * 304), int(0.08 * 320)]
+
+
+def test_bundled_map_alphas_load_offline_all_13_maps():
+    expected = {
+        "abyss", "ascent", "bind", "breeze", "corrode", "fracture",
+        "haven", "icebox", "lotus", "pearl", "split", "summit", "sunset",
+    }
+    all_alphas = M.load_all_bundled_alphas()
+    assert expected.issubset(all_alphas.keys())
+    for name in expected:
+        a = M.load_bundled_alpha(name.upper())
+        assert a is not None
+        assert a.shape == (512, 512) and a.dtype == np.uint8
+        vals = set(np.unique(a).tolist())
+        assert vals <= {0, 255}
+        frac = float((a > 128).mean())
+        assert 0.20 < frac < 0.50, (name, frac)
+    assert M.load_bundled_alpha("unknown_map_xyz") is None
+    assert M.load_bundled_alpha("") is None
+    assert M.load_bundled_alpha(None) is None
+
+
+def test_playable_region_art_alpha_fast_path_preserves_wall_holes_and_tight_dot_mask():
+    import cv2
+
+    H, W = 304, 320
+    # 512x512 公式アルファ相当のマスク（中央に小さな非プレイ可能柱穴 14x14 相当あり）
+    art_alpha = np.zeros((512, 512), dtype=np.uint8)
+    art_alpha[80:432, 80:432] = 255
+    art_alpha[240:262, 240:262] = 0  # 小さな柱（ヒューリスティック穴埋めなら埋まってしまうサイズ）
+    T_art = {"ok": True, "mirror": False, "theta": 0.0, "scale": 1.0, "tx": 0.5 * W / H, "ty": 0.5}
+
+    # 画像側の柱位置を明るい灰色（床色）で塗り、外周にも白い偽輪郭線を置く
+    img = np.full((H, W, 3), 125, dtype=np.uint8)
+    cv2.line(img, (20, 152), (40, 152), (240, 240, 240), 2)
+
+    fl, dm = M.playable_region(img, art_alpha=art_alpha, T_art=T_art)
+    assert fl is not None and dm is not None
+    # 柱穴はヒューリスティック穴埋めされずに False のまま残る
+    assert not fl[H // 2, W // 2]
+    # 外周の白い偽線付近の透過ボイドに dot_mask が漏れない（_outline バンド拡張スキップ）
+    assert not dm[152, 28]
+    # 床から tol = max(2, round(0.015 * 304)) = 5px 以内は許容、9px 外は拒否
+    floor_left = int(np.nonzero(fl[H // 2, :])[0][0])
+    assert dm[H // 2, floor_left - 4]
+    assert not dm[H // 2, floor_left - 9]
+    # 明示的 tol_px=0 は尊重される
+    fl0, dm0 = M.playable_region(img, art_alpha=art_alpha, T_art=T_art, tol_px=0)
+    assert fl0 is not None and dm0 is not None
+    assert np.array_equal(fl0, dm0)
+
+
+def test_register_art_bbox_init_and_register_art_auto_on_fixtures():
+    from pathlib import Path
+    import cv2
+
+    fx = Path(__file__).parent / "fixtures"
+    for fname, expected_map in (("minimap_split_riot.jpg", "split"), ("minimap_sunset_riot.jpg", "sunset")):
+        img = cv2.imread(str(fx / fname))
+        ok_m, raw_m = M.detect_minimap_region(img)
+        assert ok_m and raw_m is not None
+        alpha = M.load_bundled_alpha(expected_map)
+        assert alpha is not None
+
+        # 1) mask_hint 付き register_art が成功すること
+        T_direct = M.register_art(img, alpha, mask_hint=raw_m)
+        assert T_direct["ok"], (fname, T_direct)
+
+        # 2) map_name 指定の register_art_auto
+        name_k, a_k, T_k = M.register_art_auto(img, map_name=expected_map, mask_hint=raw_m)
+        assert name_k == expected_map and a_k is not None and T_k["ok"]
+
+        # 3) map_name=None の 2 段階自動識別が正しいマップを特定すること
+        name_a, a_a, T_a = M.register_art_auto(img, map_name=None, mask_hint=raw_m)
+        assert name_a == expected_map and a_a is not None and T_a["ok"], (fname, name_a, T_a)
+
+    # 非ミニマップ・空画像は安全に失敗を返す
+    n_bad, a_bad, T_bad = M.register_art_auto(np.zeros((240, 240, 3), dtype=np.uint8))
+    assert n_bad is None and a_bad is None and not T_bad["ok"]
+
