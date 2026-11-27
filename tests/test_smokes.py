@@ -254,3 +254,147 @@ def test_detect_smokes_colored_rimmed_domes_mild_darkening_and_max_radius_overri
     assert len(smokes.detect_smokes(fr_small, bg_small, max_radius_px=20, require_minimap=True)) == 1
 
 
+def test_smoke_detector_load_model_resilience(tmp_path):
+    from vreplay import smoke_detector as SD
+
+    assert SD.load_model(tmp_path / "does_not_exist.npz") is None
+
+    corrupt = tmp_path / "corrupt.npz"
+    corrupt.write_bytes(b"not-a-valid-npz-archive")
+    assert SD.load_model(corrupt) is None
+
+    incomplete = tmp_path / "incomplete.npz"
+    np.savez(str(incomplete), foo=np.array([1, 2, 3], dtype=np.float32))
+    assert SD.load_model(incomplete) is None
+
+    mdl = SD.load_model()
+    assert mdl is not None
+    for key in ("mlp_sf", "mlp_bg", "cnn_sf", "cnn_bg", "thr_sf", "thr_bg"):
+        assert key in mdl
+
+
+def test_smoke_detector_determinism_and_schema():
+    bg = _make_realistic_minimap(304, 320)
+    fr = bg.copy()
+    _draw_dome_smoke(fr, int(0.50 * 320), int(0.50 * 304), 9, (74, 76, 78), alpha=0.75)
+
+    r1 = smokes.detect_smokes(fr, bg, require_minimap=True)
+    r2 = smokes.detect_smokes(fr, bg, require_minimap=True)
+    assert r1 == r2
+    assert len(r1) == 1
+    expected_keys = {"kind", "subkind", "x", "y", "r", "zone", "area", "team", "conf"}
+    for item in r1:
+        assert set(item.keys()) == expected_keys
+        assert item["kind"] == "smoke"
+        assert item["subkind"] == "dome"
+        assert item["team"] is None
+        assert 0.0 <= item["x"] <= 1.0
+        assert 0.0 <= item["y"] <= 1.0
+        assert 0.0 < item["r"] < 0.2
+        assert 0.0 <= item["conf"] <= 1.0
+
+
+def test_smoke_detector_rejects_synthetic_non_smoke_shapes():
+    bg = _make_realistic_minimap(304, 320)
+    fr = bg.copy()
+    # Small saturated ability icon (r=5) + thin 3px dark line + bright square
+    cv2.circle(fr, (int(0.50 * 320), int(0.50 * 304)), 5, (30, 180, 230), -1)
+    cv2.line(fr, (int(0.22 * 320), int(0.49 * 304)), (int(0.32 * 320), int(0.49 * 304)), (70, 70, 70), 3)
+    cv2.rectangle(fr, (int(0.70 * 320), int(0.46 * 304)), (int(0.76 * 320), int(0.52 * 304)), (220, 220, 220), -1)
+    assert smokes.detect_smokes(fr, bg, require_minimap=True) == []
+
+
+def test_detect_smokes_fallback_when_model_unavailable(monkeypatch):
+    from vreplay import smoke_detector as SD
+
+    monkeypatch.setattr(SD, "load_model", lambda path=None: None)
+    bg = _make_realistic_minimap(304, 320)
+    fr = bg.copy()
+    _draw_dome_smoke(fr, int(0.50 * 320), int(0.50 * 304), 9, (74, 76, 78), alpha=0.75)
+
+    res_bg = smokes.detect_smokes(fr, bg, require_minimap=True)
+    res_static = smokes.detect_smokes(fr, fr.copy(), require_minimap=True)
+    assert len(res_bg) == 1
+    assert len(res_static) == 1
+
+
+def test_detect_smokes_rejects_non_finite_radius_overrides():
+    fr = np.full((304, 320, 3), 128, dtype=np.uint8)
+    for bad in (float("nan"), float("inf"), float("-inf"), True):
+        assert smokes.detect_smokes(fr, fr, min_radius_px=bad) == []
+        assert smokes.detect_smokes(fr, fr, max_radius_px=bad) == []
+
+
+def test_detect_smokes_rejects_degenerate_aspect_ratio_fast():
+    import time
+    from vreplay import smoke_detector as SD
+
+    flat = np.full((2, 304, 3), 128, dtype=np.uint8)
+    mask = np.ones((2, 304), dtype=bool)
+
+    t0 = time.perf_counter()
+    assert SD.detect_smokes_learned(flat, None, mask) == []
+    assert smokes.detect_smokes(flat, None, mask=mask) == []
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    assert elapsed_ms < 50.0
+
+
+def test_detect_smokes_rejects_r6_colored_ability_dots():
+    bg = _make_realistic_minimap(304, 320)
+    for col in ((30, 40, 220), (170, 95, 120), (80, 165, 65), (40, 140, 220), (60, 60, 80)):
+        fr = bg.copy()
+        cv2.circle(fr, (160, 152), 6, col, -1, cv2.LINE_AA)
+        assert smokes.detect_smokes(fr, bg, require_minimap=True) == [], col
+
+
+def test_detect_smokes_rejects_rectangular_dark_boxes():
+    bg = _make_realistic_minimap(304, 320)
+    for rw, rh, g in ((18, 18, 90), (30, 18, 75)):
+        fr = bg.copy()
+        x0, y0 = 160 - rw // 2, 152 - rh // 2
+        cv2.rectangle(fr, (x0, y0), (x0 + rw, y0 + rh), (g, g, g), -1)
+        assert smokes.detect_smokes(fr, bg, require_minimap=True) == []
+        assert smokes.detect_smokes(fr, None, require_minimap=True) == []
+        assert smokes.detect_smokes(fr, fr.copy(), require_minimap=True) == []
+
+
+def test_detect_smokes_rejects_non_uint8_inputs():
+    from vreplay import smoke_detector as SD
+
+    bg = _make_realistic_minimap(304, 320)
+    fr_f32 = bg.astype(np.float32)
+    mask = np.ones((304, 320), dtype=bool)
+    assert smokes.detect_smokes(fr_f32, bg, require_minimap=True) == []
+    assert smokes.detect_smokes(bg, fr_f32, require_minimap=True) == []
+    assert SD.detect_smokes_learned(fr_f32, None, mask) == []
+
+
+def test_smoke_detector_load_model_rejects_corrupt_weights_and_shapes(tmp_path):
+    from vreplay import smoke_detector as SD
+
+    with np.load(str(SD.MODEL_PATH), allow_pickle=False) as z:
+        base = {k: z[k].copy() for k in z.files}
+
+    cases = [
+        ("nan_mlp_w1", lambda d: d["mlp_sf_w1_0"].__setitem__((0, 0), np.nan)),
+        ("inf_mlp_w1", lambda d: d["mlp_sf_w1_0"].__setitem__((0, 0), np.inf)),
+        ("zero_mlp_std", lambda d: d["mlp_sf_std"].__setitem__(0, 0.0)),
+        ("pos_inf_cnn_fcb", lambda d: d.__setitem__("cnn_sf_fcb_0", np.array([np.inf], np.float32))),
+        ("nan_thr_bg", lambda d: d.__setitem__("thr_bg", np.float32(np.nan))),
+        ("wrong_cnn_c1b", lambda d: d.__setitem__("cnn_sf_c1b_0", np.zeros((99,), np.float32))),
+        ("wrong_cnn_ksize", lambda d: d.__setitem__("cnn_sf_c1w_0", np.zeros((12, 6, 5, 5), np.float32))),
+        ("zero_cnn_sf_n", lambda d: d.__setitem__("cnn_sf_n", np.int32(0))),
+        ("zero_cnn_bg_n", lambda d: d.__setitem__("cnn_bg_n", np.int32(0))),
+    ]
+    for name, mutate in cases:
+        d = {k: v.copy() for k, v in base.items()}
+        mutate(d)
+        fp = tmp_path / f"{name}.npz"
+        np.savez(str(fp), **d)
+        SD.load_model.cache_clear()
+        assert SD.load_model(fp) is None, name
+
+    SD.load_model.cache_clear()
+    assert SD.load_model() is not None
+
+
