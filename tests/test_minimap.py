@@ -272,3 +272,15 @@ def test_playable_region_strips_offset_hud_rejects_bad_masks_and_keeps_wall_void
     assert M.playable_region(im304, mask=np.ones((120, 120), bool)) == (None, None)
 
 
+def test_playable_region_dot_mask_covers_wall_hugging_icon_radius_without_leaking_wall_void():
+    img = _make_synthetic_minimap(304, 320, bg_col=(25, 60, 140), wall_col=(40, 80, 140), hud=True)
+    floor_mask, dot_mask = M.playable_region(img)
+    assert floor_mask is not None and dot_mask is not None
+    # 壁際 ~1 アイコン半径 (7px) 外側の選手中心を dot_mask がカバーする
+    wall_hug_y = int(0.50 * 304)
+    wall_hug_x = int(0.18 * 320) - 7
+    assert not floor_mask[wall_hug_y, wall_hug_x]
+    assert dot_mask[wall_hug_y, wall_hug_x]
+    # 内部の壁穴中心とマップ外は引き続き除外される
+    assert not dot_mask[int(0.66 * 304), int(0.39 * 320)]
+    assert not dot_mask[int(0.08 * 304), int(0.08 * 320)]
