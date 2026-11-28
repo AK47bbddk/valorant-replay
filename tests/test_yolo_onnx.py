@@ -54,7 +54,7 @@ def test_detect_minimap_objects_filters_transparent_void_and_fallbacks():
         dtype=np.float32,
     )
     fake_sess = SimpleNamespace(
-        get_inputs=lambda: [SimpleNamespace(name="images")],
+        get_inputs=lambda: [SimpleNamespace(name="images", shape=[1, 3, 320, 320])],
         run=lambda _out, _feed: [np.transpose(raw, (0, 2, 1))],
     )
 

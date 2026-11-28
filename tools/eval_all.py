@@ -681,14 +681,26 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", dest="json_out", default="", help="JSON 出力先")
     ap.add_argument("--md", dest="md_out", default="", help="Markdown 出力先")
     ap.add_argument("--preview-html", dest="preview_html", default="", help="目視チェック HTML 出力先")
+    ap.add_argument("--yolo-onnx", dest="yolo_onnx", default="", help="評価に使用する YOLO ONNX モデルパス（任意）")
     args = ap.parse_args(argv)
 
-    rep = evaluate_blind_dir(
-        args.blind_dir,
-        tol=args.tol,
-        limit=args.limit,
-        preview_html=args.preview_html,
-    )
+    import os
+    prev_env = os.environ.get("VREPLAY_YOLO_ONNX")
+    if args.yolo_onnx:
+        os.environ["VREPLAY_YOLO_ONNX"] = str(Path(args.yolo_onnx).resolve())
+    try:
+        rep = evaluate_blind_dir(
+            args.blind_dir,
+            tol=args.tol,
+            limit=args.limit,
+            preview_html=args.preview_html,
+        )
+    finally:
+        if args.yolo_onnx:
+            if prev_env is None:
+                os.environ.pop("VREPLAY_YOLO_ONNX", None)
+            else:
+                os.environ["VREPLAY_YOLO_ONNX"] = prev_env
     md = format_markdown(rep)
     print(md)
 
