@@ -1,11 +1,18 @@
 from __future__ import annotations
 
-import json
-
 from tools import build_playbook_html as PB
 
 
-def test_classify_loud_attack_patterns(tmp_path):
+def test_classify_17_tags_and_multi_match_merge():
+    callouts = [
+        {"super": "A", "name": "Lobby", "x": 0.70, "y": 0.72},
+        {"super": "A", "name": "Main", "x": 0.70, "y": 0.56},
+        {"super": "A", "name": "Art", "x": 0.78, "y": 0.29},
+        {"super": "A", "name": "Link", "x": 0.66, "y": 0.38},
+        {"super": "Mid", "name": "Bottom", "x": 0.52, "y": 0.43},
+        {"super": "B", "name": "Lobby", "x": 0.34, "y": 0.59},
+        {"super": "B", "name": "Main", "x": 0.25, "y": 0.50},
+    ]
     summary = {
         "map_name": "summit",
         "team1": "LOUD",
@@ -18,7 +25,7 @@ def test_classify_loud_attack_patterns(tmp_path):
                 "def_team": "Team Vitality",
                 "raw_gif_file": "r01_raw.gif",
                 "gif_file": "r01_annotated.gif",
-                "n_frames": 10,
+                "n_frames": 12,
                 "timeline": [
                     {
                         "t": 0.0,
@@ -31,36 +38,55 @@ def test_classify_loud_attack_patterns(tmp_path):
                         "smokes": [],
                     },
                     {
-                        "t": 12.0,
-                        "agents": [{"side": "ATK", "agent": "Fade", "x": 0.25, "y": 0.36}],
-                        "smokes": [{"x": 0.22, "y": 0.35, "r": 0.03}],
+                        "t": 22.0,
+                        "agents": [
+                            {"side": "ATK", "agent": "Fade", "x": 0.24, "y": 0.36},
+                            {"side": "ATK", "agent": "Sage", "x": 0.26, "y": 0.40},
+                        ],
+                        "smokes": [{"x": 0.52, "y": 0.44, "r": 0.03}],
                     },
                 ],
             },
             {
-                "round": "R03",
-                "round_num": 3,
+                "round": "R04",
+                "round_num": 4,
                 "atk_team": "LOUD",
                 "def_team": "Team Vitality",
-                "raw_gif_file": "r03_raw.gif",
-                "gif_file": "r03_annotated.gif",
-                "n_frames": 12,
+                "raw_gif_file": "r04_raw.gif",
+                "gif_file": "r04_annotated.gif",
+                "n_frames": 14,
                 "timeline": [
                     {
                         "t": 0.0,
                         "agents": [
-                            {"side": "ATK", "agent": "Omen", "x": 0.70, "y": 0.65},
-                            {"side": "ATK", "agent": "Sage", "x": 0.68, "y": 0.67},
-                            {"side": "ATK", "agent": "Neon", "x": 0.63, "y": 0.70},
-                            {"side": "ATK", "agent": "Fade", "x": 0.36, "y": 0.64},
-                            {"side": "ATK", "agent": "Chamber", "x": 0.34, "y": 0.58},
+                            {"side": "ATK", "agent": "Omen", "x": 0.71, "y": 0.66},
+                            {"side": "ATK", "agent": "Sage", "x": 0.69, "y": 0.63},
+                            {"side": "ATK", "agent": "Chamber", "x": 0.62, "y": 0.71},
+                            {"side": "ATK", "agent": "Fade", "x": 0.67, "y": 0.67},
+                            {"side": "ATK", "agent": "Neon", "x": 0.72, "y": 0.59},
                         ],
                         "smokes": [],
                     },
                     {
                         "t": 12.0,
-                        "agents": [{"side": "ATK", "agent": "Omen", "x": 0.78, "y": 0.42}],
-                        "smokes": [{"x": 0.80, "y": 0.41, "r": 0.03}],
+                        "agents": [
+                            {"side": "ATK", "agent": "Omen", "x": 0.76, "y": 0.45},
+                            {"side": "ATK", "agent": "Sage", "x": 0.78, "y": 0.42},
+                            {"side": "ATK", "agent": "Neon", "x": 0.56, "y": 0.42},
+                            {"side": "ATK", "agent": "Chamber", "x": 0.62, "y": 0.40},
+                        ],
+                        "smokes": [
+                            {"x": 0.74, "y": 0.55, "r": 0.03},  # A Main
+                            {"x": 0.79, "y": 0.30, "r": 0.03},  # A Back
+                            {"x": 0.66, "y": 0.39, "r": 0.03},  # A Link
+                        ],
+                    },
+                    {
+                        "t": 24.0,
+                        "agents": [
+                            {"side": "ATK", "agent": "Omen", "x": 0.82, "y": 0.40},
+                        ],
+                        "smokes": [],
                     },
                 ],
             },
@@ -72,32 +98,32 @@ def test_classify_loud_attack_patterns(tmp_path):
         "team2": "Team Vitality",
         "rounds": [
             {"n": 1, "winner": "Team Vitality", "buy1": "ピストル", "buy2": "ピストル"},
-            {"n": 3, "winner": "LOUD", "buy1": "フル", "buy2": "フル"},
+            {"n": 4, "winner": "LOUD", "buy1": "フル", "buy2": "フル"},
         ],
-        "tactics": {
-            "callouts_placed": [
-                {"super": "A", "name": "Lobby", "x": 0.70, "y": 0.72},
-                {"super": "A", "name": "Main", "x": 0.70, "y": 0.56},
-                {"super": "B", "name": "Lobby", "x": 0.34, "y": 0.59},
-                {"super": "B", "name": "Main", "x": 0.25, "y": 0.50},
-            ]
-        },
+        "tactics": {"callouts_placed": callouts},
     }
 
-    data = PB.classify_rounds(summary, report, team="LOUD", side="ATK")
-    assert data["total_rounds"] == 2
-    by_r = {r["round"]: r for r in data["rounds"]}
-    assert "opening_4_1" in by_r["R01"]["tags"]
-    assert "fade_b" in by_r["R01"]["tags"]
-    assert by_r["R01"]["final_tendency"] == "B 攻め"
+    m1 = PB.classify_rounds(summary, report, team="LOUD", side="ATK", match_id="m1", match_label="vs VIT")
+    merged = PB.merge_classified_matches([m1], team="LOUD", side="ATK")
+    assert merged["total_rounds"] == 2
+    by_r = {r["round"]: r for r in merged["rounds"]}
 
-    assert set(by_r["R03"]["tags"]) >= {"sage_omen_a_main", "fade_b", "fade_chamber_b_main"}
-    assert "opening_4_1" not in by_r["R03"]["tags"]
-    assert by_r["R03"]["won"] is True
-    assert by_r["R03"]["final_tendency"] == "A 攻め"
+    # R01: 4-1 + Fade B + Bottom smoke + B Main Set + B Post-plant
+    assert {"open_4_1", "open_fade_b", "smk_bottom", "mid_b_main_set", "late_b_postplant"} <= set(by_r["R01"]["tags"])
 
-    html_out = PB.render_playbook_html(data)
-    assert "セージ＋オーメンが A メイン" in html_out
-    assert "フェイド＋チェンバーが B メイン" in html_out
-    assert "初動で 4-1" in html_out
-    assert "r03_annotated.gif" in html_out
+    # R04: 5-0 + Sage+Omen A Main + A Main/Back/Link smokes + A Split + A Post-plant
+    assert {
+        "open_5_0",
+        "open_sage_omen_a",
+        "smk_a_main",
+        "smk_a_back",
+        "smk_a_link",
+        "mid_a_split",
+        "late_a_postplant",
+    } <= set(by_r["R04"]["tags"])
+
+    html_out = PB.render_playbook_html(merged)
+    assert "すべて一致 (AND)" in html_out
+    assert "初動で5-0配置" in html_out
+    assert "Aリンク膨らみスモーク" in html_out
+    assert "Aポストプラント" in html_out
