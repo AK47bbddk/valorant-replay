@@ -212,6 +212,17 @@ def detect_dots(img, min_area: int = 4, max_area: int = 450, per_color: int = 5,
         if dot_mask is None:
             return []
 
+    if dot_mask is not None:
+        from . import yolo_onnx as YO
+        y_sess = YO.load_session()
+        if y_sess is not None:
+            yres = YO.detect_minimap_objects(
+                img, session=y_sess, mask=dot_mask, art_alpha=art_alpha, T_art=T_art,
+            )
+            if yres is not None:
+                ags = yres.get("agents") or []
+                return ags[: 2 * per_color]
+
     learned = AD.detect_agent_dots(
         img,
         min_area=min_area,

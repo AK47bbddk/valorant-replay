@@ -212,6 +212,25 @@ def detect_smokes(
                         return []
 
     if floor_mask is not None:
+        from . import yolo_onnx as YO
+        y_sess = YO.load_session()
+        if y_sess is not None:
+            yres = YO.detect_minimap_objects(
+                frame_bgr, session=y_sess, mask=floor_mask, art_alpha=art_alpha, T_art=T_art,
+            )
+            if yres is not None:
+                eff_aspect_y = float(aspect) if aspect is not None else (w / max(1.0, float(h)))
+                out_y: list[dict[str, Any]] = []
+                for s in yres.get("smokes") or []:
+                    z, a = _resolve_zone_area(
+                        s["x"], s["y"],
+                        transform=transform, map_name=map_name,
+                        placed=placed, reg=reg, aspect=eff_aspect_y,
+                    )
+                    out_y.append({**s, "zone": z, "area": a})
+                return out_y
+
+    if floor_mask is not None:
         floor_inner = cv2.erode(floor_mask.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
         if not floor_inner.any():
             floor_inner = floor_mask.copy()

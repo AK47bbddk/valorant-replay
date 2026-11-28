@@ -22,6 +22,11 @@ CLASS_NAMES: dict[int, str] = {
 }
 
 DEFAULT_MODEL_PATH = Path(__file__).resolve().parent / "data" / "minimap_yolo.onnx"
+_EXTRA_MODEL_PATHS = (
+    Path(__file__).resolve().parent / "data" / "minimap_yolo_640.onnx",
+    Path("/content/drive/MyDrive/valorant-replay/minimap_yolo_640.onnx"),
+    Path("/content/drive/MyDrive/valorant-replay/minimap_yolo.onnx"),
+)
 
 
 def resolve_model_path(model_path: str | Path | None = None) -> Path | None:
@@ -33,6 +38,7 @@ def resolve_model_path(model_path: str | Path | None = None) -> Path | None:
     if env_p:
         candidates.append(Path(env_p))
     candidates.append(DEFAULT_MODEL_PATH)
+    candidates.extend(_EXTRA_MODEL_PATHS)
     for p in candidates:
         if p.is_file() and p.stat().st_size > 0:
             return p
@@ -61,6 +67,40 @@ def load_session(model_path: str | Path | None = None) -> Any:
     if p is None:
         return None
     return _load_session_cached(str(p.resolve()))
+
+
+def _infer_imgsz(sess: Any, fallback: int = 640) -> int:
+    try:
+        shape = sess.get_inputs()[0].shape
+        if isinstance(shape, (list, tuple)) and len(shape) >= 4:
+            h_dim = shape[2]
+            if isinstance(h_dim, int) and h_dim >= 64:
+                return int(h_dim)
+    except Exception:
+        pass
+    return int(fallback)
+
+
+def _classify_dot_color(frame_bgr: np.ndarray, x: float, y: float, nw: float, nh: float) -> str:
+    """エージェントアイコン周辺の HSV から warm（赤/橙/黄）か cool（青/シアン/緑）を判定する。"""
+    h, w = frame_bgr.shape[:2]
+    cx = int(round(x * w))
+    cy = int(round(y * h))
+    rad = max(4, int(round(0.5 * max(nw * w, nh * h))))
+    x1, y1 = max(0, cx - rad), max(0, cy - rad)
+    x2, y2 = min(w, cx + rad + 1), min(h, cy + rad + 1)
+    patch = frame_bgr[y1:y2, x1:x2, :3]
+    if patch.size == 0:
+        return "warm"
+    hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+    hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    vivid = (sat >= 70) & (val >= 70)
+    if not np.any(vivid):
+        return "warm"
+    h_v = hue[vivid]
+    warm_n = int(np.count_nonzero((h_v <= 28) | (h_v >= 155)))
+    cool_n = int(np.count_nonzero((h_v >= 70) & (h_v <= 135)))
+    return "warm" if warm_n >= cool_n else "cool"
 
 
 def letterbox(
@@ -203,8 +243,11 @@ def detect_minimap_objects(
     *,
     session: Any = None,
     model_path: str | Path | None = None,
-    imgsz: int = 320,
-    conf_thres: float = 0.35,
+    imgsz: int | None = None,
+    conf_thres: float | None = None,
+    agent_conf: float = 0.25,
+    smoke_conf: float = 0.30,
+    ability_conf: float = 0.30,
     iou_thres: float = 0.45,
     mask: np.ndarray | None = None,
     art_alpha: np.ndarray | None = None,
@@ -233,7 +276,13 @@ def detect_minimap_objects(
         floor_mask = mask.astype(bool)
         dot_mask = floor_mask
 
-    padded, ratio, pad = letterbox(frame_bgr[:, :, :3], new_shape=int(imgsz))
+    eff_imgsz = int(imgsz) if imgsz is not None else _infer_imgsz(sess, fallback=640)
+    eff_a = float(conf_thres) if conf_thres is not None else float(agent_conf)
+    eff_s = float(conf_thres) if conf_thres is not None else float(smoke_conf)
+    eff_ab = float(conf_thres) if conf_thres is not None else float(ability_conf)
+    min_c = min(eff_a, eff_s, eff_ab)
+
+    padded, ratio, pad = letterbox(frame_bgr[:, :, :3], new_shape=eff_imgsz)
     rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
     blob = np.transpose(rgb, (2, 0, 1))[None, ...]
 
@@ -246,7 +295,7 @@ def detect_minimap_objects(
         return None
 
     dets = decode_yolo_output(
-        outputs[0], (h, w), ratio, pad, conf_thres=conf_thres, iou_thres=iou_thres,
+        outputs[0], (h, w), ratio, pad, conf_thres=min_c, iou_thres=iou_thres,
     )
 
     agents: list[dict[str, Any]] = []
@@ -255,11 +304,21 @@ def detect_minimap_objects(
     for d in dets:
         cid = d["class_id"]
         if cid == 0:
-            if not _in_mask(dot_mask, d["x"], d["y"]):
+            if d["conf"] < eff_a or not _in_mask(dot_mask, d["x"], d["y"]):
                 continue
-            agents.append(d)
+            w_px = max(4, int(round(d["w"] * w)))
+            h_px = max(4, int(round(d["h"] * h)))
+            agents.append({
+                **d,
+                "color": _classify_dot_color(frame_bgr, d["x"], d["y"], d["w"], d["h"]),
+                "score": d["conf"],
+                "area": w_px * h_px,
+                "k": 1,
+                "w_px": w_px,
+                "h_px": h_px,
+            })
         elif cid == 1:
-            if not _in_mask(floor_mask, d["x"], d["y"]):
+            if d["conf"] < eff_s or not _in_mask(floor_mask, d["x"], d["y"]):
                 continue
             smokes.append({
                 "kind": "smoke",
@@ -273,7 +332,7 @@ def detect_minimap_objects(
                 "conf": d["conf"],
             })
         else:
-            if not _in_mask(dot_mask, d["x"], d["y"]):
+            if d["conf"] < eff_ab or not _in_mask(dot_mask, d["x"], d["y"]):
                 continue
             abilities.append(d)
 
