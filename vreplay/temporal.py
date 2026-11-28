@@ -561,6 +561,7 @@ def correct_smokes_sequence(
     bridge_min_conf: float = 0.55,
     aspect: float = 1.0,
     min_duration_sec: float = 0.0,
+    max_duration_sec: float = 0.0,
     controller_agents: list[str] | None = None,
     max_active_smokes: int | None = None,
 ) -> list[list[dict[str, Any]]]:
@@ -584,6 +585,7 @@ def correct_smokes_sequence(
     if bridge_c is None:
         bridge_c = 0.55
     min_dur = max(0.0, _finite_float(min_duration_sec, 0.0) or 0.0)
+    max_dur = max(0.0, _finite_float(max_duration_sec, 0.0) or 0.0)
 
     ts: list[float] = []
     valid: list[bool] = []
@@ -676,8 +678,8 @@ def correct_smokes_sequence(
             result[i].append(bridged)
         result[i].sort(key=lambda s: float(_finite_float(s.get("conf"), 0.0) or 0.0), reverse=True)
 
-    # Pass 3: Stationary persistence duration filter (dome smokes persist 13.5-19.25s)
-    if min_dur > 0.0 and n >= 2:
+    # Pass 3: Stationary persistence duration filter (dome smokes persist ~13.5-19.25s, never > max_dur)
+    if (min_dur > 0.0 or max_dur > 0.0) and n >= 2:
         tracks: list[list[tuple[int, int]]] = []
         active_tid: dict[tuple[int, int], int] = {}
         for i in range(n):
@@ -714,7 +716,9 @@ def correct_smokes_sequence(
         for tr in tracks:
             t_span = ts[tr[-1][0]] - ts[tr[0][0]]
             peak_c = max(float(_finite_float(result[fi][si].get("conf"), 0.0) or 0.0) for fi, si in tr)
-            if t_span + 1e-6 < min_dur and peak_c < supp_c:
+            if min_dur > 0.0 and t_span + 1e-6 < min_dur and peak_c < supp_c:
+                drop_nodes.update(tr)
+            if max_dur > 0.0 and t_span > max_dur + 1e-6:
                 drop_nodes.update(tr)
         if drop_nodes:
             for i in range(n):

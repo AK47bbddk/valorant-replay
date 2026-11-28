@@ -406,3 +406,22 @@ def test_smokes_persistence_duration_and_comp_cap():
     # Cap to 1 active smoke
     out_cap1 = TMP.correct_smokes_sequence(frames, controller_agents=["Viper"])
     assert len(out_cap1[1]) == 1 and out_cap1[1][0]["conf"] == 0.75
+
+
+def test_smokes_max_duration_drops_static_ability_fp():
+    # Static ability FP at (0.2, 0.2) persists 30s (t=0..30), real dome smoke at (0.6, 0.6) persists 16s (t=4..20)
+    frames = []
+    for k in range(16):
+        t = float(k * 2)
+        sms = [{"x": 0.2, "y": 0.2, "r": 0.03, "conf": 0.90}]
+        if 4.0 <= t <= 20.0:
+            sms.append({"x": 0.6, "y": 0.6, "r": 0.03, "conf": 0.80})
+        frames.append({"t": t, "valid": True, "smokes": sms})
+    out = TMP.correct_smokes_sequence(frames, max_duration_sec=22.0)
+    # 30s static marker must be dropped from every frame; 16s dome smoke must survive on t=4..20
+    for k, fs in enumerate(out):
+        t = float(k * 2)
+        assert all(abs(s["x"] - 0.2) > 0.05 for s in fs)
+        if 4.0 <= t <= 20.0:
+            assert any(abs(s["x"] - 0.6) < 1e-6 for s in fs)
+
