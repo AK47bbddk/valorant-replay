@@ -31,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--data", required=True, help="YOLO data.yaml のパス")
     ap.add_argument("--model", default="yolo11n.pt", help="ベースモデル (例: yolo11n.pt, yolov8n.pt)")
     ap.add_argument("--epochs", type=int, default=120, help="エポック数")
-    ap.add_argument("--imgsz", type=int, default=320, help="入力解像度")
+    ap.add_argument("--imgsz", type=int, default=640, help="入力解像度（小アイコン向けに 640 推奨）")
     ap.add_argument("--batch", type=int, default=16, help="バッチサイズ")
     ap.add_argument("--device", default="0", help="学習デバイス (0=GPU, cpu=CPU)")
     ap.add_argument("--project", default="_work/yolo_runs", help="学習ログ出力先")
@@ -56,6 +56,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    project_dir = str(Path(args.project).resolve())
     model = YOLO(args.model)
     model.train(
         data=str(data_yaml),
@@ -63,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         imgsz=args.imgsz,
         batch=args.batch,
         device=args.device,
-        project=args.project,
+        project=project_dir,
         name=args.name,
         # ミニマップでは上下反転・回転・小スケール劣化に強くする
         degrees=15.0,
@@ -75,7 +76,8 @@ def main(argv: list[str] | None = None) -> int:
         hsv_v=0.25,
     )
 
-    best_pt = Path(args.project) / args.name / "weights" / "best.pt"
+    save_dir = Path(getattr(getattr(model, "trainer", None), "save_dir", Path(project_dir) / args.name))
+    best_pt = save_dir / "weights" / "best.pt"
     if not best_pt.is_file():
         print(f"best.pt が見つかりません: {best_pt}", file=sys.stderr)
         return 1
